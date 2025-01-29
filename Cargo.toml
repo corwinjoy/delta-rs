@@ -26,35 +26,38 @@ debug = true
 debug = "line-tables-only"
 
 [workspace.dependencies]
-delta_kernel = { version = "=0.6.0", features = ["default-engine"] }
-#delta_kernel = { path = "../delta-kernel-rs/kernel", features = ["sync-engine"]  }
+# delta_kernel = { version = "=0.6.0", features = ["default-engine"] }
+# delta_kernel = { path = "../delta-kernel-rs/kernel", features = ["sync-engine"]  }
+delta_kernel = { git = "https://github.com/corwinjoy/delta-kernel-rs.git", branch = "encryption-basics", features = ["default-engine"]}
 
 # arrow
-arrow = { version = "53" }
-arrow-arith = { version = "53" }
-arrow-array = { version = "53", features = ["chrono-tz"] }
-arrow-buffer = { version = "53" }
-arrow-cast = { version = "53" }
-arrow-ipc = { version = "53" }
-arrow-json = { version = "53" }
-arrow-ord = { version = "53" }
-arrow-row = { version = "53" }
-arrow-schema = { version = "53" }
-arrow-select = { version = "53" }
-object_store = { version = "0.11.2" , features = ["cloud"]}
-parquet = { version = "53" }
+arrow = {  git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
+arrow-arith = { git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
+arrow-array = {  git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics", features = ["chrono-tz"] }
+arrow-buffer = {  git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
+arrow-cast = {  git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
+arrow-ipc = {  git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics"}
+arrow-json = {  git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
+arrow-ord = {  git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
+arrow-row = {  git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
+arrow-schema = {  git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
+arrow-select = {  git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
+# object_store = { git = "https://github.com/rok/arrow-rs.git" , features = ["cloud"]}
+object_store = {version="0.11.2"  , features = ["cloud"]}
+# parquet = { version = "53" }
+parquet = { git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
 
 # datafusion
-datafusion = { version = "44" }
-datafusion-expr = { version = "44" }
-datafusion-common = { version = "44" }
-datafusion-ffi = { version = "44" }
-datafusion-functions = { version = "44" }
-datafusion-functions-aggregate = { version = "44" }
-datafusion-physical-expr = { version = "44" }
-datafusion-physical-plan = { version = "44" }
-datafusion-proto = { version = "44" }
-datafusion-sql = { version = "44" }
+datafusion = { git = "https://github.com/corwinjoy/datafusion.git", branch = "encryption-basics" }
+datafusion-expr = { git = "https://github.com/corwinjoy/datafusion.git", branch = "encryption-basics" }
+datafusion-common = { git = "https://github.com/corwinjoy/datafusion.git", branch = "encryption-basics" }
+datafusion-ffi = { git = "https://github.com/corwinjoy/datafusion.git", branch = "encryption-basics" }
+datafusion-functions = { git = "https://github.com/corwinjoy/datafusion.git", branch = "encryption-basics" }
+datafusion-functions-aggregate = { git = "https://github.com/corwinjoy/datafusion.git", branch = "encryption-basics" }
+datafusion-physical-expr = { git = "https://github.com/corwinjoy/datafusion.git", branch = "encryption-basics" }
+datafusion-physical-plan = { git = "https://github.com/corwinjoy/datafusion.git", branch = "encryption-basics" }
+datafusion-proto = { git = "https://github.com/corwinjoy/datafusion.git", branch = "encryption-basics" }
+datafusion-sql = { git = "https://github.com/corwinjoy/datafusion.git", branch = "encryption-basics" }
 
 # serde
 serde = { version = "1.0.194", features = ["derive"] }

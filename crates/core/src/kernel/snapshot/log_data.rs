@@ -634,10 +634,13 @@ mod datafusion {
                 _ => max_value,
             };
 
+            let sum_value = Precision::Absent;
+
             Ok(ColumnStatistics {
                 null_count,
                 max_value,
                 min_value,
+                sum_value,
                 distinct_count: Precision::Absent,
             })
         }
@@ -653,6 +656,7 @@ mod datafusion {
                 null_count: self.null_count.add(&other.null_count),
                 max_value: self.max_value.max(&other.max_value),
                 min_value: self.min_value.min(&other.min_value),
+                sum_value: self.sum_value.add(&other.sum_value),
                 distinct_count: self.distinct_count.add(&other.distinct_count),
             }
         }

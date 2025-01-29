@@ -10,7 +10,7 @@ use datafusion::datasource::file_format::parquet::ParquetFormat;
 use datafusion::datasource::file_format::FileFormat;
 use datafusion::datasource::physical_plan::FileScanConfig;
 use datafusion::prelude::SessionContext;
-use datafusion_common::{ScalarValue, Statistics};
+use datafusion_common::{Constraints, ScalarValue, Statistics};
 use datafusion_physical_expr::expressions;
 use datafusion_physical_expr::PhysicalExpr;
 use datafusion_physical_plan::projection::ProjectionExec;
@@ -394,6 +394,7 @@ impl CdfLoadBuilder {
                     limit: None,
                     table_partition_cols: cdc_partition_cols,
                     output_ordering: vec![],
+                    constraints: Constraints::empty()
                 },
                 None,
             )
@@ -411,6 +412,7 @@ impl CdfLoadBuilder {
                     limit: None,
                     table_partition_cols: add_remove_partition_cols.clone(),
                     output_ordering: vec![],
+                    constraints: Constraints::empty()
                 },
                 None,
             )
@@ -428,6 +430,7 @@ impl CdfLoadBuilder {
                     limit: None,
                     table_partition_cols: add_remove_partition_cols,
                     output_ordering: vec![],
+                    constraints: Constraints::empty()
                 },
                 None,
             )

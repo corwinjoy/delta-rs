@@ -50,10 +50,7 @@ use datafusion::execution::FunctionRegistry;
 use datafusion::physical_optimizer::pruning::PruningPredicate;
 use datafusion_common::scalar::ScalarValue;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
-use datafusion_common::{
-    config::ConfigOptions, Column, DFSchema, DataFusionError, Result as DataFusionResult,
-    TableReference, ToDFSchema,
-};
+use datafusion_common::{config::ConfigOptions, Column, Constraints, DFSchema, DataFusionError, Result as DataFusionResult, TableReference, ToDFSchema};
 use datafusion_expr::execution_props::ExecutionProps;
 use datafusion_expr::logical_plan::CreateExternalTable;
 use datafusion_expr::utils::conjunction;
@@ -664,6 +661,7 @@ impl<'a> DeltaScanBuilder<'a> {
             limit: self.limit,
             table_partition_cols,
             output_ordering: vec![],
+            constraints: Constraints::empty()
         })
         .with_schema_adapter_factory(Arc::new(DeltaSchemaAdapterFactory {}))
         .with_table_parquet_options(parquet_options);

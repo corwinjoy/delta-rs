@@ -310,6 +310,8 @@ impl PartitionWriter {
         stats_columns: Option<Vec<String>>,
     ) -> DeltaResult<Self> {
         let buffer = ShareableBuffer::default();
+
+        // Here is where the low-level parquet writer is configured
         let arrow_writer = ArrowWriter::try_new(
             buffer.clone(),
             config.file_schema.clone(),
@@ -354,6 +356,7 @@ impl PartitionWriter {
     }
 
     fn write_batch(&mut self, batch: &RecordBatch) -> DeltaResult<()> {
+        // Where the write happens
         Ok(self.arrow_writer.write(batch)?)
     }
 
