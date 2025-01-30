@@ -10,7 +10,7 @@ use deltalake::parquet::{
     basic::{Compression, ZstdLevel},
     file::properties::WriterProperties,
 };
-use deltalake::{protocol::SaveMode, DeltaOps};
+use deltalake::{parquet, protocol::SaveMode, DeltaOps};
 
 use std::sync::Arc;
 
@@ -90,8 +90,13 @@ async fn main() -> Result<(), deltalake::errors::DeltaTableError> {
 
     assert_eq!(table.version(), 0);
 
+    let key: Vec<_> = b"password".to_vec();
+    let crypt = parquet::encryption::encryption::
+        FileEncryptionProperties::builder(key).build().unwrap();
+
     let writer_properties = WriterProperties::builder()
         // .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
+        .set_file_encryption_properties(crypt)
         .build();
 
     let batch = get_table_batches();
