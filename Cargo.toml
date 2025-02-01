@@ -27,37 +27,41 @@ debug = "line-tables-only"
 
 [workspace.dependencies]
 # delta_kernel = { version = "=0.6.0", features = ["default-engine"] }
-# delta_kernel = { path = "../delta-kernel-rs/kernel", features = ["sync-engine"]  }
-delta_kernel = { git = "https://github.com/corwinjoy/delta-kernel-rs.git", branch = "encryption-basics", features = ["default-engine"]}
+# delta_kernel-acceptance = { path = "../delta-kernel-rs/acceptance", features = ["default-engine"]  }
+# delta_kernel-kernel = { path = "../delta-kernel-rs/kernel", features = ["default-engine"]  }
+delta_kernel = { path = "../delta-kernel-rs/kernel", features = ["default-engine"]  }
+# delta_kernel = { git = "https://github.com/corwinjoy/delta-kernel-rs.git", branch = "encryption-basics", features = ["default-engine"]}
 
 # arrow
-arrow = {  git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
-arrow-arith = { git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
-arrow-array = {  git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics", features = ["chrono-tz"] }
-arrow-buffer = {  git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
-arrow-cast = {  git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
-arrow-ipc = {  git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics"}
-arrow-json = {  git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
-arrow-ord = {  git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
-arrow-row = {  git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
-arrow-schema = {  git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
-arrow-select = {  git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
+# arrow = {  git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
+arrow = {  path = "../arrow-rs/arrow" }
+arrow-arith = { path = "../arrow-rs/arrow-arith" }
+arrow-array = {  path = "../arrow-rs/arrow-array", features = ["chrono-tz"] }
+arrow-buffer = {  path = "../arrow-rs/arrow-buffer" }
+arrow-cast = {  path = "../arrow-rs/arrow-cast" }
+arrow-ipc = {  path = "../arrow-rs/arrow-ipc"}
+arrow-json = {  path = "../arrow-rs/arrow-json" }
+arrow-ord = {  path = "../arrow-rs/arrow-ord" }
+arrow-row = {  path = "../arrow-rs/arrow-row" }
+arrow-schema = {  path = "../arrow-rs/arrow-schema"}
+arrow-select = {  path = "../arrow-rs/arrow-select" }
 # object_store = { git = "https://github.com/rok/arrow-rs.git" , features = ["cloud"]}
 object_store = {version="0.11.2"  , features = ["cloud"]}
 # parquet = { version = "53" }
-parquet = { git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
+parquet = { path = "../arrow-rs/parquet" }
 
 # datafusion
-datafusion = { git = "https://github.com/corwinjoy/datafusion.git", branch = "encryption-basics" }
-datafusion-expr = { git = "https://github.com/corwinjoy/datafusion.git", branch = "encryption-basics" }
-datafusion-common = { git = "https://github.com/corwinjoy/datafusion.git", branch = "encryption-basics" }
-datafusion-ffi = { git = "https://github.com/corwinjoy/datafusion.git", branch = "encryption-basics" }
-datafusion-functions = { git = "https://github.com/corwinjoy/datafusion.git", branch = "encryption-basics" }
-datafusion-functions-aggregate = { git = "https://github.com/corwinjoy/datafusion.git", branch = "encryption-basics" }
-datafusion-physical-expr = { git = "https://github.com/corwinjoy/datafusion.git", branch = "encryption-basics" }
-datafusion-physical-plan = { git = "https://github.com/corwinjoy/datafusion.git", branch = "encryption-basics" }
-datafusion-proto = { git = "https://github.com/corwinjoy/datafusion.git", branch = "encryption-basics" }
-datafusion-sql = { git = "https://github.com/corwinjoy/datafusion.git", branch = "encryption-basics" }
+# datafusion = { git = "https://github.com/corwinjoy/datafusion.git", branch = "encryption-basics" }
+datafusion = { path = "../datafusion/datafusion/core" }
+datafusion-expr = { path = "../datafusion/datafusion/expr" }
+datafusion-common = { path = "../datafusion/datafusion/common" }
+datafusion-ffi = { path = "../datafusion/datafusion/ffi" }
+datafusion-functions = { path = "../datafusion/datafusion/functions" }
+datafusion-functions-aggregate = { path = "../datafusion/datafusion/functions-aggregate"}
+datafusion-physical-expr = { path = "../datafusion/datafusion/physical-expr" }
+datafusion-physical-plan = { path = "../datafusion/datafusion/physical-plan" }
+datafusion-proto = { path = "../datafusion/datafusion/proto" }
+datafusion-sql = { path = "../datafusion/datafusion/sql" }
 
 # serde
 serde = { version = "1.0.194", features = ["derive"] }
