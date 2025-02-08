@@ -11,6 +11,7 @@ use object_store::{Error as ObjectStoreError, ObjectMeta, ObjectStore};
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
 use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
 use parquet::arrow::ProjectionMask;
+use parquet::encryption::decryption::FileDecryptionProperties;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
@@ -263,7 +264,8 @@ impl LogSegment {
                 async move {
                     let mut reader = ParquetObjectReader::new(store, meta);
                     let options = ArrowReaderOptions::new();
-                    let reader_meta = ArrowReaderMetadata::load_async(&mut reader, options).await?;
+                    let fd: Option<&FileDecryptionProperties> = None;
+                    let reader_meta = ArrowReaderMetadata::load_async(&mut reader, options, fd).await?;
 
                     // Create projection selecting read_schema fields from parquet file's arrow schema
                     let projection = reader_meta
