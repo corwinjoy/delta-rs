@@ -13,6 +13,8 @@ use deltalake::parquet::{
 use deltalake::{parquet, protocol::SaveMode, DeltaOps};
 
 use std::sync::Arc;
+use deltalake::datafusion::prelude::SessionConfig;
+use deltalake_core::datafusion::config::ConfigFileDecryptionProperties;
 
 fn get_table_columns() -> Vec<StructField> {
     vec![
@@ -92,7 +94,7 @@ async fn main() -> Result<(), deltalake::errors::DeltaTableError> {
 
     let key: Vec<_> = b"password".to_vec();
     let crypt = parquet::encryption::encryption::
-        FileEncryptionProperties::builder(key).build().unwrap();
+        FileEncryptionProperties::builder(key.clone()).build().unwrap();
 
     let writer_properties = WriterProperties::builder()
         // .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
@@ -123,7 +125,16 @@ async fn main() -> Result<(), deltalake::errors::DeltaTableError> {
 
      */
 
-    let (_table, stream) = DeltaOps(table).load().await?;
+    let mut config = SessionConfig::new();
+    config.options_mut().execution.batch_size = 1234;
+    config.options_mut().execution.parquet.pushdown_filters = true;
+
+
+    let fd = ConfigFileDecryptionProperties {footer_key: String::from_utf8(key).unwrap(),
+        ..Default::default()};
+    let mut sc = SessionConfig::new();
+    sc.options_mut().execution.parquet.file_decryption_properties = Some(fd);
+    let (_table, stream) = DeltaOps(table).load().with_session_config(sc).await?;
     let data: Vec<RecordBatch> = collect_sendable_stream(stream).await?;
 
     println!("{:?}", data);
