@@ -15,6 +15,7 @@ use deltalake::{parquet, protocol::SaveMode, DeltaOps};
 use std::sync::Arc;
 use deltalake::datafusion::prelude::SessionConfig;
 use deltalake_core::datafusion::config::ConfigFileDecryptionProperties;
+use deltalake_core::{DeltaTable, DeltaTableError};
 
 fn get_table_columns() -> Vec<StructField> {
     vec![
@@ -64,17 +65,7 @@ fn get_table_batches() -> RecordBatch {
     .unwrap()
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), deltalake::errors::DeltaTableError> {
-    // Create a delta operations client pointing at an un-initialized location.
-    /*
-    let ops = if let Ok(table_uri) = std::env::var("TABLE_URI") {
-        DeltaOps::try_from_uri(table_uri).await?
-    } else {
-        DeltaOps::new_in_memory()
-    };
-     */
-    let uri = "/home/cjoy/src/dl_benchmark/delta-rs/crates/deltalake/examples/tmp_tbl";
+async fn create_table(uri: &str, table_name: &str, key: &Vec<u8>) -> Result<DeltaTable, DeltaTableError> {
     fs::remove_dir_all(uri)?;
     let ops = DeltaOps::try_from_uri(uri).await?;
 
@@ -86,15 +77,15 @@ async fn main() -> Result<(), deltalake::errors::DeltaTableError> {
         .create()
         .with_columns(get_table_columns())
         // .with_partition_columns(["timestamp"])
-        .with_table_name("my_table")
+        .with_table_name(table_name)
         .with_comment("A table to show how delta-rs works")
         .await?;
 
     assert_eq!(table.version(), 0);
 
-    let key: Vec<_> = b"password".to_vec();
+
     let crypt = parquet::encryption::encryption::
-        FileEncryptionProperties::builder(key.clone()).build().unwrap();
+    FileEncryptionProperties::builder(key.clone()).build().unwrap();
 
     let writer_properties = WriterProperties::builder()
         // .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
@@ -124,12 +115,61 @@ async fn main() -> Result<(), deltalake::errors::DeltaTableError> {
     assert_eq!(table.version(), 2);
 
      */
+    Ok(table)
+}
 
-    let mut config = SessionConfig::new();
-    config.options_mut().execution.batch_size = 1234;
-    config.options_mut().execution.parquet.pushdown_filters = true;
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), deltalake::errors::DeltaTableError> {
+    // Create a delta operations client pointing at an un-initialized location.
+    /*
+    let ops = if let Ok(table_uri) = std::env::var("TABLE_URI") {
+        DeltaOps::try_from_uri(table_uri).await?
+    } else {
+        DeltaOps::new_in_memory()
+    };
+     */
+
+    // let uri = "/home/cjoy/src/dl_benchmark/delta-rs/crates/deltalake/examples/tmp_tbl";
+    // let table_name = "my_table";
+
+    let uri = "/home/cjoy/src/delta-rs-with-encryption/delta-rs/crates/deltalake/examples/encrypted";
+    let table_name = "deltars_table";
+    // let key: Vec<_> = b"password".to_vec();
+
+    const FOOTER_KEY: &[u8] = b"0123456789112345";
+    const FOOTER_KEY_NAME: &str = "footer_key";
+    const COL_KEY: &[u8] = b"1234567890123450";
+    const COL_KEY_NAME: &str = "col_key";
+
+    let key: Vec<_> = FOOTER_KEY.to_vec();
+
+    /*
+    def create_encryption_config(df):
+        return pe.EncryptionConfiguration(
+            footer_key=FOOTER_KEY_NAME,
+            column_keys={
+                COL_KEY_NAME: df.columns.tolist(),
+            })
+
+    column_keys = {'col_key': ['x0', 'x1', 'x2', 'x3', 'x4', 'x5', 'x6', 'x7', 'x8', 'x9', 'x10',
+                               'x11', 'x12', 'x13', 'x14', 'x15', 'x16', 'x17', 'x18', 'x19']}
+
+    def create_kms_connection_config():
+        return pe.KmsConnectionConfig(
+            custom_kms_conf={
+                FOOTER_KEY_NAME: FOOTER_KEY.decode("UTF-8"),
+                COL_KEY_NAME: COL_KEY.decode("UTF-8"),
+            }
+        )
 
 
+     */
+
+    // create_table(uri, table_name, &key).await?;
+
+    let uri_table = String::from(uri) + "/" + table_name;
+
+    let table = deltalake::open_table(uri_table).await?;
     let fd = ConfigFileDecryptionProperties {footer_key: String::from_utf8(key).unwrap(),
         ..Default::default()};
     let mut sc = SessionConfig::new();
@@ -141,3 +181,5 @@ async fn main() -> Result<(), deltalake::errors::DeltaTableError> {
 
     Ok(())
 }
+
+
