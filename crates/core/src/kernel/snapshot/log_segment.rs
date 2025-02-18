@@ -264,8 +264,7 @@ impl LogSegment {
                 async move {
                     let mut reader = ParquetObjectReader::new(store, meta);
                     let options = ArrowReaderOptions::new();
-                    let fd: Option<&FileDecryptionProperties> = None;
-                    let reader_meta = ArrowReaderMetadata::load_async(&mut reader, options, fd).await?;
+                    let reader_meta = ArrowReaderMetadata::load_async(&mut reader, options).await?;
 
                     // Create projection selecting read_schema fields from parquet file's arrow schema
                     let projection = reader_meta
