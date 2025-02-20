@@ -180,7 +180,7 @@ async fn main() -> Result<(), deltalake::errors::DeltaTableError> {
         column_keys.insert(hex::encode(key.clone()), hex::encode(value.clone()));
     }
 
-    let eck = EncryptionColumnKeys{column_keys};
+    let eck = EncryptionColumnKeys{ column_keys_as_hex: column_keys };
     let json_col_keys = serde_json::to_string(&eck)?;
     // let json_col_keys = String::new();
 
