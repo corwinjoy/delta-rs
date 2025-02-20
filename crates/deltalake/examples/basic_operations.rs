@@ -213,8 +213,8 @@ async fn main() -> Result<(), deltalake::errors::DeltaTableError> {
     let uri_table = String::from(uri) + "/" + table_name;
 
     let table = deltalake::open_table(uri_table).await?;
-    let fd = ConfigFileDecryptionProperties {footer_key: hex::encode(key),
-        column_keys: json_col_keys,
+    let fd = ConfigFileDecryptionProperties {footer_key_as_hex: hex::encode(key),
+        column_keys_as_json_hex: json_col_keys,
         ..Default::default()};
     let mut sc = SessionConfig::new();
     sc.options_mut().execution.parquet.file_decryption_properties = Some(fd);
