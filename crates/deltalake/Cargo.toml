@@ -24,6 +24,8 @@ deltalake-hdfs = { version = "0.8.0", path = "../hdfs", optional = true }
 deltalake-lakefs = { version = "0.7.0", path = "../lakefs", optional = true }
 deltalake-catalog-glue = { version = "0.8.0", path = "../catalog-glue", optional = true }
 deltalake-catalog-unity = { version = "0.8.0", path = "../catalog-unity", optional = true }
+serde_json = "1.0.138"
+hex = "0.4.3"
 
 
 [features]
