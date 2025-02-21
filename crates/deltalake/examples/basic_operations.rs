@@ -170,48 +170,10 @@ async fn main() -> Result<(), deltalake::errors::DeltaTableError> {
         .build()
         .unwrap();
 
-
-    let mut column_keys: HashMap<String, String> = HashMap::new();
-
-    let mut count = 1;
-    for (key, value) in decryption_properties.column_keys.unwrap().iter() {
-        println!("{}", count);
-        count = count + 1;
-        column_keys.insert(hex::encode(key.clone()), hex::encode(value.clone()));
-    }
-
-    let eck = EncryptionColumnKeys{ column_keys_as_hex: column_keys };
-    let json_col_keys = serde_json::to_string(&eck)?;
-    // let json_col_keys = String::new();
-
-
-
-    /*
-    def create_encryption_config(df):
-        return pe.EncryptionConfiguration(
-            footer_key=FOOTER_KEY_NAME,
-            column_keys={
-                COL_KEY_NAME: df.columns.tolist(),
-            })
-
-    column_keys = {'col_key': ['x0', 'x1', 'x2', 'x3', 'x4', 'x5', 'x6', 'x7', 'x8', 'x9', 'x10',
-                               'x11', 'x12', 'x13', 'x14', 'x15', 'x16', 'x17', 'x18', 'x19']}
-
-    def create_kms_connection_config():
-        return pe.KmsConnectionConfig(
-            custom_kms_conf={
-                FOOTER_KEY_NAME: FOOTER_KEY.decode("UTF-8"),
-                COL_KEY_NAME: COL_KEY.decode("UTF-8"),
-            }
-        )
-
-
-     */
-
-    // create_table(uri, table_name, &key).await?;
+    let eck = EncryptionColumnKeys::new(&decryption_properties.column_keys.unwrap());
+    let json_col_keys = eck.to_json();
 
     let uri_table = String::from(uri) + "/" + table_name;
-
     let table = deltalake::open_table(uri_table).await?;
     let fd = ConfigFileDecryptionProperties {footer_key_as_hex: hex::encode(key),
         column_keys_as_json_hex: json_col_keys,
