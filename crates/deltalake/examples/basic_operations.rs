@@ -86,12 +86,12 @@ async fn create_table(uri: &str, table_name: &str, key: &Vec<u8>) -> Result<Delt
     assert_eq!(table.version(), 0);
 
 
-    let crypt = parquet::encryption::encryption::
-    FileEncryptionProperties::builder(key.clone()).build().unwrap();
+    let crypt = parquet::encryption::encrypt::
+    FileEncryptionProperties::builder(key.clone()).build();
 
     let writer_properties = WriterProperties::builder()
         // .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
-        .set_file_encryption_properties(crypt)
+        .with_file_encryption_properties(crypt)
         .build();
 
     let batch = get_table_batches();
