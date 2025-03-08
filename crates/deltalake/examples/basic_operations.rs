@@ -16,6 +16,7 @@ use deltalake::{parquet, protocol::SaveMode, DeltaOps};
 use std::sync::Arc;
 use deltalake::datafusion::prelude::SessionConfig;
 use deltalake::parquet::encryption::decryption::FileDecryptionProperties;
+use deltalake::parquet::encryption::encrypt::{EncryptionKey, FileEncryptionProperties};
 use deltalake_core::datafusion::config::{ConfigFileDecryptionProperties, EncryptionColumnKeys};
 use deltalake_core::{DeltaTable, DeltaTableError};
 
@@ -67,7 +68,7 @@ fn get_table_batches() -> RecordBatch {
     .unwrap()
 }
 
-async fn create_table(uri: &str, table_name: &str, key: &Vec<u8>) -> Result<DeltaTable, DeltaTableError> {
+async fn create_table(uri: &str, table_name: &str, crypt: &FileEncryptionProperties) -> Result<DeltaTable, DeltaTableError> {
     fs::remove_dir_all(uri)?;
     let ops = DeltaOps::try_from_uri(uri).await?;
 
@@ -85,13 +86,9 @@ async fn create_table(uri: &str, table_name: &str, key: &Vec<u8>) -> Result<Delt
 
     assert_eq!(table.version(), 0);
 
-
-    let crypt = parquet::encryption::encrypt::
-    FileEncryptionProperties::builder(key.clone()).build();
-
     let writer_properties = WriterProperties::builder()
         // .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
-        .with_file_encryption_properties(crypt)
+        .set_file_encryption_properties(crypt)
         .build();
 
     let batch = get_table_batches();
@@ -120,8 +117,7 @@ async fn create_table(uri: &str, table_name: &str, key: &Vec<u8>) -> Result<Delt
     Ok(table)
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), deltalake::errors::DeltaTableError> {
+async fn encrypted_read_test() -> Result<(), deltalake::errors::DeltaTableError> {
     // Create a delta operations client pointing at an un-initialized location.
     /*
     let ops = if let Ok(table_uri) = std::env::var("TABLE_URI") {
@@ -185,6 +181,50 @@ async fn main() -> Result<(), deltalake::errors::DeltaTableError> {
 
     println!("{:?}", data);
 
+    Ok(())
+}
+
+async fn read_table(uri: &str, table_name: &str, decryption_properties: &FileDecryptionProperties) -> Result<(), deltalake::errors::DeltaTableError>{
+    let eck = EncryptionColumnKeys::new(&decryption_properties.column_keys.clone().unwrap_or_default());
+    let json_col_keys = eck.to_json();
+
+    // let uri_table = String::from(uri) + "/" + table_name;
+    let table = deltalake::open_table(String::from(uri)).await?;
+    let fd = ConfigFileDecryptionProperties {footer_key_as_hex: hex::encode(decryption_properties.footer_key.clone()),
+        column_keys_as_json_hex: json_col_keys,
+        ..Default::default()};
+    let mut sc = SessionConfig::new();
+    sc.options_mut().execution.parquet.file_decryption_properties = Some(fd);
+    let (_table, stream) = DeltaOps(table).load().with_session_config(sc).await?;
+    let data: Vec<RecordBatch> = collect_sendable_stream(stream).await?;
+
+    println!("{:?}", data);
+
+    Ok(())
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), deltalake::errors::DeltaTableError> {
+    // Create a delta operations client pointing at an un-initialized location.
+
+    let uri = "/home/cjoy/src/delta-rs-with-encryption/delta-rs/crates/deltalake/examples/encrypted_roundtrip";
+    let table_name = "roundtrip";
+    let key: Vec<_> = b"1234567890123450".to_vec();
+
+    let crypt = parquet::encryption::encrypt::
+        FileEncryptionProperties::builder(key.clone())
+            .with_column_key(String::from("int"), EncryptionKey::new(key.clone()))
+            .with_column_key(String::from("string"), EncryptionKey::new(key.clone()))
+            .build();
+
+    let decrypt = FileDecryptionProperties::builder(key.clone())
+        .with_column_key(b"int".to_vec(), key.clone())
+        .with_column_key(b"string".to_vec(), key.clone())
+        .build()?;
+
+    create_table(uri, table_name, &crypt).await?;
+
+    read_table(uri, table_name, &decrypt).await?;
     Ok(())
 }
 
