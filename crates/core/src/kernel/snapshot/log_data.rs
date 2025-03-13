@@ -704,8 +704,6 @@ mod datafusion {
                 _ => max_value,
             };
 
-            let sum_value = Precision::Absent;
-
             Ok(ColumnStatistics {
                 null_count,
                 max_value,

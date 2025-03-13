@@ -100,9 +100,6 @@ async fn create_table(uri: &str, table_name: &str, crypt: &FileEncryptionPropert
     assert_eq!(table.version(), 1);
 
     /*
-    let writer_properties = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
-        .build();
 
     // To overwrite instead of append (which is the default), use `.with_save_mode`:
     let table = DeltaOps(table)
@@ -117,46 +114,9 @@ async fn create_table(uri: &str, table_name: &str, crypt: &FileEncryptionPropert
     Ok(table)
 }
 
-async fn encrypted_read_test() -> Result<(), deltalake::errors::DeltaTableError> {
-    let uri = "/home/cjoy/src/delta-rs-with-encryption/delta-rs/crates/deltalake/examples/encrypted/deltars_table";
-
-    let decrypt = FileDecryptionProperties::builder(b"\xd2\xcb \x89;\xb6\xab\xe4v\xa5\x1bB\xb8C\xbd\xed".to_vec())
-        .with_column_key(b"x0".to_vec(), b"\xf9\x1b1\xac#\xcbT\xaa\xa6XWk:\xce\x04B".to_vec())
-        .with_column_key(b"x1".to_vec(), b"(\xb0\x0e\x80F\xe1\xd6\xc5+\x19\x9c\xd7\xcbJ\x8ez".to_vec())
-        .with_column_key(b"x2".to_vec(), b"\xe1#\xbe\x8f\x85\xc2,\xef>lD\xeb\x917\xa3\x15".to_vec())
-        .with_column_key(b"x3".to_vec(), b"\xa4\xb6S\xa91pI\x16\xb1\x8cB\xdd.\xa9\\\\".to_vec())
-        .with_column_key(b"x4".to_vec(), b"\x9d9\xa2\x16\xc1@5\x00\x0b\x94\xbf\xf6}\x1e\xe6.".to_vec())
-        .with_column_key(b"x5".to_vec(), b"\xcbw\x03\xa0\\\xaa\x12K\xc7\x8b\x93E\x03jrM".to_vec())
-        .with_column_key(b"x6".to_vec(), b"\xbb\x9d\xdcB<am\x8cU\xe4\x13\x94\x9a,\xcd}".to_vec())
-        .with_column_key(b"x7".to_vec(), b"\x1bcC\xd6\xed\xbf\xe6\\\xa5\xad\xca\xbb\t*\x8e\x07".to_vec())
-        .with_column_key(b"x8".to_vec(), b"^\xa0C\xea\x861\x18\xedxqd*\xb18\xea\x13".to_vec())
-        .with_column_key(b"x9".to_vec(), b"K\xbaZ\x89`g\x86\x80o\xfe\x00\x1a7\xd4\xfbP".to_vec())
-        .with_column_key(b"x10".to_vec(), b"\xc6\xab'.\xe7\xfb+\xe1\x16\xae\x07\x07\xd8\x13\xf2\xef".to_vec())
-        .with_column_key(b"x11".to_vec(), b"S\x0f3\xf7l\xf6\xa6\x95,\xb5\x8d\r\x0b\xd9\xedc".to_vec())
-        .with_column_key(b"x12".to_vec(), b"\x85\xe4\xaf\xa4\xb9E\xbc\xa3O\xcb\x02+)\x08\x95y".to_vec())
-        .with_column_key(b"x13".to_vec(), b"\x99\x7fg\x89\x11|\x105B\x11y!7\xf5\x85\x04".to_vec())
-        .with_column_key(b"x14".to_vec(), b" R\x0c.\xa6\xfdK\xe1\xa3\xd2&G%w\xa4\x91".to_vec())
-        .with_column_key(b"x15".to_vec(), b"\x0e\xc8^\xa2\x893-r\x934\xa2\xa6\x194\xa6\xb5".to_vec())
-        .with_column_key(b"x16".to_vec(), b"\xad\xa5&\x14\xad}o\x9bc\xe9\x8bdD:\xa8\xc4".to_vec())
-        .with_column_key(b"x17".to_vec(), b"\xd6?\xfb\xba-s\xfe1\xef&z(\x84\x9eA\xb5".to_vec())
-        .with_column_key(b"x18".to_vec(), b"\x00\x04\xdb\xc5Rj\xfb].\xff0\x83\xa3\xb2\x8fx".to_vec())
-        .with_column_key(b"x19".to_vec(), b"\x1e\x80\x7f\x82\xf3\x15eb\xc5\x83\x81\xe21\xd6}b".to_vec())
-        .build()
-        .unwrap();
-
-    read_table(uri, &decrypt).await?;
-
-    Ok(())
-}
-
 async fn read_table(uri: &str, decryption_properties: &FileDecryptionProperties) -> Result<(), deltalake::errors::DeltaTableError>{
-    let eck = EncryptionColumnKeys::new(&decryption_properties.column_keys.clone().unwrap_or_default());
-    let json_col_keys = eck.to_json();
-
     let table = deltalake::open_table(String::from(uri)).await?;
-    let fd = ConfigFileDecryptionProperties {footer_key_as_hex: hex::encode(decryption_properties.footer_key.clone()),
-        column_keys_as_json_hex: json_col_keys,
-        ..Default::default()};
+    let fd: ConfigFileDecryptionProperties = decryption_properties.clone().into();
     let mut sc = SessionConfig::new();
     sc.options_mut().execution.parquet.file_decryption_properties = Some(fd);
     let (_table, stream) = DeltaOps(table).load().with_session_config(sc).await?;
@@ -180,11 +140,11 @@ async fn round_trip_test() -> Result<(), deltalake::errors::DeltaTableError> {
             .build();
 
     let decrypt = FileDecryptionProperties::builder(key.clone())
-        //.with_column_key(b"int".to_vec(), key.clone())
-        //.with_column_key(b"string".to_vec(), key.clone())
+        .with_column_key(b"int".to_vec(), key.clone())
+        .with_column_key(b"string".to_vec(), key.clone())
         .build()?;
 
-    // create_table(uri, table_name, &crypt).await?;
+    create_table(uri, table_name, &crypt).await?;
     read_table(uri, &decrypt).await?;
     Ok(())
 }
