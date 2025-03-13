@@ -118,31 +118,9 @@ async fn create_table(uri: &str, table_name: &str, crypt: &FileEncryptionPropert
 }
 
 async fn encrypted_read_test() -> Result<(), deltalake::errors::DeltaTableError> {
-    // Create a delta operations client pointing at an un-initialized location.
-    /*
-    let ops = if let Ok(table_uri) = std::env::var("TABLE_URI") {
-        DeltaOps::try_from_uri(table_uri).await?
-    } else {
-        DeltaOps::new_in_memory()
-    };
-     */
+    let uri = "/home/cjoy/src/delta-rs-with-encryption/delta-rs/crates/deltalake/examples/encrypted/deltars_table";
 
-    // let uri = "/home/cjoy/src/dl_benchmark/delta-rs/crates/deltalake/examples/tmp_tbl";
-    // let table_name = "my_table";
-
-    let uri = "/home/cjoy/src/delta-rs-with-encryption/delta-rs/crates/deltalake/examples/encrypted";
-    let table_name = "deltars_table";
-    // let key: Vec<_> = b"password".to_vec();
-
-    // const FOOTER_KEY: &[u8] = b"0123456789112345";
-    const FOOTER_KEY: &[u8] = b"\xd2\xcb \x89;\xb6\xab\xe4v\xa5\x1bB\xb8C\xbd\xed";
-    const FOOTER_KEY_NAME: &str = "footer_key";
-    const COL_KEY: &[u8] = b"1234567890123450";
-    const COL_KEY_NAME: &str = "col_key";
-
-    let key: Vec<_> = FOOTER_KEY.to_vec();
-
-    let decryption_properties = FileDecryptionProperties::builder(b"\xd2\xcb \x89;\xb6\xab\xe4v\xa5\x1bB\xb8C\xbd\xed".to_vec())
+    let decrypt = FileDecryptionProperties::builder(b"\xd2\xcb \x89;\xb6\xab\xe4v\xa5\x1bB\xb8C\xbd\xed".to_vec())
         .with_column_key(b"x0".to_vec(), b"\xf9\x1b1\xac#\xcbT\xaa\xa6XWk:\xce\x04B".to_vec())
         .with_column_key(b"x1".to_vec(), b"(\xb0\x0e\x80F\xe1\xd6\xc5+\x19\x9c\xd7\xcbJ\x8ez".to_vec())
         .with_column_key(b"x2".to_vec(), b"\xe1#\xbe\x8f\x85\xc2,\xef>lD\xeb\x917\xa3\x15".to_vec())
@@ -166,29 +144,15 @@ async fn encrypted_read_test() -> Result<(), deltalake::errors::DeltaTableError>
         .build()
         .unwrap();
 
-    let eck = EncryptionColumnKeys::new(&decryption_properties.column_keys.unwrap());
-    let json_col_keys = eck.to_json();
-
-    let uri_table = String::from(uri) + "/" + table_name;
-    let table = deltalake::open_table(uri_table).await?;
-    let fd = ConfigFileDecryptionProperties {footer_key_as_hex: hex::encode(key),
-        column_keys_as_json_hex: json_col_keys,
-        ..Default::default()};
-    let mut sc = SessionConfig::new();
-    sc.options_mut().execution.parquet.file_decryption_properties = Some(fd);
-    let (_table, stream) = DeltaOps(table).load().with_session_config(sc).await?;
-    let data: Vec<RecordBatch> = collect_sendable_stream(stream).await?;
-
-    println!("{:?}", data);
+    read_table(uri, &decrypt).await?;
 
     Ok(())
 }
 
-async fn read_table(uri: &str, table_name: &str, decryption_properties: &FileDecryptionProperties) -> Result<(), deltalake::errors::DeltaTableError>{
+async fn read_table(uri: &str, decryption_properties: &FileDecryptionProperties) -> Result<(), deltalake::errors::DeltaTableError>{
     let eck = EncryptionColumnKeys::new(&decryption_properties.column_keys.clone().unwrap_or_default());
     let json_col_keys = eck.to_json();
 
-    // let uri_table = String::from(uri) + "/" + table_name;
     let table = deltalake::open_table(String::from(uri)).await?;
     let fd = ConfigFileDecryptionProperties {footer_key_as_hex: hex::encode(decryption_properties.footer_key.clone()),
         column_keys_as_json_hex: json_col_keys,
@@ -203,13 +167,11 @@ async fn read_table(uri: &str, table_name: &str, decryption_properties: &FileDec
     Ok(())
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), deltalake::errors::DeltaTableError> {
-    // Create a delta operations client pointing at an un-initialized location.
-
+async fn round_trip_test() -> Result<(), deltalake::errors::DeltaTableError> {
     let uri = "/home/cjoy/src/delta-rs-with-encryption/delta-rs/crates/deltalake/examples/encrypted_roundtrip";
     let table_name = "roundtrip";
     let key: Vec<_> = b"1234567890123450".to_vec();
+    let wrong_key: Vec<_> = b"9234567890123450".to_vec();
 
     let crypt = parquet::encryption::encrypt::
         FileEncryptionProperties::builder(key.clone())
@@ -218,14 +180,20 @@ async fn main() -> Result<(), deltalake::errors::DeltaTableError> {
             .build();
 
     let decrypt = FileDecryptionProperties::builder(key.clone())
-        .with_column_key(b"int".to_vec(), key.clone())
-        .with_column_key(b"string".to_vec(), key.clone())
+        //.with_column_key(b"int".to_vec(), key.clone())
+        //.with_column_key(b"string".to_vec(), key.clone())
         .build()?;
 
-    create_table(uri, table_name, &crypt).await?;
-
-    read_table(uri, table_name, &decrypt).await?;
+    // create_table(uri, table_name, &crypt).await?;
+    read_table(uri, &decrypt).await?;
     Ok(())
 }
 
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), deltalake::errors::DeltaTableError> {
+    //encrypted_read_test().await?;
+    round_trip_test().await?;
+    Ok(())
+}
 
