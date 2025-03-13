@@ -94,23 +94,20 @@ async fn create_table(uri: &str, table_name: &str, crypt: &FileEncryptionPropert
     let batch = get_table_batches();
     let table = DeltaOps(table)
         .write(vec![batch.clone()])
-        .with_writer_properties(writer_properties)
+        .with_writer_properties(writer_properties.clone())
         .await?;
 
     assert_eq!(table.version(), 1);
 
-    /*
-
     // To overwrite instead of append (which is the default), use `.with_save_mode`:
     let table = DeltaOps(table)
         .write(vec![batch.clone()])
-        .with_save_mode(SaveMode::Overwrite)
-        .with_writer_properties(writer_properties)
+        // .with_save_mode(SaveMode::Overwrite)
+        .with_writer_properties(writer_properties.clone())
         .await?;
 
     assert_eq!(table.version(), 2);
 
-     */
     Ok(table)
 }
 
