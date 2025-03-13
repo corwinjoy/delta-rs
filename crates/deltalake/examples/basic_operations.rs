@@ -162,7 +162,7 @@ async fn read_table(uri: &str, decryption_properties: &FileDecryptionProperties)
     let (_table, stream) = DeltaOps(table).load().with_session_config(sc).await?;
     let data: Vec<RecordBatch> = collect_sendable_stream(stream).await?;
 
-    println!("{:?}", data);
+    println!("{data:?}");
 
     Ok(())
 }
