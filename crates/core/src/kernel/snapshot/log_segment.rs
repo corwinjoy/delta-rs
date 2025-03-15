@@ -11,6 +11,7 @@ use object_store::{Error as ObjectStoreError, ObjectMeta, ObjectStore};
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
 use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
 use parquet::arrow::ProjectionMask;
+use parquet::encryption::decryption::FileDecryptionProperties;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tracing::debug;

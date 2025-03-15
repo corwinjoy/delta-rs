@@ -128,7 +128,8 @@ impl DisplayAs for MergeBarrierExec {
             DisplayFormatType::Default | DisplayFormatType::Verbose => {
                 write!(f, "MergeBarrier",)?;
                 Ok(())
-            }
+            },
+            DisplayFormatType::TreeRender => todo!()
         }
     }
 }
@@ -421,6 +422,7 @@ impl UserDefinedLogicalNodeCore for MergeBarrier {
         write!(f, "MergeBarrier")
     }
 
+    /*
     fn from_template(
         &self,
         exprs: &[datafusion_expr::Expr],
@@ -429,6 +431,7 @@ impl UserDefinedLogicalNodeCore for MergeBarrier {
         self.with_exprs_and_inputs(exprs.to_vec(), inputs.to_vec())
             .unwrap()
     }
+    */
 
     fn with_exprs_and_inputs(
         &self,

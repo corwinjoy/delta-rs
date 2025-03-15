@@ -20,6 +20,7 @@ use arrow::pyarrow::PyArrowType;
 use chrono::{DateTime, Duration, FixedOffset, Utc};
 use datafusion_ffi::table_provider::FFI_TableProvider;
 use delta_kernel::expressions::Scalar;
+use delta_kernel::parquet::encryption::encrypt::FileEncryptionProperties;
 use delta_kernel::schema::{MetadataValue, StructField};
 use deltalake::arrow::compute::concat_batches;
 use deltalake::arrow::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
@@ -88,7 +89,7 @@ use uuid::Uuid;
 
 #[cfg(all(target_family = "unix", not(target_os = "emscripten")))]
 use jemallocator::Jemalloc;
-
+use deltalake::parquet::encryption::encrypt::EncryptionKey;
 #[cfg(any(not(target_family = "unix"), target_os = "emscripten"))]
 use mimalloc::MiMalloc;
 
@@ -1767,6 +1768,7 @@ fn set_writer_properties(writer_properties: PyWriterProperties) -> DeltaResult<W
     let statistics_truncate_length = writer_properties.statistics_truncate_length;
     let default_column_properties = writer_properties.default_column_properties;
     let column_properties = writer_properties.column_properties;
+    let file_encryption_properties = writer_properties.file_encryption_properties;
 
     if let Some(data_page_size) = data_page_size_limit {
         properties = properties.set_data_page_size_limit(data_page_size);
@@ -1859,6 +1861,34 @@ fn set_writer_properties(writer_properties: PyWriterProperties) -> DeltaResult<W
             }
         }
     }
+
+    if let Some(pep) = file_encryption_properties {
+        let mut fep = FileEncryptionProperties{
+            encrypt_footer: pep.encrypt_footer,
+            footer_key: EncryptionKey::new(pep.footer_key),
+            aad_prefix: pep.aad_prefix,
+            store_aad_prefix: pep.store_aad_prefix,
+            column_keys: HashMap::default(),
+        };
+        let mut column_keys: HashMap<String, EncryptionKey> = HashMap::new();
+        if let Some(ck) = pep.column_keys {
+            for (key, value) in ck.into_iter() {
+                column_keys.insert(key, EncryptionKey::new(value));
+            }
+        }
+        fep.column_keys = column_keys;
+        properties = properties.set_file_encryption_properties(&fep);
+    }
+
+    /*
+    pub struct FileEncryptionProperties {
+    pub encrypt_footer: bool, y
+    pub footer_key: EncryptionKey, y
+    pub column_keys: HashMap<String, EncryptionKey>, y
+    pub aad_prefix: Option<Vec<u8>>, y
+    pub store_aad_prefix: bool,
+}
+     */
     Ok(properties.build())
 }
 
@@ -2176,6 +2206,15 @@ pub struct ColumnProperties {
 }
 
 #[derive(FromPyObject)]
+pub struct PyEncryptionProperties {
+    footer_key: Vec<u8>,
+    column_keys: Option<HashMap<String, Vec<u8>>>,
+    aad_prefix: Option<Vec<u8>>,
+    encrypt_footer: bool,
+    store_aad_prefix: bool,
+}
+
+#[derive(FromPyObject)]
 pub struct PyWriterProperties {
     data_page_size_limit: Option<usize>,
     dictionary_page_size_limit: Option<usize>,
@@ -2186,6 +2225,7 @@ pub struct PyWriterProperties {
     compression: Option<String>,
     default_column_properties: Option<ColumnProperties>,
     column_properties: Option<HashMap<String, Option<ColumnProperties>>>,
+    file_encryption_properties: Option<PyEncryptionProperties>,
 }
 
 #[derive(FromPyObject)]

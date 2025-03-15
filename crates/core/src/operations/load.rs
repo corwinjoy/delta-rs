@@ -4,6 +4,7 @@ use datafusion::datasource::TableProvider;
 use datafusion::execution::context::{SessionContext, TaskContext};
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::{ExecutionPlan, SendableRecordBatchStream};
+use datafusion::prelude::SessionConfig;
 use futures::future::BoxFuture;
 
 use super::transaction::PROTOCOL;
@@ -22,6 +23,8 @@ pub struct LoadBuilder {
     log_store: LogStoreRef,
     /// A sub-selection of columns to be loaded
     columns: Option<Vec<String>>,
+    // Optional session options
+    session_config: Option<SessionConfig>
 }
 
 impl super::Operation<()> for LoadBuilder {
@@ -40,12 +43,19 @@ impl LoadBuilder {
             snapshot,
             log_store,
             columns: None,
+            session_config: None,
         }
     }
 
     /// Specify column selection to load
     pub fn with_columns(mut self, columns: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.columns = Some(columns.into_iter().map(|s| s.into()).collect());
+        self
+    }
+
+    // Set session options
+    pub fn with_session_config(mut self, session_config: SessionConfig) -> Self {
+        self.session_config = Some(session_config);
         self
     }
 }
@@ -80,7 +90,11 @@ impl std::future::IntoFuture for LoadBuilder {
                 })
                 .transpose()?;
 
-            let ctx = SessionContext::new();
+            // Parquet options are set in the SessionContext
+            let ctx = match this.session_config {
+                Some(sc) => SessionContext::new_with_config(sc),
+                None => SessionContext::new()
+            };
             let scan_plan = table
                 .scan(&ctx.state(), projection.as_ref(), &[], None)
                 .await?;
