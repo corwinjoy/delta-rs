@@ -11,16 +11,15 @@ import base64
 from pyarrow._parquet import FileEncryptionProperties
 from tests.conftest import writer_properties
 
-FOOTER_KEY = b"0123456789112345"
+FOOTER_KEY = b"1234567890123450"
 FOOTER_KEY_NAME = "footer_key"
 COL_KEY = b"1234567890123450"
 COL_KEY_NAME = "col_key"
 
-def read_delta_table(dl_path):
-    dt = DeltaTable(dl_path, without_files=True)
-    # df_files = dt.file_uris()
-    df_files = None
-    df_dl = dt.to_pandas()
+def read_delta_table(dl_path, fragment_scan_options):
+    dt = DeltaTable(dl_path)
+    df_files = dt.file_uris()
+    df_dl = dt.to_pandas(fragment_scan_options=fragment_scan_options)
     return (df_files, df_dl)
 
 class InMemoryKmsClient(pe.KmsClient):
@@ -34,6 +33,18 @@ class InMemoryKmsClient(pe.KmsClient):
         self.master_keys_map = config.custom_kms_conf
 
     def wrap_key(self, key_bytes, master_key_identifier):
+        result = self.master_keys_map[master_key_identifier].encode(
+            'utf-8')
+        print("wrap_key", result, master_key_identifier)
+        return result
+
+    def unwrap_key(self, wrapped_key, master_key_identifier):
+        result = self.master_keys_map[master_key_identifier].encode(
+            'utf-8')
+        print("unwrap_key", result, master_key_identifier)
+        return result
+
+    def wrap_key_orig(self, key_bytes, master_key_identifier):
         """Not a secure cipher - the wrapped key
         is just the master key concatenated with key bytes"""
         master_key_bytes = self.master_keys_map[master_key_identifier].encode(
@@ -42,7 +53,7 @@ class InMemoryKmsClient(pe.KmsClient):
         result = base64.b64encode(wrapped_key)
         return result
 
-    def unwrap_key(self, wrapped_key, master_key_identifier):
+    def unwrap_key_orig(self, wrapped_key, master_key_identifier):
         """Not a secure cipher - just extract the key from
         the wrapped key"""
         expected_master_key = self.master_keys_map[master_key_identifier]
@@ -67,11 +78,13 @@ def create_decryption_config():
 
 
 def create_kms_connection_config():
+    custom_kms_conf = {
+        FOOTER_KEY_NAME: FOOTER_KEY.decode("UTF-8"),
+        COL_KEY_NAME: COL_KEY.decode("UTF-8"),
+    }
+    print(custom_kms_conf)
     return pe.KmsConnectionConfig(
-        custom_kms_conf={
-            FOOTER_KEY_NAME: FOOTER_KEY.decode("UTF-8"),
-            COL_KEY_NAME: COL_KEY.decode("UTF-8"),
-        }
+        custom_kms_conf=custom_kms_conf,
     )
 
 def kms_factory(kms_connection_configuration):
@@ -87,47 +100,6 @@ def run_delta_ecrypt():
     ncols = 20
     clear_folder(dl_folder)
     df = gen_df(nrows, ncols)
-
-    encryption_config = create_encryption_config(df)
-    print(encryption_config)
-    decryption_config = create_decryption_config()
-    kms_connection_config = create_kms_connection_config()
-
-    crypto_factory = pe.CryptoFactory(kms_factory)
-    parquet_encryption_cfg = ds.ParquetEncryptionConfig(
-        crypto_factory, kms_connection_config, encryption_config
-    )
-    parquet_decryption_cfg = ds.ParquetDecryptionConfig(
-        crypto_factory, kms_connection_config, decryption_config
-    )
-    pq_scan_opts = ds.ParquetFragmentScanOptions(
-        decryption_config=parquet_decryption_cfg
-    )
-
-    parquet_format = ds.ParquetFileFormat()
-    write_options = parquet_format.make_write_options(encryption_config=parquet_encryption_cfg)
-
-
-    rem = """
-       let uri = "/home/cjoy/src/delta-rs-with-encryption/delta-rs/crates/deltalake/examples/encrypted_roundtrip";
-    let table_name = "roundtrip";
-    let key: Vec<_> = b"1234567890123450".to_vec();
-    let wrong_key: Vec<_> = b"9234567890123450".to_vec();
-
-    let crypt = parquet::encryption::encrypt::
-        FileEncryptionProperties::builder(key.clone())
-            .with_column_key(String::from("int"), EncryptionKey::new(key.clone()))
-            .with_column_key(String::from("string"), EncryptionKey::new(key.clone()))
-            .build();
-
-    let decrypt = FileDecryptionProperties::builder(key.clone())
-        .with_column_key(b"int".to_vec(), key.clone())
-        .with_column_key(b"string".to_vec(), key.clone())
-        .build()?;
-    """
-
-    # file_encryption_properties = crypto_factory.file_encryption_properties(kms_connection_config, encryption_config)
-    # print(file_encryption_properties)
 
     column_keys = dict()
     keys = df.columns.tolist()
@@ -146,7 +118,17 @@ def run_delta_ecrypt():
             write_deltalake(dl_path, df, mode="append", writer_properties=writer_properties)
 
 def run_delta_decrypt():
-    tbl_tm = timed(read_delta_table, dl_path)
+    crypto_factory = pe.CryptoFactory(kms_factory)
+    kms_connection_config = create_kms_connection_config()
+    decryption_config = create_decryption_config()
+    parquet_decryption_cfg = ds.ParquetDecryptionConfig(
+        crypto_factory, kms_connection_config, decryption_config
+    )
+    fragment_scan_options = ds.ParquetFragmentScanOptions(
+        pre_buffer=True,
+        decryption_config=parquet_decryption_cfg
+    )
+    tbl_tm = timed(read_delta_table, dl_path, fragment_scan_options)
     (df_files, df_dl) = tbl_tm[0]
     tm_delta = tbl_tm[1]
     print("delta table:")
@@ -157,7 +139,7 @@ def run_pq_encrypt():
     # Test encryption with pyarrow
     nrows = math.ceil(2_097_152 / 10)  # Up to 10 reps
     ncols = 128 # 100 MB of data
-    clear_folder(pq_folder)
+    # clear_folder(pq_folder)
     df = gen_df(nrows, ncols)
     table = pa.Table.from_pandas(df)
 
@@ -197,37 +179,25 @@ def run_pq_encrypt():
     pformat = ds.ParquetFileFormat()
     write_options = pformat.make_write_options(encryption_config=parquet_encryption_cfg)
 
-    ds.write_dataset(
-        data=table,
-        base_dir=pq_folder,
-        format=pformat,
-        file_options=write_options,
-        use_threads=False # Maintain original row order
-    )
+    if False:
+        ds.write_dataset(
+            data=table,
+            base_dir=pq_folder,
+            format=pformat,
+            file_options=write_options,
+            use_threads=False # Maintain original row order
+        )
     decrypt_res = timed(read_encrypted_data, parquet_decryption_cfg, df)
     decrypt_tm = decrypt_res[1]
-
-    clear_folder(pq_folder)
-    ds.write_dataset(
-        data=table,
-        base_dir=pq_folder,
-        format="parquet",
-        use_threads=False # Maintain original row order
-    )
-    regular_res = timed(read_unencrypted_data, df)
-    regular_tm = regular_res[1]
-
-    print(f"Unencrypted read time: {regular_tm}")
     print(f"Encrypted read time: {decrypt_tm}")
-    pct = (decrypt_tm/regular_tm)*100.0
-    print(f"Encrypted/Unencrypted %: {pct}")
+
 
 # Run deltalake benchmarks
 # run_bm_scenarios()
 
 # Benchmark encryption of parquet
-# run_pq_encrypt()
+run_pq_encrypt()
 
 # Try deltalake encryption
-run_delta_ecrypt()
+# run_delta_ecrypt()
 # run_delta_decrypt()
