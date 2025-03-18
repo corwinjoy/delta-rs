@@ -26,35 +26,39 @@ debug = true
 debug = "line-tables-only"
 
 [workspace.dependencies]
-delta_kernel = { version = "0.8.0", features = ["arrow_54", "default-engine-rustls"] }
+delta_kernel = { path = "../delta-kernel-rs/kernel", version = "0.8.0", features = ["arrow_54", "default-engine-rustls"] }
 #delta_kernel = { path = "../delta-kernel-rs/kernel", features = ["sync-engine"]  }
 
 # arrow
-arrow = { version = "54" }
-arrow-arith = { version = "54" }
-arrow-array = { version = "54", features = ["chrono-tz"] }
-arrow-buffer = { version = "54" }
-arrow-cast = { version = "54" }
-arrow-ipc = { version = "54" }
-arrow-json = { version = "54" }
-arrow-ord = { version = "54" }
-arrow-row = { version = "54" }
-arrow-schema = { version = "54" }
-arrow-select = { version = "54" }
-object_store = { version = "0.11.2" , features = ["cloud"]}
-parquet = { version = "54" }
+# arrow = {  git = "https://github.com/rok/arrow-rs.git", branch = "encryption-basics" }
+arrow = {  path = "../arrow-rs/arrow" }
+arrow-arith = { path = "../arrow-rs/arrow-arith" }
+arrow-array = {  path = "../arrow-rs/arrow-array", features = ["chrono-tz"] }
+arrow-buffer = {  path = "../arrow-rs/arrow-buffer" }
+arrow-cast = {  path = "../arrow-rs/arrow-cast" }
+arrow-ipc = {  path = "../arrow-rs/arrow-ipc"}
+arrow-json = {  path = "../arrow-rs/arrow-json" }
+arrow-ord = {  path = "../arrow-rs/arrow-ord" }
+arrow-row = {  path = "../arrow-rs/arrow-row" }
+arrow-schema = {  path = "../arrow-rs/arrow-schema"}
+arrow-select = {  path = "../arrow-rs/arrow-select" }
+# object_store = { git = "https://github.com/rok/arrow-rs.git" , features = ["cloud"]}
+object_store = {version="0.11.2"  , features = ["cloud"]}
+# parquet = { version = "53" }
+parquet = { path = "../arrow-rs/parquet" }
 
 # datafusion
-datafusion = "46"
-datafusion-expr = "46"
-datafusion-common = "46"
-datafusion-ffi = "46"
-datafusion-functions = "46"
-datafusion-functions-aggregate = "46"
-datafusion-physical-expr = "46"
-datafusion-physical-plan = "46"
-datafusion-proto = "46"
-datafusion-sql = "46"
+# datafusion = { git = "https://github.com/corwinjoy/datafusion.git", branch = "encryption-basics" }
+datafusion = { path = "../datafusion/datafusion/core" }
+datafusion-expr = { path = "../datafusion/datafusion/expr" }
+datafusion-common = { path = "../datafusion/datafusion/common" }
+datafusion-ffi = { path = "../datafusion/datafusion/ffi" }
+datafusion-functions = { path = "../datafusion/datafusion/functions" }
+datafusion-functions-aggregate = { path = "../datafusion/datafusion/functions-aggregate"}
+datafusion-physical-expr = { path = "../datafusion/datafusion/physical-expr" }
+datafusion-physical-plan = { path = "../datafusion/datafusion/physical-plan" }
+datafusion-proto = { path = "../datafusion/datafusion/proto" }
+datafusion-sql = { path = "../datafusion/datafusion/sql" }
 
 # serde
 serde = { version = "1.0.194", features = ["derive"] }

@@ -776,6 +776,7 @@ class DeltaTable:
         parquet_read_options: Optional[ParquetReadOptions] = None,
         schema: Optional[pyarrow.Schema] = None,
         as_large_types: bool = False,
+        fragment_scan_options: Optional[ParquetFragmentScanOptions] = None
     ) -> pyarrow.dataset.Dataset:
         """
         Build a PyArrow Dataset using data from the DeltaTable.
@@ -843,9 +844,12 @@ class DeltaTable:
                     self._table.get_add_file_sizes(),
                 )
             )
+        if not fragment_scan_options:
+            fragment_scan_options = ParquetFragmentScanOptions(pre_buffer=True)
+
         format = ParquetFileFormat(
             read_options=parquet_read_options,
-            default_fragment_scan_options=ParquetFragmentScanOptions(pre_buffer=True),
+            default_fragment_scan_options=fragment_scan_options,
         )
 
         schema = schema or self.schema().to_pyarrow(as_large_types=as_large_types)
@@ -878,6 +882,7 @@ class DeltaTable:
         columns: Optional[List[str]] = None,
         filesystem: Optional[Union[str, pa_fs.FileSystem]] = None,
         filters: Optional[Union[FilterType, Expression]] = None,
+        fragment_scan_options: Optional[ParquetFragmentScanOptions] = None
     ) -> pyarrow.Table:
         """
         Build a PyArrow Table using data from the DeltaTable.
@@ -891,8 +896,8 @@ class DeltaTable:
         if filters is not None:
             filters = filters_to_expression(filters)
         return self.to_pyarrow_dataset(
-            partitions=partitions, filesystem=filesystem
-        ).to_table(columns=columns, filter=filters)
+            partitions=partitions, filesystem=filesystem, fragment_scan_options=fragment_scan_options
+        ).to_table(columns=columns, filter=filters, fragment_scan_options=fragment_scan_options)
 
     def to_pandas(
         self,
@@ -901,6 +906,7 @@ class DeltaTable:
         filesystem: Optional[Union[str, pa_fs.FileSystem]] = None,
         filters: Optional[Union[FilterType, Expression]] = None,
         types_mapper: Optional[Callable[[pyarrow.DataType], Any]] = None,
+        fragment_scan_options: Optional[ParquetFragmentScanOptions] = None
     ) -> "pd.DataFrame":
         """
         Build a pandas dataframe using data from the DeltaTable.
@@ -916,6 +922,7 @@ class DeltaTable:
             columns=columns,
             filesystem=filesystem,
             filters=filters,
+            fragment_scan_options=fragment_scan_options,
         ).to_pandas(types_mapper=types_mapper)
 
     def update_incremental(self) -> None:

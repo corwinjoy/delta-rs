@@ -110,6 +110,36 @@ class ColumnProperties:
             f"bloom_filter_properties: {self.bloom_filter_properties}"
         )
 
+@dataclass(init=True)
+class PyEncryptionProperties:
+    """Python version of the Rust encryption properties."""
+
+    def __init__(
+        self,
+        footer_key: bytes = None,
+        column_keys: Optional[Dict[str, bytes]] = None,
+        aad_prefix: Optional[bytes] = None,
+        encrypt_footer: bool = False,
+        store_aad_prefix: bool = False,
+    ):
+        """Create a EncryptionProperties instance for the Rust parquet writer:
+
+        Args:
+                footer_key: Option<Vec<u8>>,
+                column_keys: HashMap<String, Vec<u8>>,
+                aad_prefix: Option<Vec<u8>>,
+                encrypt_footer: bool,
+                store_aad_prefix: bool,
+        """
+        self.footer_key = footer_key
+        self.column_keys = column_keys
+        self.aad_prefix = aad_prefix
+        self.encrypt_footer = encrypt_footer
+        self.store_aad_prefix = store_aad_prefix
+
+    def __str__(self) -> str:
+        return f"footer_key: {self.footer_key}, column_keys: {self.column_keys}, aad_prefix: {self.aad_prefix}, "
+        f"encrypt_footer: {self.encrypt_footer}, store_aad_prefix: {self.store_aad_prefix}"
 
 @dataclass(init=True)
 class WriterProperties:
@@ -137,6 +167,7 @@ class WriterProperties:
         statistics_truncate_length: Optional[int] = None,
         default_column_properties: Optional[ColumnProperties] = None,
         column_properties: Optional[Dict[str, ColumnProperties]] = None,
+        file_encryption_properties: Optional[PyEncryptionProperties] = None,
     ):
         """Create a Writer Properties instance for the Rust parquet writer:
 
@@ -164,6 +195,7 @@ class WriterProperties:
         self.statistics_truncate_length = statistics_truncate_length
         self.default_column_properties = default_column_properties
         self.column_properties = column_properties
+        self.file_encryption_properties = file_encryption_properties
 
         if compression_level is not None and compression is None:
             raise ValueError(
@@ -198,5 +230,6 @@ class WriterProperties:
             f"WriterProperties(data_page_size_limit: {self.data_page_size_limit}, dictionary_page_size_limit: {self.dictionary_page_size_limit}, "
             f"data_page_row_count_limit: {self.data_page_row_count_limit}, write_batch_size: {self.write_batch_size}, "
             f"max_row_group_size: {self.max_row_group_size}, compression: {self.compression}, statistics_truncate_length: {self.statistics_truncate_length},"
-            f"default_column_properties: {self.default_column_properties}, column_properties: {column_properties_str})"
+            f"default_column_properties: {self.default_column_properties}, column_properties: {column_properties_str}, "
+            f"file_encryption_properties: {self.file_encryption_properties})"
         )
