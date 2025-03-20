@@ -107,8 +107,7 @@ fn stats_from_file_metadata(
     let row_group_metadata: Vec<RowGroupMetaData> = file_metadata
         .row_groups
         .iter()
-        .map(|rg| RowGroupMetaData::from_thrift(schema_descriptor.clone(), rg.clone(),
-                                                None))
+        .map(|rg| RowGroupMetaData::from_thrift(schema_descriptor.clone(), rg.clone()))
         .collect::<Result<Vec<RowGroupMetaData>, ParquetError>>()?;
 
     stats_from_metadata(

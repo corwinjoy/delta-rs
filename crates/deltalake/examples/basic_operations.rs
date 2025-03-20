@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fs;
 use deltalake::arrow::{
     array::{Int32Array, StringArray, TimestampMicrosecondArray},
@@ -15,9 +14,9 @@ use deltalake::{parquet, protocol::SaveMode, DeltaOps};
 
 use std::sync::Arc;
 use deltalake::datafusion::prelude::SessionConfig;
-use deltalake::parquet::encryption::decryption::FileDecryptionProperties;
-use deltalake::parquet::encryption::encrypt::{EncryptionKey, FileEncryptionProperties};
-use deltalake_core::datafusion::config::{ConfigFileDecryptionProperties, EncryptionColumnKeys};
+use deltalake::parquet::encryption::decrypt::FileDecryptionProperties;
+use deltalake::parquet::encryption::encrypt::FileEncryptionProperties;
+use deltalake_core::datafusion::config::ConfigFileDecryptionProperties;
 use deltalake_core::{DeltaTable, DeltaTableError};
 
 fn get_table_columns() -> Vec<StructField> {
@@ -88,7 +87,7 @@ async fn create_table(uri: &str, table_name: &str, crypt: &FileEncryptionPropert
 
     let writer_properties = WriterProperties::builder()
         // .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
-        .set_file_encryption_properties(crypt)
+        .with_file_encryption_properties(crypt.clone())
         .build();
 
     let batch = get_table_batches();
@@ -132,13 +131,13 @@ async fn round_trip_test() -> Result<(), deltalake::errors::DeltaTableError> {
 
     let crypt = parquet::encryption::encrypt::
         FileEncryptionProperties::builder(key.clone())
-            .with_column_key(String::from("int"), EncryptionKey::new(key.clone()))
-            .with_column_key(String::from("string"), EncryptionKey::new(key.clone()))
-            .build();
+            .with_column_key("int", key.clone())
+            .with_column_key("string", key.clone())
+            .build()?;
 
     let decrypt = FileDecryptionProperties::builder(key.clone())
-        .with_column_key(b"int".to_vec(), key.clone())
-        .with_column_key(b"string".to_vec(), key.clone())
+        .with_column_key("int", key.clone())
+        .with_column_key("string", key.clone())
         .build()?;
 
     create_table(uri, table_name, &crypt).await?;
