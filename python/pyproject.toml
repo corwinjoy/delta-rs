@@ -105,3 +105,6 @@ markers = [
 [tool.coverage.run]
 branch = true
 source = ["deltalake"]
+
+[tool.uv.workspace]
+members = ["test_crypt"]
