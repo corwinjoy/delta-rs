@@ -612,6 +612,7 @@ impl MergePlan {
     ) -> Result<Metrics, DeltaTableError> {
         let operations = std::mem::take(&mut self.operations);
 
+        // panic!("Need to support encryption");
         let stream = match operations {
             OptimizeOperations::Compact(bins) => futures::stream::iter(bins)
                 .flat_map(|(_, (partition, bins))| {
@@ -634,7 +635,7 @@ impl MergePlan {
                                     object_store_ref,
                                     ObjectMeta::try_from(file).unwrap(),
                                 );
-                                ParquetRecordBatchStreamBuilder::new(file_reader)
+                                ParquetRecordBatchStreamBuilder::new(file_reader)  // TODO. Need new_with_options here for encryption
                                     .await?
                                     .build()
                             }
