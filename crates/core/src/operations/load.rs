@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use datafusion::datasource::TableProvider;
 use datafusion::execution::context::{SessionContext, TaskContext};
+use datafusion::execution::SessionState;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::{ExecutionPlan, SendableRecordBatchStream};
 use datafusion::prelude::SessionConfig;
@@ -9,7 +10,7 @@ use futures::future::BoxFuture;
 
 use super::transaction::PROTOCOL;
 use super::CustomExecuteHandler;
-use crate::delta_datafusion::DataFusionMixins;
+use crate::delta_datafusion::{register_store, DataFusionMixins, DeltaSessionContext};
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::logstore::LogStoreRef;
 use crate::table::state::DeltaTableState;
@@ -23,8 +24,8 @@ pub struct LoadBuilder {
     log_store: LogStoreRef,
     /// A sub-selection of columns to be loaded
     columns: Option<Vec<String>>,
-    // Optional session options
-    session_config: Option<SessionConfig>
+    /// Datafusion session state relevant for executing the input plan
+    state: Option<SessionState>,
 }
 
 impl super::Operation<()> for LoadBuilder {
@@ -43,7 +44,7 @@ impl LoadBuilder {
             snapshot,
             log_store,
             columns: None,
-            session_config: None,
+            state: None,
         }
     }
 
@@ -54,8 +55,8 @@ impl LoadBuilder {
     }
 
     // Set session options
-    pub fn with_session_config(mut self, session_config: SessionConfig) -> Self {
-        self.session_config = Some(session_config);
+    pub fn with_session_state(mut self, state: SessionState) -> Self {
+        self.state = Some(state);
         self
     }
 }
@@ -91,15 +92,16 @@ impl std::future::IntoFuture for LoadBuilder {
                 .transpose()?;
 
             // Parquet options are set in the SessionContext
-            let ctx = match this.session_config {
-                Some(sc) => SessionContext::new_with_config(sc),
-                None => SessionContext::new()
-            };
+            let state = this.state.unwrap_or_else(|| {
+                let session: SessionContext = DeltaSessionContext::default().into();
+                session.state()
+            });
+
             let scan_plan = table
-                .scan(&ctx.state(), projection.as_ref(), &[], None)
+                .scan(&state, projection.as_ref(), &[], None)
                 .await?;
             let plan = CoalescePartitionsExec::new(scan_plan);
-            let task_ctx = Arc::new(TaskContext::from(&ctx.state()));
+            let task_ctx = Arc::new(TaskContext::from(&state));
             let stream = plan.execute(0, task_ctx)?;
 
             Ok((table, stream))

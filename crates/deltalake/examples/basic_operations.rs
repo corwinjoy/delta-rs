@@ -13,11 +13,18 @@ use deltalake::parquet::{
 use deltalake::{parquet, protocol::SaveMode, DeltaOps};
 
 use std::sync::Arc;
-use deltalake::datafusion::prelude::SessionConfig;
+use deltalake::datafusion::execution::runtime_env::RuntimeEnv;
+use deltalake::datafusion::execution::{SessionState, SessionStateBuilder};
+use deltalake::datafusion::prelude::{SessionConfig, SessionContext};
 use deltalake::parquet::encryption::decrypt::FileDecryptionProperties;
 use deltalake::parquet::encryption::encrypt::FileEncryptionProperties;
 use deltalake_core::datafusion::config::ConfigFileDecryptionProperties;
 use deltalake_core::{DeltaTable, DeltaTableError};
+use deltalake_core::delta_datafusion::DeltaSessionContext;
+use deltalake::storage::DefaultObjectStoreRegistry;
+use deltalake_core::logstore::LogStoreRef;
+use deltalake_core::storage::ObjectStoreRegistry;
+use url::Url;
 
 fn get_table_columns() -> Vec<StructField> {
     vec![
@@ -110,12 +117,30 @@ async fn create_table(uri: &str, table_name: &str, crypt: &FileEncryptionPropert
     Ok(table)
 }
 
-async fn read_table(uri: &str, decryption_properties: &FileDecryptionProperties) -> Result<(), deltalake::errors::DeltaTableError>{
+fn register_store(store: LogStoreRef, env: Arc<RuntimeEnv>) {
+    let object_store_url = store.object_store_url();
+    let url: &Url = object_store_url.as_ref();
+    env.register_object_store(url, store.object_store(None));
+}
+
+async fn open_table_with_state(uri: &str, decryption_properties: &FileDecryptionProperties) -> Result<(DeltaTable, SessionState), DeltaTableError> {
     let table = deltalake::open_table(String::from(uri)).await?;
     let fd: ConfigFileDecryptionProperties = decryption_properties.clone().into();
     let mut sc = SessionConfig::new();
     sc.options_mut().execution.parquet.file_decryption_properties = Some(fd);
-    let (_table, stream) = DeltaOps(table).load().with_session_config(sc).await?;
+
+    let state = SessionStateBuilder::new()
+        .with_config(sc)
+        .build();
+
+    register_store(table.log_store(), state.runtime_env().clone());
+    Ok((table, state))
+}
+
+async fn read_table(uri: &str, decryption_properties: &FileDecryptionProperties) -> Result<(), deltalake::errors::DeltaTableError>{
+    let (table, state) = open_table_with_state(uri, decryption_properties).await?;
+
+    let (_table, stream) = DeltaOps(table).load().with_session_state(state).await?;
     let data: Vec<RecordBatch> = collect_sendable_stream(stream).await?;
 
     println!("{data:?}");
