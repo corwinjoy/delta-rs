@@ -3,6 +3,7 @@
 use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
+use datafusion_common::config::Extensions;
 use object_store::{Attributes, Error as ObjectStoreError, ObjectStore, PutOptions, TagSet};
 use uuid::Uuid;
 
@@ -19,6 +20,7 @@ fn put_options() -> &'static PutOptions {
         mode: object_store::PutMode::Create, // Creates if file doesn't exists yet
         tags: TagSet::default(),
         attributes: Attributes::default(),
+        ..Default::default()
     })
 }
 

@@ -4,7 +4,7 @@ use deltalake_core::logstore::{default_logstore, logstores, LogStore, LogStoreFa
 use deltalake_core::storage::{
     factories, url_prefix_handler, ObjectStoreFactory, ObjectStoreRef, StorageOptions,
 };
-use deltalake_core::{DeltaResult, Path};
+use deltalake_core::{DeltaResult, DeltaTableError, Path};
 use hdfs_native_object_store::HdfsObjectStore;
 use url::Url;
 

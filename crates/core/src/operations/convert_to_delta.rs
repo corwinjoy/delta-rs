@@ -354,7 +354,7 @@ impl ConvertToDeltaBuilder {
 
             let batch_builder = ParquetRecordBatchStreamBuilder::new(ParquetObjectReader::new(
                 object_store.clone(),
-                file.clone(),
+                file.location.clone(),
             ))
             .await?;
 

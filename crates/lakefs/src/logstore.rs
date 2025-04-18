@@ -331,5 +331,6 @@ fn put_options() -> &'static PutOptions {
         mode: object_store::PutMode::Create, // Creates if file doesn't exists yet
         tags: TagSet::default(),
         attributes: Attributes::default(),
+        ..Default::default()
     })
 }

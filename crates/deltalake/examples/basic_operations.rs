@@ -272,9 +272,9 @@ async fn round_trip_test() -> Result<(), deltalake::errors::DeltaTableError> {
         .build()?;
 
     //create_table(uri, table_name, &crypt).await?;
-    // update_table(uri, &decrypt, &crypt).await?;
+    update_table(uri, &decrypt, &crypt).await?;
     // delete_from_table(uri, &decrypt, &crypt).await?;
-    merge_table(uri, &decrypt, &crypt).await?;
+    //merge_table(uri, &decrypt, &crypt).await?;
     read_table(uri, &decrypt).await?;
     Ok(())
 }

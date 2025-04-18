@@ -633,7 +633,7 @@ impl MergePlan {
                             async move {
                                 let file_reader = ParquetObjectReader::new(
                                     object_store_ref,
-                                    ObjectMeta::try_from(file).unwrap(),
+                                    ObjectMeta::try_from(file).unwrap().location,
                                 );
                                 ParquetRecordBatchStreamBuilder::new(file_reader)  // TODO. Need new_with_options here for encryption
                                     .await?
