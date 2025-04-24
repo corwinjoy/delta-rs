@@ -16,6 +16,9 @@ use std::sync::Arc;
 use deltalake_core::{DeltaTableBuilder, DeltaTableError};
 use url::Url;
 use deltalake_core::logstore::object_store::local::LocalFileSystem;
+mod crypt_fs;
+
+use crypt_fs::CryptFileSystem;
 
 fn get_table_columns() -> Vec<StructField> {
     vec![
@@ -95,9 +98,9 @@ fn get_table_batches() -> RecordBatch {
 async fn main() -> Result<(), deltalake::errors::DeltaTableError> {
     // Create a delta operations client pointing at an un-initialized location.
     let path = "/home/cjoy/src/delta-rs/crates/deltalake/examples/test_crypt";
-    let table_str = String::from("file://") + path;
-    let table_uri = table_str.as_str();
-    let file_store = Arc::new(LocalFileSystem::new()); // Starting ObjectStore
+    let joined = String::from("file://") + path;
+    let table_uri = joined.as_str();
+    let file_store = Arc::new(CryptFileSystem::new()); // Starting ObjectStore
 
     let _ = fs::remove_dir_all(path);
     fs::create_dir(path)?;
