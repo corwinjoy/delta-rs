@@ -1,3 +1,4 @@
+use std::fs;
 use deltalake::arrow::{
     array::{Int32Array, StringArray, TimestampMicrosecondArray},
     datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema, TimeUnit},
@@ -12,6 +13,9 @@ use deltalake::parquet::{
 use deltalake::{protocol::SaveMode, DeltaOps};
 
 use std::sync::Arc;
+use deltalake_core::{DeltaTableBuilder, DeltaTableError};
+use url::Url;
+use deltalake_core::logstore::object_store::local::LocalFileSystem;
 
 fn get_table_columns() -> Vec<StructField> {
     vec![
@@ -61,14 +65,54 @@ fn get_table_batches() -> RecordBatch {
     .unwrap()
 }
 
+/*
+    async fn test_peek_with_invalid_json() -> DeltaResult<()> {
+        use crate::logstore::object_store::memory::InMemory;
+        let memory_store = Arc::new(InMemory::new());
+        let log_path = Path::from("delta-table/_delta_log/00000000000000000001.json");
+
+        let log_content = r#"{invalid_json"#;
+
+        memory_store
+            .put(&log_path, log_content.into())
+            .await
+            .expect("Failed to write log file");
+
+        let table_uri = "memory:///delta-table";
+
+        let table = crate::DeltaTableBuilder::from_valid_uri(table_uri)
+            .unwrap()
+            .with_storage_backend(memory_store, Url::parse(table_uri).unwrap())
+            .build()?;
+
+        let result = table.log_store().peek_next_commit(0).await;
+        assert!(result.is_err());
+        Ok(())
+    }
+ */
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), deltalake::errors::DeltaTableError> {
     // Create a delta operations client pointing at an un-initialized location.
-    let ops = if let Ok(table_uri) = std::env::var("TABLE_URI") {
-        DeltaOps::try_from_uri(table_uri).await?
-    } else {
-        DeltaOps::new_in_memory()
-    };
+    let path = "/home/cjoy/src/delta-rs/crates/deltalake/examples/test_crypt";
+    let table_str = String::from("file://") + path;
+    let table_uri = table_str.as_str();
+    let file_store = Arc::new(LocalFileSystem::new()); // Starting ObjectStore
+
+    let _ = fs::remove_dir_all(path);
+    fs::create_dir(path)?;
+    
+    let mut table = DeltaTableBuilder::from_valid_uri(table_uri)
+        .unwrap()
+        .with_storage_backend(file_store, Url::parse(table_uri).unwrap())
+        .build()?;
+    
+    // We allow for uninitialized locations, since we may want to create the table
+    let ops: DeltaOps = match table.load().await {
+        Ok(_) => Ok(table.into()),
+        Err(DeltaTableError::NotATable(_)) => Ok(table.into()),
+        Err(err) => Err(err),
+    }?;
 
     // The operations module uses a builder pattern that allows specifying several options
     // on how the command behaves. The builders implement `Into<Future>`, so once
