@@ -720,7 +720,7 @@ mod tests {
         let range_result = storage.get_range(&location, range.clone()).await;
 
         let bytes = range_result.unwrap();
-        assert_eq!(bytes, data.slice(range.clone()));
+        assert_eq!(bytes, data.slice((range.start as usize)..(range.end as usize)));
     }
 
     #[tokio::test]
