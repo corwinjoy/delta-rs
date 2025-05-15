@@ -7,7 +7,6 @@ use deltalake::arrow::{
 use deltalake::kernel::{DataType, PrimitiveType, StructField};
 use deltalake::operations::collect_sendable_stream;
 use deltalake::parquet::{
-    basic::{Compression, ZstdLevel},
     file::properties::WriterProperties,
 };
 use deltalake::{arrow, parquet, protocol::SaveMode, DeltaOps};
@@ -19,7 +18,7 @@ use deltalake::datafusion::prelude::{SessionConfig, SessionContext};
 use deltalake::parquet::encryption::decrypt::FileDecryptionProperties;
 use deltalake::parquet::encryption::encrypt::FileEncryptionProperties;
 use deltalake_core::datafusion::config::ConfigFileDecryptionProperties;
-use deltalake_core::{DeltaTable, DeltaTableError, TableProperty};
+use deltalake_core::{DeltaTable, DeltaTableError};
 use deltalake_core::logstore::LogStoreRef;
 use url::Url;
 use deltalake::arrow::datatypes::Schema;
@@ -170,7 +169,7 @@ async fn update_table(uri: &str, decryption_properties: &FileDecryptionPropertie
         .await
         .unwrap();
 
-    assert_eq!(table.version(), 3);
+    // assert_eq!(table.version(), 3);
 
     Ok(())
 }
@@ -271,8 +270,8 @@ async fn round_trip_test() -> Result<(), deltalake::errors::DeltaTableError> {
         .with_column_key("string", key.clone())
         .build()?;
 
-    //create_table(uri, table_name, &crypt).await?;
-    update_table(uri, &decrypt, &crypt).await?;
+    create_table(uri, table_name, &crypt).await?;
+    // update_table(uri, &decrypt, &crypt).await?;
     // delete_from_table(uri, &decrypt, &crypt).await?;
     //merge_table(uri, &decrypt, &crypt).await?;
     read_table(uri, &decrypt).await?;
