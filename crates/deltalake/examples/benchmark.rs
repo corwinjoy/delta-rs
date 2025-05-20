@@ -12,6 +12,7 @@ use deltalake::parquet::{
 use deltalake::{parquet, DeltaOps};
 
 use std::sync::Arc;
+use futures::StreamExt;
 use deltalake::datafusion::execution::runtime_env::RuntimeEnv;
 use deltalake::datafusion::execution::{SessionState, SessionStateBuilder};
 use deltalake::datafusion::prelude::{SessionConfig, SessionContext};
@@ -22,6 +23,7 @@ use deltalake_core::{DeltaTable, DeltaTableError};
 use deltalake_core::logstore::LogStoreRef;
 use url::Url;
 use deltalake::arrow::datatypes::Schema;
+use std::time::{Duration, Instant};
 
 
 fn get_table_columns() -> Vec<StructField> {
@@ -131,13 +133,24 @@ async fn open_table_with_state(uri: &str, decryption_properties: &FileDecryption
 async fn read_table(uri: &str, decryption_properties: &FileDecryptionProperties) -> Result<(), deltalake::errors::DeltaTableError>{
     let (table, state) = open_table_with_state(uri, decryption_properties).await?;
 
-    let (_table, stream) = DeltaOps(table).load()
+    let (_table, mut stream) = DeltaOps(table).load()
         .with_session_state(state)
         .await?;
+    
+    /*
+    // Read and print full data
     let data: Vec<RecordBatch> = collect_sendable_stream(stream).await?;
-
     println!("{data:?}");
+    
+    */
 
+    // Read data, streaming and discarding record batches:
+    let mut batch_count = 0;
+    while let Some(item) = stream.next().await {
+        batch_count = batch_count + 1;
+    }
+
+    println!("batch_count {}", batch_count);
     Ok(())
 }
 
@@ -146,7 +159,6 @@ async fn round_trip_test() -> Result<(), deltalake::errors::DeltaTableError> {
     let uri = "/home/cjoy/src/delta-rs-with-encryption/delta-rs/crates/deltalake/examples/encrypted_roundtrip";
     let table_name = "roundtrip";
     let key: Vec<_> = b"1234567890123450".to_vec();
-    let wrong_key: Vec<_> = b"9234567890123450".to_vec();
 
     let crypt = parquet::encryption::encrypt::
         FileEncryptionProperties::builder(key.clone())
@@ -159,15 +171,21 @@ async fn round_trip_test() -> Result<(), deltalake::errors::DeltaTableError> {
         .with_column_key("string", key.clone())
         .build()?;
 
+    let start = Instant::now();
     create_table(uri, table_name, &crypt).await?;
+    let duration = start.elapsed();
+    println!("Time elapsed in create_table() is: {:?}", duration);
+
+    let start = Instant::now();
     read_table(uri, &decrypt).await?;
+    let duration = start.elapsed();
+    println!("Time elapsed in read_table() is: {:?}", duration);
     Ok(())
 }
 
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), deltalake::errors::DeltaTableError> {
-    //encrypted_read_test().await?;
     round_trip_test().await?;
     Ok(())
 }
