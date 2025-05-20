@@ -9,7 +9,7 @@ use deltalake::operations::collect_sendable_stream;
 use deltalake::parquet::{
     file::properties::WriterProperties,
 };
-use deltalake::{arrow, parquet, protocol::SaveMode, DeltaOps};
+use deltalake::{parquet, DeltaOps};
 
 use std::sync::Arc;
 use deltalake::datafusion::execution::runtime_env::RuntimeEnv;
@@ -22,10 +22,6 @@ use deltalake_core::{DeltaTable, DeltaTableError};
 use deltalake_core::logstore::LogStoreRef;
 use url::Url;
 use deltalake::arrow::datatypes::Schema;
-use deltalake::datafusion::assert_batches_sorted_eq;
-
-use deltalake::datafusion::dataframe::DataFrame;
-use deltalake::datafusion::logical_expr::{col, lit};
 
 
 fn get_table_columns() -> Vec<StructField> {
@@ -109,15 +105,6 @@ async fn create_table(uri: &str, table_name: &str, crypt: &FileEncryptionPropert
 
     assert_eq!(table.version(), 1);
 
-    // To overwrite instead of append (which is the default), use `.with_save_mode`:
-    let table = DeltaOps(table)
-        .write(vec![batch.clone()])
-        .with_save_mode(SaveMode::Overwrite)
-        .with_writer_properties(writer_properties.clone())
-        .await?;
-
-    assert_eq!(table.version(), 2);
-
     Ok(table)
 }
 
@@ -154,104 +141,6 @@ async fn read_table(uri: &str, decryption_properties: &FileDecryptionProperties)
     Ok(())
 }
 
-async fn update_table(uri: &str, decryption_properties: &FileDecryptionProperties, crypt: &FileEncryptionProperties) -> Result<(), DeltaTableError> {
-    let (table, state) = open_table_with_state(uri, decryption_properties).await?;
-    let writer_properties = WriterProperties::builder()
-        .with_file_encryption_properties(crypt.clone())
-        .build();
-
-    let (table, _metrics) = DeltaOps(table)
-        .update()
-        .with_session_state(state)
-        .with_writer_properties(writer_properties)
-        .with_predicate(col("int").eq(lit(1)))
-        .with_update("int", "100")
-        .await
-        .unwrap();
-
-    // assert_eq!(table.version(), 3);
-
-    Ok(())
-}
-
-async fn delete_from_table(uri: &str, decryption_properties: &FileDecryptionProperties, crypt: &FileEncryptionProperties) -> Result<(), DeltaTableError> {
-    let (table, state) = open_table_with_state(uri, decryption_properties).await?;
-    let writer_properties = WriterProperties::builder()
-        .with_file_encryption_properties(crypt.clone())
-        .build();
-
-    let (table, _metrics) = DeltaOps(table)
-        .delete()
-        .with_session_state(state)
-        .with_writer_properties(writer_properties)
-        .with_predicate(col("int").eq(lit(2)))
-        .await
-        .unwrap();
-
-    assert_eq!(table.version(), 3);
-
-    Ok(())
-}
-
-fn merge_source(schema: Arc<ArrowSchema>) -> DataFrame {
-    let ctx = SessionContext::new();
-    let batch = RecordBatch::try_new(
-        Arc::clone(&schema),
-        vec![
-            Arc::new(arrow::array::Int32Array::from(vec![10, 20, 30])),
-            Arc::new(arrow::array::StringArray::from(vec!["B", "C", "X"])),
-            Arc::new(TimestampMicrosecondArray::from(vec![
-                1000000012, 1000000012, 1000000012
-            ])),
-        ],
-    ).unwrap();
-    ctx.read_batch(batch).unwrap()
-}
-
-
-async fn merge_table(uri: &str, decryption_properties: &FileDecryptionProperties, crypt: &FileEncryptionProperties) -> Result<(), DeltaTableError> {
-
-    let (table, state) = open_table_with_state(uri, decryption_properties).await?;
-    let writer_properties = WriterProperties::builder()
-        .with_file_encryption_properties(crypt.clone())
-        .build();
-
-    let schema = get_table_schema();
-    let source = merge_source(schema);
-
-    let (table, _metrics) = DeltaOps(table)
-        .merge(source, col("target.int").eq(col("source.int")))
-        .with_session_state(state.clone())
-        .with_writer_properties(writer_properties)
-        .with_source_alias("source")
-        .with_target_alias("target")
-        .when_not_matched_by_source_delete(|delete| {
-            delete
-        })
-        .unwrap()
-        .await
-        .unwrap();
-
-    let expected = vec![
-        "+----+-------+------------+",
-        "| id | value | modified   |",
-        "+----+-------+------------+",
-        "| A  | 1     | 2021-02-01 |",
-        "| B  | 10    | 2021-02-01 |",
-        "| C  | 10    | 2021-02-02 |",
-        "+----+-------+------------+",
-    ];
-
-    let (_table, stream) = DeltaOps(table).load()
-        .with_session_state(state)
-        .await?;
-    let data: Vec<RecordBatch> = collect_sendable_stream(stream).await?;
-
-    println!("{data:?}");
-
-    assert_batches_sorted_eq!(&expected, &data);
-    Ok(())
-}
 
 async fn round_trip_test() -> Result<(), deltalake::errors::DeltaTableError> {
     let uri = "/home/cjoy/src/delta-rs-with-encryption/delta-rs/crates/deltalake/examples/encrypted_roundtrip";
@@ -271,9 +160,6 @@ async fn round_trip_test() -> Result<(), deltalake::errors::DeltaTableError> {
         .build()?;
 
     create_table(uri, table_name, &crypt).await?;
-    // update_table(uri, &decrypt, &crypt).await?;
-    // delete_from_table(uri, &decrypt, &crypt).await?;
-    //merge_table(uri, &decrypt, &crypt).await?;
     read_table(uri, &decrypt).await?;
     Ok(())
 }
