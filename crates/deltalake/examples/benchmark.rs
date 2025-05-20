@@ -135,6 +135,7 @@ async fn read_table(uri: &str, decryption_properties: &FileDecryptionProperties)
 
     let (_table, mut stream) = DeltaOps(table).load()
         .with_session_state(state)
+        .with_columns(vec!["int"]) // only read specified columns
         .await?;
     
     /*
