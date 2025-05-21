@@ -143,12 +143,13 @@ async fn open_table_with_state(uri: &str, decryption_properties: &FileDecryption
     Ok((table, state))
 }
 
-async fn read_table(uri: &str, decryption_properties: &FileDecryptionProperties) -> Result<(), deltalake::errors::DeltaTableError>{
+async fn read_table(uri: &str, decryption_properties: &FileDecryptionProperties,
+        columns: &Vec<String>) -> Result<(), deltalake::errors::DeltaTableError>{
     let (table, state) = open_table_with_state(uri, decryption_properties).await?;
 
     let (_table, mut stream) = DeltaOps(table).load()
         .with_session_state(state)
-        .with_columns(vec!["flt0"]) // only read specified columns
+        .with_columns(columns) // only read specified columns
         .await?;
 
     /*
@@ -195,7 +196,7 @@ async fn round_trip_test() -> Result<(), deltalake::errors::DeltaTableError> {
     println!("Time elapsed in create_table() is: {:?}", duration);
 
     let start = Instant::now();
-    read_table(uri, &decrypt).await?;
+    read_table(uri, &decrypt, &colnames).await?;
     let duration = start.elapsed();
     println!("Time elapsed in read_table() is: {:?}", duration);
     Ok(())
