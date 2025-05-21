@@ -24,37 +24,21 @@ use deltalake_core::logstore::LogStoreRef;
 use url::Url;
 use deltalake::arrow::datatypes::Schema;
 use std::time::{Duration, Instant};
-
+use deltalake::arrow::array::Float32Array;
 
 fn get_table_columns() -> Vec<StructField> {
     vec![
         StructField::new(
-            String::from("int"),
-            DataType::Primitive(PrimitiveType::Integer),
+            String::from("float"),
+            DataType::Primitive(PrimitiveType::Float),
             false,
-        ),
-        StructField::new(
-            String::from("string"),
-            DataType::Primitive(PrimitiveType::String),
-            true,
-        ),
-        StructField::new(
-            String::from("timestamp"),
-            DataType::Primitive(PrimitiveType::TimestampNtz),
-            true,
         ),
     ]
 }
 
 fn get_table_schema() -> Arc<Schema> {
     let schema = Arc::new(ArrowSchema::new(vec![
-        Field::new("int", ArrowDataType::Int32, false),
-        Field::new("string", ArrowDataType::Utf8, true),
-        Field::new(
-            "timestamp",
-            ArrowDataType::Timestamp(TimeUnit::Microsecond, None),
-            true,
-        ),
+        Field::new("float", ArrowDataType::Float32, false),
     ]));
     schema
 }
@@ -62,18 +46,11 @@ fn get_table_schema() -> Arc<Schema> {
 fn get_table_batches() -> RecordBatch {
     let schema = get_table_schema();
 
-    let int_values = Int32Array::from(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
-    let str_values = StringArray::from(vec!["A", "B", "C", "B", "A", "C", "A", "B", "B", "A", "A"]);
-    let ts_values = TimestampMicrosecondArray::from(vec![
-        1000000012, 1000000012, 1000000012, 1000000012, 500012305, 500012305, 500012305, 500012305,
-        500012305, 500012305, 500012305,
-    ]);
+    let float_values = Float32Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]);
     RecordBatch::try_new(
         schema,
         vec![
-            Arc::new(int_values),
-            Arc::new(str_values),
-            Arc::new(ts_values),
+            Arc::new(float_values),
         ],
     )
     .unwrap()
@@ -135,7 +112,7 @@ async fn read_table(uri: &str, decryption_properties: &FileDecryptionProperties)
 
     let (_table, mut stream) = DeltaOps(table).load()
         .with_session_state(state)
-        .with_columns(vec!["int"]) // only read specified columns
+        .with_columns(vec!["float"]) // only read specified columns
         .await?;
     
     /*
@@ -163,13 +140,11 @@ async fn round_trip_test() -> Result<(), deltalake::errors::DeltaTableError> {
 
     let crypt = parquet::encryption::encrypt::
         FileEncryptionProperties::builder(key.clone())
-            .with_column_key("int", key.clone())
-            .with_column_key("string", key.clone())
+            .with_column_key("float", key.clone())
             .build()?;
 
     let decrypt = FileDecryptionProperties::builder(key.clone())
-        .with_column_key("int", key.clone())
-        .with_column_key("string", key.clone())
+        .with_column_key("float", key.clone())
         .build()?;
 
     let start = Instant::now();
