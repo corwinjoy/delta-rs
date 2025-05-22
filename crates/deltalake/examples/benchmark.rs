@@ -92,7 +92,7 @@ fn get_table_batches(ncol: usize, nrow: usize) -> RecordBatch {
     batches
 }
 
-async fn create_table(uri: &str, table_name: &str, crypt: &FileEncryptionProperties, ncol: usize, nrow: usize) -> Result<DeltaTable, DeltaTableError> {
+async fn create_table(uri: &str, table_name: &str, crypt: Option<&FileEncryptionProperties>, ncol: usize, nrow: usize) -> Result<DeltaTable, DeltaTableError> {
     fs::remove_dir_all(uri)?;
     let ops = DeltaOps::try_from_uri(uri).await?;
 
@@ -108,9 +108,13 @@ async fn create_table(uri: &str, table_name: &str, crypt: &FileEncryptionPropert
 
     assert_eq!(table.version(), 0);
 
-    let writer_properties = WriterProperties::builder()
-        .with_file_encryption_properties(crypt.clone())
-        .build();
+    let mut writer_properties = WriterProperties::builder();
+
+    if let Some(crypt) = crypt {
+        writer_properties = writer_properties.with_file_encryption_properties(crypt.clone());
+    }
+
+    let writer_properties = writer_properties.build();
 
     let batch = get_table_batches(ncol, nrow);
     let table = DeltaOps(table)
@@ -129,11 +133,13 @@ fn register_store(store: LogStoreRef, env: Arc<RuntimeEnv>) {
     env.register_object_store(url, store.object_store(None));
 }
 
-async fn open_table_with_state(uri: &str, decryption_properties: &FileDecryptionProperties) -> Result<(DeltaTable, SessionState), DeltaTableError> {
+async fn open_table_with_state(uri: &str, decryption_properties: Option<&FileDecryptionProperties>) -> Result<(DeltaTable, SessionState), DeltaTableError> {
     let table = deltalake::open_table(String::from(uri)).await?;
-    let fd: ConfigFileDecryptionProperties = decryption_properties.clone().into();
     let mut sc = SessionConfig::new();
-    sc.options_mut().execution.parquet.file_decryption_properties = Some(fd);
+    if let Some(decryption) = decryption_properties {
+        let fd: ConfigFileDecryptionProperties = decryption.clone().into();
+        sc.options_mut().execution.parquet.file_decryption_properties = Some(fd);
+    }
 
     let state = SessionStateBuilder::new()
         .with_config(sc)
@@ -143,7 +149,7 @@ async fn open_table_with_state(uri: &str, decryption_properties: &FileDecryption
     Ok((table, state))
 }
 
-async fn read_table(uri: &str, decryption_properties: &FileDecryptionProperties,
+async fn read_table(uri: &str, decryption_properties: Option<&FileDecryptionProperties>,
         columns: &Vec<String>) -> Result<(), deltalake::errors::DeltaTableError>{
     let (table, state) = open_table_with_state(uri, decryption_properties).await?;
 
@@ -170,9 +176,28 @@ async fn read_table(uri: &str, decryption_properties: &FileDecryptionProperties,
 }
 
 
-async fn round_trip_test() -> Result<(), deltalake::errors::DeltaTableError> {
+async fn round_trip_test(crypt: Option<&FileEncryptionProperties>,
+                         decrypt: Option<&FileDecryptionProperties>,
+                         ncol:usize, nrow:usize,
+                         colnames: &Vec<String>) -> Result<(), DeltaTableError> {
     let uri = "/home/cjoy/src/delta-rs-with-encryption/delta-rs/crates/deltalake/examples/encrypted_roundtrip";
     let table_name = "roundtrip";
+
+    let start = Instant::now();
+    create_table(uri, table_name, crypt, ncol, nrow).await?;
+    let duration = start.elapsed();
+    println!("Time elapsed in create_table() is: {:?}", duration);
+
+    let start = Instant::now();
+    read_table(uri, decrypt, &colnames).await?;
+    let duration = start.elapsed();
+    println!("Time elapsed in read_table() is: {:?}", duration);
+    Ok(())
+}
+
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), DeltaTableError> {
     let key: Vec<_> = b"1234567890123450".to_vec();
     let ncol: usize = 5;
     let nrow: usize = 20;
@@ -190,22 +215,13 @@ async fn round_trip_test() -> Result<(), deltalake::errors::DeltaTableError> {
     }
     let decrypt = decrypt_builder.build()?;
 
-    let start = Instant::now();
-    create_table(uri, table_name, &crypt, ncol, nrow).await?;
-    let duration = start.elapsed();
-    println!("Time elapsed in create_table() is: {:?}", duration);
+    println!("***************************************************************");
+    println!("Round trip test with Encryption");
+    round_trip_test(Some(&crypt), Some(&decrypt), ncol, nrow, &colnames).await?;
 
-    let start = Instant::now();
-    read_table(uri, &decrypt, &colnames).await?;
-    let duration = start.elapsed();
-    println!("Time elapsed in read_table() is: {:?}", duration);
-    Ok(())
-}
-
-
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), deltalake::errors::DeltaTableError> {
-    round_trip_test().await?;
+    println!("***************************************************************");
+    println!("Round trip test with NO Encryption");
+    round_trip_test(None, None, ncol, nrow, &colnames).await?;
     Ok(())
 }
 
