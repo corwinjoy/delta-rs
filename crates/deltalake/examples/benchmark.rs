@@ -23,7 +23,7 @@ use deltalake_core::{DeltaTable, DeltaTableError};
 use deltalake_core::logstore::LogStoreRef;
 use url::Url;
 use deltalake::arrow::datatypes::Schema;
-use std::time::{Instant};
+use std::time::{Duration, Instant};
 use rand::{Rng};
 use deltalake::arrow::array::{Array, Float32Array};
 
@@ -171,7 +171,7 @@ async fn read_table(uri: &str, decryption_properties: Option<&FileDecryptionProp
         batch_count = batch_count + 1;
     }
 
-    println!("batch_count {}", batch_count);
+    // println!("batch_count {}", batch_count);
     Ok(())
 }
 
@@ -179,49 +179,75 @@ async fn read_table(uri: &str, decryption_properties: Option<&FileDecryptionProp
 async fn round_trip_test(crypt: Option<&FileEncryptionProperties>,
                          decrypt: Option<&FileDecryptionProperties>,
                          ncol:usize, nrow:usize,
-                         colnames: &Vec<String>) -> Result<(), DeltaTableError> {
+                         colnames: &Vec<String>) -> Result<(Duration, Duration), DeltaTableError> {
     let uri = "/home/cjoy/src/delta-rs-with-encryption/delta-rs/crates/deltalake/examples/encrypted_roundtrip";
     let table_name = "roundtrip";
 
     let start = Instant::now();
     create_table(uri, table_name, crypt, ncol, nrow).await?;
-    let duration = start.elapsed();
-    println!("Time elapsed in create_table() is: {:?}", duration);
+    let duration_write = start.elapsed();
+    // println!("Time elapsed in create_table() is: {:?}", duration);
 
     let start = Instant::now();
     read_table(uri, decrypt, &colnames).await?;
-    let duration = start.elapsed();
-    println!("Time elapsed in read_table() is: {:?}", duration);
-    Ok(())
+    let duration_read = start.elapsed();
+    // println!("Time elapsed in read_table() is: {:?}", duration);
+    Ok((duration_write, duration_read))
 }
 
-
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), DeltaTableError> {
+async fn run_roundtrip_test(ncol: usize, ncol_selected: usize, nrow: usize, all_colnames: &Vec<String>, use_modular_encryption: bool,
+    object_store_name: &str) 
+    -> Result<(Duration, Duration), DeltaTableError> {
     let key: Vec<_> = b"1234567890123450".to_vec();
-    let ncol: usize = 5;
-    let nrow: usize = 20;
-    let colnames = get_column_names(ncol);
+    let selected_colnames = all_colnames[(ncol-ncol_selected)..ncol].to_vec();
 
     let mut crypt_builder = FileEncryptionProperties::builder(key.clone());
     for i in 0..ncol {
-        crypt_builder = crypt_builder.with_column_key(&*colnames[i], key.clone());
+        crypt_builder = crypt_builder.with_column_key(&*all_colnames[i], key.clone());
     }
     let crypt = crypt_builder.build()?;
 
     let mut decrypt_builder = FileDecryptionProperties::builder(key.clone());
     for i in 0..ncol {
-        decrypt_builder = decrypt_builder.with_column_key(&*colnames[i], key.clone());
+        decrypt_builder = decrypt_builder.with_column_key(&*all_colnames[i], key.clone());
     }
     let decrypt = decrypt_builder.build()?;
 
-    println!("***************************************************************");
-    println!("Round trip test with Encryption");
-    round_trip_test(Some(&crypt), Some(&decrypt), ncol, nrow, &colnames).await?;
+    let (opt_crypt, opt_decrypt) = match use_modular_encryption {
+        true => { (Some(&crypt), Some(&decrypt)) },
+        false => { (None, None) },
+    };
 
-    println!("***************************************************************");
-    println!("Round trip test with NO Encryption");
-    round_trip_test(None, None, ncol, nrow, &colnames).await?;
-    Ok(())
+    // println!("***************************************************************");
+    // println!("Round trip test with Encryption = {}", use_modular_encryption);
+    let (duration_write, duration_read) = round_trip_test(opt_crypt, opt_decrypt, ncol, nrow, &selected_colnames).await?;
+    
+    if object_store_name == "Warmup" {
+        println!("nrow, ncol, ncol_selected, use_modular_encryption, object_store_name, duration_write, duration_read);");
+    } else {
+        println!("{}, {}, {}, {}, {}, {:?}, {:?}", nrow, ncol, ncol_selected, use_modular_encryption, object_store_name,
+                 duration_write, duration_read);
+    }
+    
+    Ok((duration_write, duration_read))
 }
 
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), DeltaTableError> {
+    let ncol: usize = 10;
+    let nrow: usize = 20;
+    let colnames = get_column_names(ncol);
+    
+    // warmup
+    run_roundtrip_test(ncol, ncol, nrow, &colnames, false, "Warmup").await?;
+    
+    // no encryption, LFS
+    run_roundtrip_test(ncol, ncol, nrow, &colnames, false, "LocalFileSystem").await?;
+    run_roundtrip_test(ncol, ncol/10, nrow, &colnames, false, "LocalFileSystem").await?;
+    
+    // modular encryption, LFS
+    run_roundtrip_test(ncol, ncol, nrow, &colnames, true, "LocalFileSystem").await?;
+    run_roundtrip_test(ncol, ncol/10, nrow, &colnames, true, "LocalFileSystem").await?;
+
+    Ok(())
+}
