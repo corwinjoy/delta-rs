@@ -142,15 +142,15 @@ pub fn object_store_from_uri(
 // Have to reimplement this because GetRange does not expose GetRange::as_range()
 pub fn get_range_to_range(
     gr: Option<&GetRange>,
-    len: usize,
-) -> object_store::Result<Range<usize>, object_store::Error> {
+    len: u64,
+) -> object_store::Result<Range<u64>, object_store::Error> {
     if gr.is_none() {
         return Ok(0..len);
     }
     let gr = gr.unwrap();
     match gr {
         GetRange::Bounded(r) => {
-            if r.start >= len as u64 {
+            if r.start >= len {
                 let msg = format!(
                     "Range start {} must not be greater than buffer length {}",
                     r.start, len,
@@ -159,14 +159,14 @@ pub fn get_range_to_range(
                     store: "CryptFileSystem",
                     source: msg.into(),
                 })
-            } else if r.end > len as u64 {
-                Ok(r.start as usize..len)
+            } else if r.end > len {
+                Ok(r.start..len)
             } else {
-                Ok(r.start as usize..r.end as usize)
+                Ok(r.start..r.end)
             }
         }
         GetRange::Offset(o) => {
-            if *o >= len as u64 {
+            if *o >= len {
                 let msg = format!(
                     "Range start {} must not be greater than buffer length {}",
                     *o, len,
@@ -176,7 +176,7 @@ pub fn get_range_to_range(
                     source: msg.into(),
                 })
             } else {
-                Ok(*o as usize..len)
+                Ok(*o..len)
             }
         }
         GetRange::Suffix(n) => Ok(len.saturating_sub(*n)..len),
@@ -185,7 +185,7 @@ pub fn get_range_to_range(
 
 pub fn check_bytes_slice(
     len: usize,
-    range: impl RangeBounds<usize>,
+    range: impl RangeBounds<u64>,
 ) -> Result<(), object_store::Error> {
     use core::ops::Bound;
 
@@ -198,7 +198,7 @@ pub fn check_bytes_slice(
     let end = match range.end_bound() {
         Bound::Included(&n) => n.checked_add(1).expect("out of range"),
         Bound::Excluded(&n) => n,
-        Bound::Unbounded => len,
+        Bound::Unbounded => len as u64,
     };
 
     if begin > end {
@@ -212,7 +212,7 @@ pub fn check_bytes_slice(
         });
     }
 
-    if end > len {
+    if end > len as u64 {
         let msg = format!("Range end out of bounds: [{}..{}] ", begin, end,);
         return Err(object_store::Error::Generic {
             store: "CryptFileSystem",
@@ -262,8 +262,11 @@ impl CryptFileSystem {
 
     // Check cache for decrypted data
     fn get_cache(&self, location: &Path) -> Option<GetResultCache> {
+        return None;  // Disable cache for benchmark
+        /*
         let mut dc = self.decrypted_cache.lock().unwrap();
         dc.cache_get(location).map(GetResultCache::clone)
+        */
     }
 
     fn get_cached_getresult(
@@ -281,8 +284,8 @@ impl CryptFileSystem {
             Some(opts) => opts.range.as_ref(),
             None => None,
         };
-        let range = get_range_to_range(target_range, cache.bytes.len())?;
-        let bytes = cache.bytes.slice(range.clone());
+        let range = get_range_to_range(target_range, cache.bytes.len() as u64)?;
+        let bytes = cache.bytes.slice(range.start as usize..range.end as usize);
         let stream = futures::stream::once(futures::future::ready(Ok(bytes)));
         Ok(Some(GetResult {
             payload: GetResultPayload::Stream(stream.boxed()),
@@ -564,7 +567,7 @@ impl ObjectStore for CryptFileSystem {
         self.decrypted_get_result(location, gr).await
     }
 
-    async fn get_range(&self, location: &Path, range: Range<usize>) -> object_store::Result<Bytes> {
+    async fn get_range(&self, location: &Path, range: std::ops::Range<u64>) -> object_store::Result<Bytes> {
         warn!("get_range: {location}");
         let cache = self.get_cache(location);
         let db = match cache {
@@ -575,13 +578,13 @@ impl ObjectStore for CryptFileSystem {
             }
         };
         check_bytes_slice(db.len(), range.clone())?;
-        Ok(db.slice(range))
+        Ok(db.slice(range.start as usize..range.end as usize))
     }
-
+    
     async fn get_ranges(
         &self,
         location: &Path,
-        ranges: &[Range<usize>],
+        ranges: & [std::ops::Range<u64>],
     ) -> object_store::Result<Vec<Bytes>> {
         warn!("get_ranges: {location}");
         let cache = self.get_cache(location);
@@ -597,7 +600,7 @@ impl ObjectStore for CryptFileSystem {
             .into_iter()
             .map(|range| {
                 check_bytes_slice(db.len(), range.clone())?;
-                Ok(db.slice(range))
+                Ok(db.slice(range.start as usize..range.end as usize))
             })
             .collect()
     }
@@ -623,10 +626,11 @@ impl ObjectStore for CryptFileSystem {
         self.os.delete_stream(locations)
     }
 
+    // fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, Result<ObjectMeta>>;
     fn list(
         &self,
         prefix: Option<&Path>,
-    ) -> futures_core::stream::BoxStream<'_, object_store::Result<ObjectMeta>> {
+    ) -> futures_core::stream::BoxStream<'static, object_store::Result<ObjectMeta>> {
         self.os.list(prefix)
     }
 
@@ -634,7 +638,7 @@ impl ObjectStore for CryptFileSystem {
         &self,
         prefix: Option<&Path>,
         offset: &Path,
-    ) -> futures_core::stream::BoxStream<'_, object_store::Result<ObjectMeta>> {
+    ) -> futures_core::stream::BoxStream<'static, object_store::Result<ObjectMeta>> {
         self.os.list_with_offset(prefix, offset)
     }
 

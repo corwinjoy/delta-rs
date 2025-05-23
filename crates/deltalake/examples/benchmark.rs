@@ -28,6 +28,9 @@ use deltalake::arrow::array::{Array, Float32Array};
 use deltalake_core::storage::DynObjectStore;
 use deltalake_core::storage::object_store::local::LocalFileSystem;
 
+mod crypt_fs;
+use crypt_fs::{KMS, CryptFileSystem};
+
 fn get_column_names(ncol: usize) -> Vec<String> {
     let mut colnames = Vec::new(); // Initialize an empty vector to hold the strings.
 
@@ -245,10 +248,10 @@ async fn run_roundtrip_test(ncol: usize, ncol_selected: usize, nrow: usize, all_
         round_trip_test(opt_crypt, opt_decrypt, ncol, nrow, &selected_colnames, object_store, uri).await?;
 
     if object_store_name == "Warmup" {
-        println!("nrow, ncol, ncol_selected, use_modular_encryption, object_store_name, duration_write, duration_read");
+        println!("nrow, ncol, ncol_selected, use_modular_encryption, object_store_name, duration_write (s), duration_read (s)");
     } else {
-        println!("{}, {}, {}, {}, {}, {:?}, {:?}", nrow, ncol, ncol_selected, use_modular_encryption, object_store_name,
-                 duration_write, duration_read);
+        println!("{}, {}, {}, {}, {}, {}, {}", nrow, ncol, ncol_selected, use_modular_encryption, object_store_name,
+                 duration_write.as_secs_f32(), duration_read.as_secs_f32());
     }
 
     Ok((duration_write, duration_read))
@@ -258,7 +261,6 @@ async fn run_roundtrip_test(ncol: usize, ncol_selected: usize, nrow: usize, all_
 async fn main() -> Result<(), DeltaTableError> {
     let ncol: usize = 10;
     let nrow: usize = 20;
-    let colnames = get_column_names(ncol);
     let dir = "/benchmark_crypt";
     let workdir = env::current_dir()?;
     let path = String::from(workdir.to_str().unwrap()) + dir;
@@ -270,17 +272,41 @@ async fn main() -> Result<(), DeltaTableError> {
     fs::create_dir(path)?;
 
     let lfs_store = Arc::new(LocalFileSystem::new_with_prefix(path)?);
+    let kms = Arc::new(KMS::new(b"password"));
+    let encrypted_store = Arc::new(CryptFileSystem::new(uri, kms.clone())?);
 
     // warmup
+    let colnames = get_column_names(ncol);
     run_roundtrip_test(ncol, ncol, nrow, &colnames, false, "Warmup", lfs_store.clone(), uri).await?;
 
-    // no encryption, LFS
+    let ncols = vec![1_000, 5_000, 10_000];
+    let nrows = vec![1_000, 10_000, 100_0000];
+
+    // let ncols = vec![100, 500];
+    // let nrows = vec![1000, 5000];
+    for ncol in ncols.iter() {
+        for nrow in nrows.iter() {
+            benchmark_nrow_ncol(*ncol, *nrow, uri, lfs_store.clone(), encrypted_store.clone()).await?;
+        }
+    }
+    
+
+    Ok(())
+}
+
+async fn benchmark_nrow_ncol(ncol: usize, nrow: usize, uri: &str, lfs_store: Arc<LocalFileSystem>, encrypted_store: Arc<CryptFileSystem>) -> Result<(), DeltaTableError> {
+    let colnames = get_column_names(ncol);
+
+    // no parquet encryption, LFS
     run_roundtrip_test(ncol, ncol, nrow, &colnames, false, "LocalFileSystem", lfs_store.clone(), uri).await?;
-    run_roundtrip_test(ncol, ncol/10, nrow, &colnames, false, "LocalFileSystem", lfs_store.clone(), uri).await?;
+    run_roundtrip_test(ncol, ncol / 10, nrow, &colnames, false, "LocalFileSystem", lfs_store.clone(), uri).await?;
 
     // modular encryption, LFS
     run_roundtrip_test(ncol, ncol, nrow, &colnames, true, "LocalFileSystem", lfs_store.clone(), uri).await?;
-    run_roundtrip_test(ncol, ncol/10, nrow, &colnames, true, "LocalFileSystem", lfs_store.clone(), uri).await?;
+    run_roundtrip_test(ncol, ncol / 10, nrow, &colnames, true, "LocalFileSystem", lfs_store.clone(), uri).await?;
 
+    // no parquet encryption, encrypted_file_store
+    run_roundtrip_test(ncol, ncol, nrow, &colnames, false, "CryptFileSystem", encrypted_store.clone(), uri).await?;
+    run_roundtrip_test(ncol, ncol / 10, nrow, &colnames, false, "CryptFileSystem", encrypted_store.clone(), uri).await?;
     Ok(())
 }
