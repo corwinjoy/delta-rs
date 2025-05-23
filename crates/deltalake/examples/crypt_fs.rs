@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use cached::Cached;
 use cached::stores::SizedCache;
 use cocoon::{Cocoon, Creation};
-use futures::StreamExt;
+use futures::{stream, StreamExt};
 use log::warn;
 use show_bytes::show_bytes;
 use url::Url;
@@ -29,6 +29,9 @@ pub trait GetCryptKey: Display + Send + Sync + Debug {
     3. Error: User is not authorized, cannot connect to KMS server, etc.
     */
     fn get_key(&self, location: &Path) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>>;
+    
+    // Return true if location has an encryption key
+    fn has_key(&self, location: &Path) -> bool;
 }
 
 // A simple key management stub to associate path locations
@@ -65,6 +68,13 @@ impl GetCryptKey for KMS {
 
         Ok(Some(self.crypt_key.clone()))
     }
+
+    fn has_key(&self, location: &Path) -> bool {
+        if location.prefix_matches(&Path::from("/_delta_log")) {
+            return true;
+        }
+        false
+    }
 }
 
 // A KMS that disables encryption for basic tests
@@ -86,6 +96,10 @@ impl Display for KmsNone {
 impl GetCryptKey for KmsNone {
     fn get_key(&self, _location: &Path) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
         return Ok(None);
+    }
+
+    fn has_key(&self, location: &Path) -> bool {
+        false
     }
 }
 
@@ -262,11 +276,9 @@ impl CryptFileSystem {
 
     // Check cache for decrypted data
     fn get_cache(&self, location: &Path) -> Option<GetResultCache> {
-        return None;  // Disable cache for benchmark
-        /*
+        // return None;  // Disable cache for benchmark
         let mut dc = self.decrypted_cache.lock().unwrap();
         dc.cache_get(location).map(GetResultCache::clone)
-        */
     }
 
     fn get_cached_getresult(
@@ -336,6 +348,13 @@ impl CryptFileSystem {
         let cocoon = Self::get_cocoon(&key);
         let decrypted = cocoon.unwrap(data)?;
         Ok(decrypted)
+    }
+    
+    pub fn adjust_meta_size(&self,
+                            meta: &mut ObjectMeta) {
+        if self.kms.has_key(&meta.location) {
+            meta.size = meta.size - cocoon::PREFIX_SIZE as u64;
+        }
     }
 
     async fn decrypted_bytes(
@@ -610,7 +629,9 @@ impl ObjectStore for CryptFileSystem {
     // be just pass-through
     ////////////////////////////////////////////////////////////////////////////////////
     async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
-        self.os.head(location).await
+        let mut meta = self.os.head(location).await?;
+        self.adjust_meta_size(&mut meta);
+        Ok(meta)
     }
 
     async fn delete(&self, location: &Path) -> object_store::Result<()> {
@@ -631,7 +652,33 @@ impl ObjectStore for CryptFileSystem {
         &self,
         prefix: Option<&Path>,
     ) -> futures_core::stream::BoxStream<'static, object_store::Result<ObjectMeta>> {
-        self.os.list(prefix)
+        let stream = self.os.list(prefix);
+        
+        let mut objects = futures::executor::block_on(stream.collect::<Vec<object_store::Result<ObjectMeta>>>());
+        for object in objects.iter_mut() {
+            if let Ok(meta) = object {
+                self.adjust_meta_size(meta);
+            }
+        }
+        
+        let adjusted_stream = stream::iter(objects);
+        adjusted_stream.boxed()
+        
+        /*
+        // Can't do this because lifetime of stream may live beyond self
+        let adjusted_stream = stream.map(move |meta| {
+            if let Ok(meta) = &meta {
+                if self.kms.has_key(&meta.location) {
+                    let mut new_meta = meta.clone();
+                    self.adjust_meta_size(&mut new_meta);
+                    return Ok(new_meta);
+                }
+            }
+            meta
+        });
+        adjusted_stream.boxed()
+        
+         */
     }
 
     fn list_with_offset(
@@ -639,11 +686,24 @@ impl ObjectStore for CryptFileSystem {
         prefix: Option<&Path>,
         offset: &Path,
     ) -> futures_core::stream::BoxStream<'static, object_store::Result<ObjectMeta>> {
-        self.os.list_with_offset(prefix, offset)
+        let stream = self.os.list_with_offset(prefix, offset);
+        let mut objects = futures::executor::block_on(stream.collect::<Vec<object_store::Result<ObjectMeta>>>());
+        for object in objects.iter_mut() {
+            if let Ok(meta) = object {
+                self.adjust_meta_size(meta);
+            }
+        }
+
+        let adjusted_stream = stream::iter(objects);
+        adjusted_stream.boxed()
     }
 
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
-        self.os.list_with_delimiter(prefix).await
+        let mut lr = self.os.list_with_delimiter(prefix).await?;
+        for meta in lr.objects.iter_mut() {
+            self.adjust_meta_size(meta);
+        }
+        Ok(lr)
     }
 
     async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
