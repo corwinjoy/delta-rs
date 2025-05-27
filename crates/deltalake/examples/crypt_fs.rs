@@ -306,7 +306,7 @@ impl CryptFileSystem {
         }))
     }
 
-    fn clear_cache(&self) {
+    pub fn clear_cache(&self) {
         let mut dc = self.decrypted_cache.lock().unwrap();
         dc.cache_clear();
     }

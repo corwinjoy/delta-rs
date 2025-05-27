@@ -188,7 +188,7 @@ async fn read_table(uri: &str, decryption_properties: Option<&FileDecryptionProp
                 row_count = row_count + item.unwrap().num_rows() as usize;
             }
         }
-        println!("row_count {}", row_count);
+        // println!("row_count {}", row_count);
     }
     
     Ok(())
@@ -283,14 +283,12 @@ async fn main() -> Result<(), DeltaTableError> {
     // warmup
     let colnames = get_column_names(ncol);
     run_roundtrip_test(ncol, ncol, nrow, &colnames, false, "Warmup", encrypted_store.clone(), uri).await?;
-    
-    return Ok(());
 
     //let ncols = vec![1_000, 5_000, 10_000];
     //let nrows = vec![1_000, 10_000, 20_0000];
 
     let ncols = vec![100, 500];
-    let nrows = vec![1000, 5000];
+    let nrows = vec![1_000, 5_000];
     for ncol in ncols.iter() {
         for nrow in nrows.iter() {
             benchmark_nrow_ncol(*ncol, *nrow, uri, lfs_store.clone(), encrypted_store.clone()).await?;
@@ -304,7 +302,9 @@ async fn benchmark_nrow_ncol(ncol: usize, nrow: usize, uri: &str, lfs_store: Arc
     let colnames = get_column_names(ncol);
 
     // no parquet encryption, encrypted_file_store
+    encrypted_store.clear_cache();
     run_roundtrip_test(ncol, ncol, nrow, &colnames, false, "CryptFileSystem", encrypted_store.clone(), uri).await?;
+    encrypted_store.clear_cache();
     run_roundtrip_test(ncol, ncol / 10, nrow, &colnames, false, "CryptFileSystem", encrypted_store.clone(), uri).await?;
 
     // no parquet encryption, LFS
