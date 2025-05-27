@@ -176,22 +176,21 @@ async fn read_table(uri: &str, decryption_properties: Option<&FileDecryptionProp
         .with_columns(columns) // only read specified columns
         .await?;
 
-    /*
-    // Read and print full data
-    let data: Vec<RecordBatch> = collect_sendable_stream(stream).await?;
-    println!("{data:?}");
-
-    */
-
-    // Read data, streaming and discarding record batches:
-    let mut row_count = 0;
-    while let Some(item) = stream.next().await {
-        if item.is_ok() {
-            row_count = row_count + item.unwrap().num_rows() as usize;
+    if false {
+        // Read and print full data
+        let data: Vec<RecordBatch> = collect_sendable_stream(stream).await?;
+        println!("{data:?}");
+    } else {
+        // Read data, streaming and discarding record batches:
+        let mut row_count = 0;
+        while let Some(item) = stream.next().await {
+            if item.is_ok() {
+                row_count = row_count + item.unwrap().num_rows() as usize;
+            }
         }
+        println!("row_count {}", row_count);
     }
-
-    println!("row_count {}", row_count);
+    
     Ok(())
 }
 

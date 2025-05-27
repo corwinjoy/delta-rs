@@ -276,7 +276,6 @@ impl CryptFileSystem {
 
     // Check cache for decrypted data
     fn get_cache(&self, location: &Path) -> Option<GetResultCache> {
-        // return None;  // Disable cache for benchmark
         let mut dc = self.decrypted_cache.lock().unwrap();
         dc.cache_get(location).map(GetResultCache::clone)
     }
@@ -363,7 +362,6 @@ impl CryptFileSystem {
         gr: GetResult,
     ) -> Result<Bytes, object_store::Error> {
         // Buffer the payload in memory
-        let gr_range = gr.range.clone();
         let meta = gr.meta.clone();
         let attributes = gr.attributes.clone();
         let bytes = gr.bytes().await?;
@@ -378,18 +376,16 @@ impl CryptFileSystem {
             });
         };
         let decrypted = decrypted.unwrap();
-        if gr_range.start_bound() == Bound::Unbounded && gr_range.end_bound() == Bound::Unbounded {
-            // Only cache full get
-            self.set_cache(
-                location,
-                GetResultCache {
-                    bytes: Bytes::from(decrypted.clone()),
-                    meta,
-                    attributes,
-                },
-            );
-        }
-
+        
+        self.set_cache(
+            location,
+            GetResultCache {
+                bytes: Bytes::from(decrypted.clone()),
+                meta,
+                attributes,
+            },
+        );
+        
         // Convert to bytes
         let db = Bytes::from(decrypted);
         Ok(db)
@@ -447,10 +443,10 @@ impl CryptFileSystem {
         gr: GetResult,
     ) -> object_store::Result<GetResult> {
         let meta = gr.meta.clone();
-        let range = gr.range.clone();
         let attributes = gr.attributes.clone();
 
         let db = self.decrypted_bytes(location, gr).await?;
+        let range = (0 as u64..db.len() as u64);
         let stream = futures::stream::once(futures::future::ready(Ok(db)));
         Ok(GetResult {
             payload: GetResultPayload::Stream(stream.boxed()),
@@ -582,8 +578,15 @@ impl ObjectStore for CryptFileSystem {
         if cache.is_some() {
             return Ok(cache.unwrap());
         }
-        let gr = self.os.get_opts(location, options).await?;
-        self.decrypted_get_result(location, gr).await
+        let mut masked_options = options.clone();
+        masked_options.range = None;
+        let gr = self.os.get_opts(location, masked_options).await?;
+        let decrypted_gr = self.decrypted_get_result(location, gr).await?;
+        if options.range.is_none() {
+            return Ok(decrypted_gr);
+        };
+        let cache = self.get_cached_getresult(location, Some(&options))?;
+        return Ok(cache.unwrap());
     }
 
     async fn get_range(&self, location: &Path, range: std::ops::Range<u64>) -> object_store::Result<Bytes> {
