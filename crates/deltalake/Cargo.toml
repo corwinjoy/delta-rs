@@ -35,6 +35,16 @@ bytes = "1.10.1"
 rand = "0.9.1"
 futures-core = "0.3.31"
 
+# Anda dependencies
+aes-gcm = "0.10"
+async-stream = "0.3"
+base64 = "0.22"
+ciborium = "0.2"
+moka = { version = "0.12", features = ["future"] }
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+sha3 = "0.10"
+
 
 [features]
 # All of these features are just reflected into the core crate until that

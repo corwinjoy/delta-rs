@@ -31,6 +31,12 @@ use deltalake_core::storage::object_store::local::LocalFileSystem;
 mod crypt_fs;
 use crypt_fs::{KMS, CryptFileSystem};
 use crate::crypt_fs::KmsNone;
+use crate::encryption::EncryptedStore;
+
+pub mod anda;
+pub mod encryption;
+
+
 
 fn get_column_names(ncol: usize) -> Vec<String> {
     let mut colnames = Vec::new(); // Initialize an empty vector to hold the strings.
@@ -190,7 +196,7 @@ async fn read_table(uri: &str, decryption_properties: Option<&FileDecryptionProp
         }
         // println!("row_count {}", row_count);
     }
-    
+
     Ok(())
 }
 
@@ -277,8 +283,22 @@ async fn main() -> Result<(), DeltaTableError> {
     let kms = Arc::new(KMS::new(b"password"));
     let encrypted_store = Arc::new(CryptFileSystem::new(uri, kms.clone())?);
 
-    // let kms = Arc::new(KmsNone::new());
-    // let encrypted_store = Arc::new(CryptFileSystem::new(uri, kms)?);
+    use encryption::EncryptedStoreBuilder;
+
+    // Create a secret key (in production, use a secure random key)
+    let secret = [0u8; 32];
+
+    // Create an encrypted store with a local filesystem backend
+    // Use the Anda Object Store
+    // https://github.com/ldclabs/anda-db/tree/1af4cb7c533e3315eca5b0a3b3b46e40c38a0fea/rs/anda_object_store
+    //
+    let store = LocalFileSystem::new_with_prefix(path)?;
+    let anda_encrypted_store = EncryptedStoreBuilder::with_secret(store, 1000, secret)
+        .with_chunk_size(1024 * 1024) // Set chunk size to 1 MB
+        .with_conditional_put() // Enable conditional put operations
+        .build();
+    
+    let anda_encrypted_store = Arc::new(anda_encrypted_store);
 
     // warmup
     let colnames = get_column_names(ncol);
@@ -288,17 +308,18 @@ async fn main() -> Result<(), DeltaTableError> {
     //let nrows = vec![1_000, 10_000, 20_0000];
 
     let ncols = vec![100, 500];
-    let nrows = vec![1_000, 5_000];
+    let nrows = vec![1_000, 5_000, 10_000];
     for ncol in ncols.iter() {
         for nrow in nrows.iter() {
-            benchmark_nrow_ncol(*ncol, *nrow, uri, lfs_store.clone(), encrypted_store.clone()).await?;
+            benchmark_nrow_ncol(*ncol, *nrow, uri, lfs_store.clone(), encrypted_store.clone(), anda_encrypted_store.clone()).await?;
         }
     }
 
     Ok(())
 }
 
-async fn benchmark_nrow_ncol(ncol: usize, nrow: usize, uri: &str, lfs_store: Arc<LocalFileSystem>, encrypted_store: Arc<CryptFileSystem>) -> Result<(), DeltaTableError> {
+async fn benchmark_nrow_ncol(ncol: usize, nrow: usize, uri: &str, lfs_store: Arc<LocalFileSystem>, 
+                             encrypted_store: Arc<CryptFileSystem>, anda_encrypted_store: Arc<EncryptedStore<LocalFileSystem>>) -> Result<(), DeltaTableError> {
     let colnames = get_column_names(ncol);
 
     // no parquet encryption, encrypted_file_store
@@ -307,6 +328,10 @@ async fn benchmark_nrow_ncol(ncol: usize, nrow: usize, uri: &str, lfs_store: Arc
     encrypted_store.clear_cache();
     run_roundtrip_test(ncol, ncol / 10, nrow, &colnames, false, "CryptFileSystem", encrypted_store.clone(), uri).await?;
 
+    // no parquet encryption, anda encrypted_file_store
+    run_roundtrip_test(ncol, ncol, nrow, &colnames, false, "AndaCrypt", anda_encrypted_store.clone(), uri).await?;
+    run_roundtrip_test(ncol, ncol / 10, nrow, &colnames, false, "AndaCrypt", anda_encrypted_store.clone(), uri).await?;
+    
     // no parquet encryption, LFS
     run_roundtrip_test(ncol, ncol, nrow, &colnames, false, "LocalFileSystem", lfs_store.clone(), uri).await?;
     run_roundtrip_test(ncol, ncol / 10, nrow, &colnames, false, "LocalFileSystem", lfs_store.clone(), uri).await?;

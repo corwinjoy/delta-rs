@@ -10,7 +10,7 @@ use object_store::{
     GetRange, multipart::{MultipartStore, PartId}
 };
 use std::fmt::{Debug, Display, Formatter};
-use std::ops::{Bound, Range, RangeBounds};
+use std::ops::{Range, RangeBounds};
 use std::sync::{Arc, Mutex};
 //use log::{info, trace, warn};
 use cached::Cached;
@@ -98,7 +98,7 @@ impl GetCryptKey for KmsNone {
         return Ok(None);
     }
 
-    fn has_key(&self, location: &Path) -> bool {
+    fn has_key(&self, _location: &Path) -> bool {
         false
     }
 }
@@ -446,7 +446,7 @@ impl CryptFileSystem {
         let attributes = gr.attributes.clone();
 
         let db = self.decrypted_bytes(location, gr).await?;
-        let range = (0 as u64..db.len() as u64);
+        let range = 0 as u64..db.len() as u64;
         let stream = futures::stream::once(futures::future::ready(Ok(db)));
         Ok(GetResult {
             payload: GetResultPayload::Stream(stream.boxed()),
