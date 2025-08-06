@@ -33,6 +33,7 @@ pub mod state;
 pub mod state_arrow;
 
 mod columns;
+mod parquet_config;
 
 // Re-exposing for backwards compatibility
 pub use columns::*;
