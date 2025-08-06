@@ -54,6 +54,7 @@ pub struct DeltaTableConfig {
     pub log_batch_size: usize,
     
     /// Parquet specific configuration options for encryption, compression, etc.
+    /// JSON string representation of ParquetConfig / datafusion::TableParquetOptions
     pub parquet_config: Option<String>,
 
     #[serde(skip_serializing, skip_deserializing)]
