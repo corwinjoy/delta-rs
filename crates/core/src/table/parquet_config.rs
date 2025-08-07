@@ -76,6 +76,15 @@ pub fn entries(table_parquet_options: &TableParquetOptions) -> Vec<ConfigEntry> 
 
     let mut v = Visitor(vec![]);
     table_parquet_options.visit(&mut v, "", "");
+    
+    // Work around datafusion bug in file_encryption.visit.
+    // Visitor skips column_encryption_properties
+    let mut c = Visitor(vec![]);
+    if let Some(file_encryption) = &table_parquet_options.crypto.file_encryption {
+        file_encryption.column_encryption_properties.visit(&mut c, ".crypto.file_encryption", "");
+        v.0.append(&mut c.0);
+    };
+    
     v.0
 }
 
@@ -84,8 +93,8 @@ impl From<TableParquetOptions> for ParquetConfig {
         let dpo: HashMap<String, String> = Self::map_table_entries(&TableParquetOptions::default());
         let tpo: HashMap<String, String> = Self::map_table_entries(&table_parquet_options);
         
-        println!("[parquet_config] Default options: {:#?}", dpo);
-        println!("[parquet_config] Table options: {:#?}", tpo);
+        // println!("[parquet_config] Default options: {:#?}", dpo);
+        // println!("[parquet_config] Table options: {:#?}", tpo);
         let mut altered: HashMap<String, String> = HashMap::new();
 
         // Find altered entries

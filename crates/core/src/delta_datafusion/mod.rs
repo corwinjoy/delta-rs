@@ -729,8 +729,15 @@ impl<'a> DeltaScanBuilder<'a> {
 
         let stats = stats.unwrap_or(Statistics::new_unknown(&schema));
 
+        // An ugly merge of the session table options and the parquet options
+        // Change how we set the state??
+        let tbl_opt = self.session.table_options();
+        let tbl_opt_parquet = tbl_opt
+            .parquet
+            .clone();
         let parquet_options = TableParquetOptions {
             global: self.session.config().options().execution.parquet.clone(),
+            crypto: tbl_opt_parquet.crypto.clone(),
             ..Default::default()
         };
 
