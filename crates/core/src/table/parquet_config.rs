@@ -137,7 +137,6 @@ impl ParquetConfig {
     }
 
     // Convert the ParquetConfig to parquet::file::properties::WriterProperties
-    #[cfg(feature = "datafusion")]
     pub fn writer_options(&self) -> WriterProperties {
 
         let mut table_parquet_options: TableParquetOptions = self.clone().try_into()
