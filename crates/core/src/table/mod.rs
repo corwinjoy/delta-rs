@@ -33,6 +33,8 @@ pub mod state;
 pub mod state_arrow;
 
 mod columns;
+#[cfg(feature = "datafusion")]
+pub mod parquet_config;
 
 // Re-exposing for backwards compatibility
 pub use columns::*;
@@ -70,7 +72,7 @@ pub(crate) fn get_partition_col_data_types<'a>(
 pub struct DeltaTable {
     /// The state of the table as of the most recent loaded Delta log entry.
     pub state: Option<DeltaTableState>,
-    /// the load options used during load
+    /// options used during load and for data file formatting
     pub config: DeltaTableConfig,
     /// log store
     pub(crate) log_store: LogStoreRef,
