@@ -66,6 +66,7 @@ pub struct CreateBuilder {
     commit_properties: CommitProperties,
     raise_if_key_not_exists: bool,
     custom_execute_handler: Option<Arc<dyn CustomExecuteHandler>>,
+    parquet_config: Option<String>,
 }
 
 impl super::Operation<()> for CreateBuilder {
@@ -102,6 +103,7 @@ impl CreateBuilder {
             commit_properties: CommitProperties::default(),
             raise_if_key_not_exists: true,
             custom_execute_handler: None,
+            parquet_config: None,
         }
     }
 
@@ -188,6 +190,12 @@ impl CreateBuilder {
         self
     }
 
+    /// Set parquet options
+    pub fn with_parquet_config(mut self, parquet_config: String) -> Self {
+        self.parquet_config = Some(parquet_config);
+        self
+    }
+
     /// Set configuration on created table
     pub fn with_configuration(
         mut self,
@@ -259,7 +267,7 @@ impl CreateBuilder {
             return Err(CreateError::MissingSchema.into());
         }
 
-        let (storage_url, table) = if let Some(log_store) = self.log_store {
+        let (storage_url, mut table) = if let Some(log_store) = self.log_store {
             (
                 ensure_table_uri(log_store.root_uri())?.as_str().to_string(),
                 DeltaTable::new(log_store, Default::default()),
@@ -274,7 +282,8 @@ impl CreateBuilder {
                     .build()?,
             )
         };
-
+        
+        table.config.parquet_config = self.parquet_config.clone();
         self.log_store = Some(table.log_store());
         let operation_id = self.get_operation_id();
         self.pre_execute(operation_id).await?;

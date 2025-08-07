@@ -15,6 +15,7 @@ use crate::logstore::storage::IORuntime;
 use crate::logstore::{object_store_factories, LogStoreRef, StorageConfig};
 use crate::{DeltaResult, DeltaTable, DeltaTableError};
 use crate::logstore::config::ParseResult;
+#[cfg(feature = "datafusion")]
 use crate::table::parquet_config::ParquetConfig;
 
 /// possible version specifications for loading a delta table
@@ -243,8 +244,8 @@ impl DeltaTableBuilder {
     }
     
     /// Set the parquet config for the table.
-    pub fn with_parquet_config(mut self, parquet_config: ParquetConfig) -> Self {
-        self.table_config.parquet_config = Some(parquet_config.to_string());
+    pub fn with_parquet_config(mut self, parquet_config: String) -> Self {
+        self.table_config.parquet_config = Some(parquet_config);
         self
     }
 

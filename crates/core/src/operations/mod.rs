@@ -8,6 +8,7 @@
 //! if the operation returns data as well.
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use update_field_metadata::UpdateFieldMetadataBuilder;
 use uuid::Uuid;
@@ -36,6 +37,8 @@ use self::{
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::logstore::LogStoreRef;
 use crate::table::builder::DeltaTableBuilder;
+#[cfg(feature = "datafusion")]
+use crate::table::parquet_config::ParquetConfig;
 use crate::DeltaTable;
 
 pub mod add_column;
@@ -121,6 +124,8 @@ pub(crate) trait Operation<State>: std::future::IntoFuture {
     }
 }
 
+
+
 /// High level interface for executing commands against a DeltaTable
 pub struct DeltaOps(pub DeltaTable);
 
@@ -198,7 +203,7 @@ impl DeltaOps {
     #[cfg(feature = "datafusion")]
     #[must_use]
     pub fn load(self) -> LoadBuilder {
-        LoadBuilder::new(self.0.log_store, self.0.state.unwrap())
+        LoadBuilder::new(self.0.log_store, self.0.state.unwrap(), self.0.config.parquet_config)
     }
 
     /// Load a table with CDF Enabled
@@ -212,7 +217,13 @@ impl DeltaOps {
     #[cfg(feature = "datafusion")]
     #[must_use]
     pub fn write(self, batches: impl IntoIterator<Item = RecordBatch>) -> WriteBuilder {
-        WriteBuilder::new(self.0.log_store, self.0.state).with_input_batches(batches)
+        let mut wb = WriteBuilder::new(self.0.log_store, self.0.state).with_input_batches(batches);
+        if let Some(parquet_config) = self.0.config.parquet_config {
+            let pc= ParquetConfig::from_str(parquet_config.as_str())
+                .expect("Failed to parse ParquetConfig from table config");
+            wb = wb.with_writer_properties(pc.writer_options());
+        }
+        wb
     }
 
     /// Vacuum stale files from delta table
@@ -231,21 +242,39 @@ impl DeltaOps {
     #[cfg(feature = "datafusion")]
     #[must_use]
     pub fn optimize<'a>(self) -> OptimizeBuilder<'a> {
-        OptimizeBuilder::new(self.0.log_store, self.0.state.unwrap())
+        let mut ob = OptimizeBuilder::new(self.0.log_store, self.0.state.unwrap());
+        if let Some(parquet_config) = self.0.config.parquet_config {
+            let pc= ParquetConfig::from_str(parquet_config.as_str())
+                .expect("Failed to parse ParquetConfig from table config");
+            ob = ob.with_writer_properties(pc.writer_options());
+        }
+        ob
     }
 
     /// Delete data from Delta table
     #[cfg(feature = "datafusion")]
     #[must_use]
     pub fn delete(self) -> DeleteBuilder {
-        DeleteBuilder::new(self.0.log_store, self.0.state.unwrap())
+        let mut db = DeleteBuilder::new(self.0.log_store, self.0.state.unwrap());
+        if let Some(parquet_config) = self.0.config.parquet_config {
+            let pc= ParquetConfig::from_str(parquet_config.as_str())
+                .expect("Failed to parse ParquetConfig from table config");
+            db = db.with_writer_properties(pc.writer_options());
+        }
+        db
     }
 
     /// Update data from Delta table
     #[cfg(feature = "datafusion")]
     #[must_use]
     pub fn update(self) -> UpdateBuilder {
-        UpdateBuilder::new(self.0.log_store, self.0.state.unwrap())
+        let mut ub = UpdateBuilder::new(self.0.log_store, self.0.state.unwrap());
+        if let Some(parquet_config) = self.0.config.parquet_config {
+            let pc= ParquetConfig::from_str(parquet_config.as_str())
+                .expect("Failed to parse ParquetConfig from table config");
+            ub = ub.with_writer_properties(pc.writer_options());
+        }
+        ub
     }
 
     /// Restore delta table to a specified version or datetime
@@ -262,12 +291,18 @@ impl DeltaOps {
         source: datafusion::prelude::DataFrame,
         predicate: E,
     ) -> MergeBuilder {
-        MergeBuilder::new(
+        let mut mb = MergeBuilder::new(
             self.0.log_store,
             self.0.state.unwrap(),
             predicate.into(),
             source,
-        )
+        );
+        if let Some(parquet_config) = self.0.config.parquet_config {
+            let pc= ParquetConfig::from_str(parquet_config.as_str())
+                .expect("Failed to parse ParquetConfig from table config");
+            mb = mb.with_writer_properties(pc.writer_options());
+        }
+        mb
     }
 
     /// Add a check constraint to a table
