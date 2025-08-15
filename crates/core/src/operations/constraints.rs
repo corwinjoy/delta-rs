@@ -23,8 +23,9 @@ use crate::logstore::LogStoreRef;
 use crate::operations::datafusion_utils::Expression;
 use crate::protocol::DeltaOperation;
 use crate::table::state::DeltaTableState;
-use crate::table::Constraint;
+use crate::table::{Constraint, TableParquetOptions};
 use crate::{DeltaResult, DeltaTable, DeltaTableError};
+use crate::table::table_parquet_options::apply_table_options_to_state;
 
 /// Build a constraint to add to a table
 pub struct ConstraintBuilder {
@@ -228,6 +229,7 @@ impl std::future::IntoFuture for ConstraintBuilder {
             Ok(DeltaTable::new_with_state(
                 this.log_store,
                 commit.snapshot(),
+                None
             ))
         })
     }

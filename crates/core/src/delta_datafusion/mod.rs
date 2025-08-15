@@ -729,10 +729,10 @@ impl<'a> DeltaScanBuilder<'a> {
 
         let stats = stats.unwrap_or(Statistics::new_unknown(&schema));
 
-        let parquet_options = TableParquetOptions {
-            global: self.session.config().options().execution.parquet.clone(),
-            ..Default::default()
-        };
+        // The SessionState is built from the SessionContext and so should hold all the derived parquet options
+        // These table options get built by TableOptions::default_from_session_config() during
+        // session context construction
+        let parquet_options = self.session.table_options().parquet.clone();
 
         let mut file_source = ParquetSource::new(parquet_options);
 
