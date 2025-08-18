@@ -36,6 +36,7 @@ use self::{
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::logstore::LogStoreRef;
 use crate::table::builder::DeltaTableBuilder;
+use crate::table::TableParquetOptions;
 use crate::DeltaTable;
 
 pub mod add_column;
@@ -160,6 +161,15 @@ impl DeltaOps {
         }
     }
 
+    /// Set options for parquet files
+    pub fn with_table_parquet_options(
+        mut self,
+        table_parquet_options: TableParquetOptions,
+    ) -> Self {
+        self.0.table_parquet_options = Some(table_parquet_options);
+        self
+    }
+
     /// Create a new [`DeltaOps`] instance, backed by an un-initialized in memory table
     ///
     /// Using this will not persist any changes beyond the lifetime of the table object.
@@ -198,7 +208,11 @@ impl DeltaOps {
     #[cfg(feature = "datafusion")]
     #[must_use]
     pub fn load(self) -> LoadBuilder {
-        LoadBuilder::new(self.0.log_store, self.0.state.unwrap())
+        LoadBuilder::new(
+            self.0.log_store,
+            self.0.state.unwrap(),
+            self.0.table_parquet_options,
+        )
     }
 
     /// Load a table with CDF Enabled
@@ -212,7 +226,8 @@ impl DeltaOps {
     #[cfg(feature = "datafusion")]
     #[must_use]
     pub fn write(self, batches: impl IntoIterator<Item = RecordBatch>) -> WriteBuilder {
-        WriteBuilder::new(self.0.log_store, self.0.state).with_input_batches(batches)
+        WriteBuilder::new(self.0.log_store, self.0.state, self.0.table_parquet_options)
+            .with_input_batches(batches)
     }
 
     /// Vacuum stale files from delta table
@@ -231,21 +246,33 @@ impl DeltaOps {
     #[cfg(feature = "datafusion")]
     #[must_use]
     pub fn optimize<'a>(self) -> OptimizeBuilder<'a> {
-        OptimizeBuilder::new(self.0.log_store, self.0.state.unwrap())
+        OptimizeBuilder::new(
+            self.0.log_store,
+            self.0.state.unwrap(),
+            self.0.table_parquet_options,
+        )
     }
 
     /// Delete data from Delta table
     #[cfg(feature = "datafusion")]
     #[must_use]
     pub fn delete(self) -> DeleteBuilder {
-        DeleteBuilder::new(self.0.log_store, self.0.state.unwrap())
+        DeleteBuilder::new(
+            self.0.log_store,
+            self.0.state.unwrap(),
+            self.0.table_parquet_options,
+        )
     }
 
     /// Update data from Delta table
     #[cfg(feature = "datafusion")]
     #[must_use]
     pub fn update(self) -> UpdateBuilder {
-        UpdateBuilder::new(self.0.log_store, self.0.state.unwrap())
+        UpdateBuilder::new(
+            self.0.log_store,
+            self.0.state.unwrap(),
+            self.0.table_parquet_options,
+        )
     }
 
     /// Restore delta table to a specified version or datetime
@@ -265,6 +292,7 @@ impl DeltaOps {
         MergeBuilder::new(
             self.0.log_store,
             self.0.state.unwrap(),
+            self.0.table_parquet_options,
             predicate.into(),
             source,
         )
@@ -287,7 +315,11 @@ impl DeltaOps {
     #[cfg(feature = "datafusion")]
     #[must_use]
     pub fn drop_constraints(self) -> DropConstraintBuilder {
-        DropConstraintBuilder::new(self.0.log_store, self.0.state.unwrap())
+        DropConstraintBuilder::new(
+            self.0.log_store,
+            self.0.state.unwrap(),
+            self.0.table_parquet_options,
+        )
     }
 
     /// Set table properties

@@ -306,6 +306,7 @@ async fn test_conflict_for_remove_actions() -> Result<(), Box<dyn Error>> {
         .execute(
             dt.log_store(),
             dt.snapshot()?,
+            None,
             1,
             20,
             None,
@@ -367,6 +368,7 @@ async fn test_no_conflict_for_append_actions() -> Result<(), Box<dyn Error>> {
         .execute(
             dt.log_store(),
             dt.snapshot()?,
+            None,
             1,
             20,
             None,
@@ -416,6 +418,7 @@ async fn test_commit_interval() -> Result<(), Box<dyn Error>> {
         .execute(
             dt.log_store(),
             dt.snapshot()?,
+            None,
             1,
             20,
             Some(Duration::from_secs(0)), // this will cause as many commits as num_files_added

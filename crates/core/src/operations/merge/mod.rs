@@ -92,6 +92,10 @@ use crate::operations::write::generated_columns::{
 use crate::operations::write::WriterStatsConfig;
 use crate::protocol::{DeltaOperation, MergePredicate};
 use crate::table::state::DeltaTableState;
+use crate::table::table_parquet_options::{
+    build_writer_properties, state_with_parquet_options, ConfigFileType, TableOptions,
+};
+use crate::table::TableParquetOptions;
 use crate::{DeltaResult, DeltaTable, DeltaTableError};
 
 mod barrier;
@@ -142,6 +146,8 @@ pub struct MergeBuilder {
     merge_schema: bool,
     /// Delta object store for handling data files
     log_store: LogStoreRef,
+    /// Parquet options for the table
+    table_parquet_options: Option<TableParquetOptions>,
     /// Datafusion session state relevant for executing the input plan
     state: Option<SessionState>,
     /// Properties passed to underlying parquet writer for when files are rewritten
@@ -168,20 +174,23 @@ impl MergeBuilder {
     pub fn new<E: Into<Expression>>(
         log_store: LogStoreRef,
         snapshot: DeltaTableState,
+        table_parquet_options: Option<TableParquetOptions>,
         predicate: E,
         source: DataFrame,
     ) -> Self {
         let predicate = predicate.into();
+        let writer_properties = build_writer_properties(&table_parquet_options);
         Self {
             predicate,
             source,
             snapshot,
             log_store,
+            table_parquet_options,
             source_alias: None,
             target_alias: None,
             state: None,
             commit_properties: CommitProperties::default(),
-            writer_properties: None,
+            writer_properties,
             merge_schema: false,
             match_operations: Vec::new(),
             not_match_operations: Vec::new(),
@@ -728,6 +737,7 @@ async fn execute(
     mut source: DataFrame,
     log_store: LogStoreRef,
     snapshot: DeltaTableState,
+    parquet_options: Option<TableParquetOptions>,
     state: SessionState,
     writer_properties: Option<WriterProperties>,
     mut commit_properties: CommitProperties,
@@ -757,6 +767,8 @@ async fn execute(
     let merge_planner = DeltaPlanner::<MergeMetricExtensionPlanner> {
         extension_planner: MergeMetricExtensionPlanner {},
     };
+
+    let state = state_with_parquet_options(state, parquet_options.as_ref());
 
     let state = SessionStateBuilder::new_from_existing(state)
         .with_query_planner(Arc::new(merge_planner))
@@ -815,11 +827,10 @@ async fn execute(
         .with_schema(snapshot.input_schema()?)
         .build(&snapshot)?;
 
-    let target_provider = Arc::new(DeltaTableProvider::try_new(
-        snapshot.clone(),
-        log_store.clone(),
-        scan_config.clone(),
-    )?);
+    let target_provider = Arc::new(
+        DeltaTableProvider::try_new(snapshot.clone(), log_store.clone(), scan_config.clone())?
+            .with_parquet_options(parquet_options),
+    );
 
     let target_provider = provider_as_source(target_provider);
     let target =
@@ -1538,7 +1549,6 @@ impl std::future::IntoFuture for MergeBuilder {
 
                 // If a user provides their own their DF state then they must register the store themselves
                 register_store(this.log_store.clone(), session.runtime_env());
-
                 session.state()
             });
 
@@ -1547,6 +1557,7 @@ impl std::future::IntoFuture for MergeBuilder {
                 this.source,
                 this.log_store.clone(),
                 this.snapshot,
+                this.table_parquet_options.clone(),
                 state,
                 this.writer_properties,
                 this.commit_properties,
@@ -1568,7 +1579,7 @@ impl std::future::IntoFuture for MergeBuilder {
             }
 
             Ok((
-                DeltaTable::new_with_state(this.log_store, snapshot),
+                DeltaTable::new_with_state(this.log_store, snapshot, this.table_parquet_options),
                 metrics,
             ))
         })

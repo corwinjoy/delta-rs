@@ -27,12 +27,15 @@ use crate::{DeltaResult, DeltaTableError};
 // NOTE: this use can go away when peek_next_commit is removed off of [DeltaTable]
 pub use crate::logstore::PeekCommit;
 
+pub use crate::table::table_parquet_options::TableParquetOptions;
+
 pub mod builder;
 pub mod config;
 pub mod state;
 pub mod state_arrow;
 
 mod columns;
+pub(crate) mod table_parquet_options;
 
 // Re-exposing for backwards compatibility
 pub use columns::*;
@@ -72,6 +75,8 @@ pub struct DeltaTable {
     pub state: Option<DeltaTableState>,
     /// the load options used during load
     pub config: DeltaTableConfig,
+    /// parquet options to apply when operating on the table
+    pub table_parquet_options: Option<TableParquetOptions>,
     /// log store
     pub(crate) log_store: LogStoreRef,
 }
@@ -124,6 +129,7 @@ impl<'de> Deserialize<'de> for DeltaTable {
                     state,
                     config,
                     log_store,
+                    table_parquet_options: None,
                 };
                 Ok(table)
             }
@@ -138,11 +144,16 @@ impl DeltaTable {
     ///
     /// NOTE: This is for advanced users. If you don't know why you need to use this method, please
     /// call one of the `open_table` helper methods instead.
-    pub fn new(log_store: LogStoreRef, config: DeltaTableConfig) -> Self {
+    pub fn new(
+        log_store: LogStoreRef,
+        config: DeltaTableConfig,
+        table_parquet_options: Option<TableParquetOptions>,
+    ) -> Self {
         Self {
             state: None,
             log_store,
             config,
+            table_parquet_options,
         }
     }
 
@@ -151,11 +162,16 @@ impl DeltaTable {
     ///
     /// NOTE: This is for advanced users. If you don't know why you need to use this method,
     /// please call one of the `open_table` helper methods instead.
-    pub(crate) fn new_with_state(log_store: LogStoreRef, state: DeltaTableState) -> Self {
+    pub(crate) fn new_with_state(
+        log_store: LogStoreRef,
+        state: DeltaTableState,
+        table_parquet_options: Option<TableParquetOptions>,
+    ) -> Self {
         Self {
             state: Some(state),
             log_store,
             config: Default::default(),
+            table_parquet_options,
         }
     }
 
