@@ -59,6 +59,8 @@ pub mod constraints;
 #[cfg(feature = "datafusion")]
 pub mod delete;
 #[cfg(feature = "datafusion")]
+pub(crate) mod encryption;
+#[cfg(feature = "datafusion")]
 mod load;
 #[cfg(feature = "datafusion")]
 pub mod load_cdf;

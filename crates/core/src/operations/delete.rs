@@ -62,7 +62,8 @@ use crate::protocol::DeltaOperation;
 use crate::table::config::TablePropertiesExt as _;
 use crate::table::state::DeltaTableState;
 use crate::table::table_parquet_options::{
-    build_writer_properties, state_with_parquet_options, ConfigFileType, TableOptions,
+    build_writer_properties_factory_tpo, build_writer_properties_factory_wp,
+    state_with_parquet_options, WriterPropertiesFactory,
 };
 use crate::table::TableParquetOptions;
 use crate::{DeltaTable, DeltaTableError};
@@ -84,7 +85,7 @@ pub struct DeleteBuilder {
     /// Datafusion session state relevant for executing the input plan
     state: Option<SessionState>,
     /// Properties passed to underlying parquet writer for when files are rewritten
-    writer_properties: Option<WriterProperties>,
+    writer_properties_factory: Option<Arc<dyn WriterPropertiesFactory>>,
     /// Commit properties and configuration
     commit_properties: CommitProperties,
     custom_execute_handler: Option<Arc<dyn CustomExecuteHandler>>,
@@ -125,7 +126,7 @@ impl DeleteBuilder {
         snapshot: DeltaTableState,
         table_parquet_options: Option<TableParquetOptions>,
     ) -> Self {
-        let writer_properties = build_writer_properties(&table_parquet_options);
+        let writer_properties_factory = build_writer_properties_factory_tpo(&table_parquet_options);
         Self {
             predicate: None,
             snapshot,
@@ -133,7 +134,7 @@ impl DeleteBuilder {
             table_parquet_options,
             state: None,
             commit_properties: CommitProperties::default(),
-            writer_properties,
+            writer_properties_factory,
             custom_execute_handler: None,
         }
     }
@@ -158,7 +159,8 @@ impl DeleteBuilder {
 
     /// Writer properties passed to parquet writer for when files are rewritten
     pub fn with_writer_properties(mut self, writer_properties: WriterProperties) -> Self {
-        self.writer_properties = Some(writer_properties);
+        let writer_properties_factory = build_writer_properties_factory_wp(writer_properties);
+        self.writer_properties_factory = Some(writer_properties_factory);
         self
     }
 
@@ -208,7 +210,7 @@ async fn execute_non_empty_expr(
     expression: &Expr,
     rewrite: &[Add],
     metrics: &mut DeleteMetrics,
-    writer_properties: Option<WriterProperties>,
+    writer_properties_factory: Option<Arc<dyn WriterPropertiesFactory>>,
     partition_scan: bool,
     operation_id: Uuid,
 ) -> DeltaResult<Vec<Action>> {
@@ -275,7 +277,7 @@ async fn execute_non_empty_expr(
             log_store.object_store(Some(operation_id)),
             Some(snapshot.table_config().target_file_size().get() as usize),
             None,
-            writer_properties.clone(),
+            writer_properties_factory.clone(),
             writer_stats_config.clone(),
         )
         .await?;
@@ -311,7 +313,7 @@ async fn execute_non_empty_expr(
             log_store.object_store(Some(operation_id)),
             Some(snapshot.table_config().target_file_size().get() as usize),
             None,
-            writer_properties,
+            writer_properties_factory,
             writer_stats_config,
         )
         .await?;
@@ -328,7 +330,7 @@ async fn execute(
     snapshot: DeltaTableState,
     parquet_options: Option<TableParquetOptions>,
     state: SessionState,
-    writer_properties: Option<WriterProperties>,
+    writer_properties_factory: Option<Arc<dyn WriterPropertiesFactory>>,
     mut commit_properties: CommitProperties,
     operation_id: Uuid,
     handle: Option<&Arc<dyn CustomExecuteHandler>>,
@@ -356,7 +358,7 @@ async fn execute(
             &predicate,
             &candidates.candidates,
             &mut metrics,
-            writer_properties,
+            writer_properties_factory.clone(),
             candidates.partition_scan,
             operation_id,
         )
@@ -460,7 +462,7 @@ impl std::future::IntoFuture for DeleteBuilder {
                 this.snapshot,
                 this.table_parquet_options.clone(),
                 state,
-                this.writer_properties,
+                this.writer_properties_factory,
                 this.commit_properties,
                 operation_id,
                 this.custom_execute_handler.as_ref(),

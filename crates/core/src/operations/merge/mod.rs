@@ -94,7 +94,8 @@ use crate::protocol::{DeltaOperation, MergePredicate};
 use crate::table::config::TablePropertiesExt as _;
 use crate::table::state::DeltaTableState;
 use crate::table::table_parquet_options::{
-    build_writer_properties, state_with_parquet_options, ConfigFileType, TableOptions,
+    build_writer_properties_factory_tpo, build_writer_properties_factory_wp,
+    state_with_parquet_options, WriterPropertiesFactory,
 };
 use crate::table::TableParquetOptions;
 use crate::{DeltaResult, DeltaTable, DeltaTableError};
@@ -152,7 +153,7 @@ pub struct MergeBuilder {
     /// Datafusion session state relevant for executing the input plan
     state: Option<SessionState>,
     /// Properties passed to underlying parquet writer for when files are rewritten
-    writer_properties: Option<WriterProperties>,
+    writer_properties_factory: Option<Arc<dyn WriterPropertiesFactory>>,
     /// Additional information to add to the commit
     commit_properties: CommitProperties,
     /// safe_cast determines how data types that do not match the underlying table are handled
@@ -180,7 +181,7 @@ impl MergeBuilder {
         source: DataFrame,
     ) -> Self {
         let predicate = predicate.into();
-        let writer_properties = build_writer_properties(&table_parquet_options);
+        let writer_properties_factory = build_writer_properties_factory_tpo(&table_parquet_options);
         Self {
             predicate,
             source,
@@ -191,7 +192,7 @@ impl MergeBuilder {
             target_alias: None,
             state: None,
             commit_properties: CommitProperties::default(),
-            writer_properties,
+            writer_properties_factory,
             merge_schema: false,
             match_operations: Vec::new(),
             not_match_operations: Vec::new(),
@@ -404,9 +405,10 @@ impl MergeBuilder {
         self
     }
 
-    /// Writer properties passed to parquet writer for when fiiles are rewritten
+    /// Writer properties passed to parquet writer for when files are rewritten
     pub fn with_writer_properties(mut self, writer_properties: WriterProperties) -> Self {
-        self.writer_properties = Some(writer_properties);
+        let writer_properties_factory = build_writer_properties_factory_wp(writer_properties);
+        self.writer_properties_factory = Some(writer_properties_factory);
         self
     }
 
@@ -740,7 +742,7 @@ async fn execute(
     snapshot: DeltaTableState,
     parquet_options: Option<TableParquetOptions>,
     state: SessionState,
-    writer_properties: Option<WriterProperties>,
+    writer_properties_factory: Option<Arc<dyn WriterPropertiesFactory>>,
     mut commit_properties: CommitProperties,
     _safe_cast: bool,
     streaming: bool,
@@ -1403,7 +1405,7 @@ async fn execute(
         log_store.object_store(Some(operation_id)),
         Some(snapshot.table_config().target_file_size().get() as usize),
         None,
-        writer_properties.clone(),
+        writer_properties_factory.clone(),
         writer_stats_config.clone(),
         None,
         should_cdc, // if true, write execution plan splits batches in [normal, cdc] data before writing
@@ -1561,7 +1563,7 @@ impl std::future::IntoFuture for MergeBuilder {
                 this.snapshot,
                 this.table_parquet_options.clone(),
                 state,
-                this.writer_properties,
+                this.writer_properties_factory,
                 this.commit_properties,
                 this.safe_cast,
                 this.streaming,
