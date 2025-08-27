@@ -2,14 +2,24 @@
 pub use datafusion::config::{ConfigFileType, TableOptions, TableParquetOptions};
 #[cfg(feature = "datafusion")]
 use datafusion::execution::{SessionState, SessionStateBuilder};
-use parquet::file::properties::WriterProperties;
+use std::fmt::Debug;
+
+use crate::{crate_version, DeltaResult};
+use arrow_schema::Schema as ArrowSchema;
+
+use object_store::path::Path;
+use parquet::basic::{Compression, ZstdLevel};
+use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
+use parquet::schema::types::ColumnPath;
+use std::sync::Arc;
+use tracing::info;
 
 #[cfg(not(feature = "datafusion"))]
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct TableParquetOptions {}
 
 #[cfg(feature = "datafusion")]
-pub fn build_writer_properties(
+fn build_writer_properties_tpo(
     table_parquet_options: &Option<TableParquetOptions>,
 ) -> Option<WriterProperties> {
     use datafusion::common::file_options::parquet_writer::ParquetWriterOptions;
@@ -21,6 +31,41 @@ pub fn build_writer_properties(
             .writer_options()
             .clone()
     })
+}
+
+#[cfg(feature = "datafusion")]
+pub fn build_writer_properties_factory_tpo(
+    table_parquet_options: &Option<TableParquetOptions>,
+) -> Option<Arc<dyn WriterPropertiesFactory>> {
+    let props = build_writer_properties_tpo(table_parquet_options);
+    props.map(|wp| {
+        Arc::new(SimpleWriterPropertiesFactory::new(wp)) as Arc<dyn WriterPropertiesFactory>
+    })
+}
+
+#[cfg(feature = "datafusion")]
+pub fn build_writer_properties_factory_or_default_tpo(
+    table_parquet_options: &Option<TableParquetOptions>,
+) -> Arc<dyn WriterPropertiesFactory> {
+    let maybe_wp = build_writer_properties_factory_tpo(table_parquet_options);
+    maybe_wp.unwrap_or_else(|| build_writer_properties_factory_default())
+}
+
+#[cfg(not(feature = "datafusion"))]
+pub fn build_writer_properties_factory_or_default_tpo(
+    _table_parquet_options: &Option<TableParquetOptions>,
+) -> Arc<dyn WriterPropertiesFactory> {
+    build_writer_properties_factory_default()
+}
+
+pub fn build_writer_properties_factory_wp(
+    writer_properties: WriterProperties,
+) -> Arc<dyn WriterPropertiesFactory> {
+    Arc::new(SimpleWriterPropertiesFactory::new(writer_properties))
+}
+
+pub fn build_writer_properties_factory_default() -> Arc<dyn WriterPropertiesFactory> {
+    Arc::new(SimpleWriterPropertiesFactory::default())
 }
 
 #[cfg(feature = "datafusion")]
@@ -38,4 +83,146 @@ pub fn state_with_parquet_options(
         return state;
     }
     state
+}
+
+pub trait WriterPropertiesFactory: Send + Sync + std::fmt::Debug + 'static {
+    fn compression(&self, column_path: &ColumnPath) -> Compression;
+    fn create_writer_properties(
+        &self,
+        file_path: &Path,
+        file_schema: &Arc<ArrowSchema>,
+    ) -> DeltaResult<WriterProperties>;
+}
+
+#[derive(Clone, Debug)]
+pub struct SimpleWriterPropertiesFactory {
+    writer_properties: WriterProperties,
+}
+
+impl SimpleWriterPropertiesFactory {
+    pub fn new(writer_properties: WriterProperties) -> Self {
+        Self { writer_properties }
+    }
+}
+
+impl Default for SimpleWriterPropertiesFactory {
+    fn default() -> Self {
+        let writer_properties = WriterProperties::builder()
+            .set_compression(Compression::SNAPPY) // Code assumes Snappy by default
+            .set_created_by(format!("delta-rs version {}", crate_version()))
+            .build();
+        Self { writer_properties }
+    }
+}
+impl WriterPropertiesFactory for SimpleWriterPropertiesFactory {
+    fn compression(&self, column_path: &ColumnPath) -> Compression {
+        self.writer_properties.compression(column_path)
+    }
+
+    fn create_writer_properties(
+        &self,
+        file_path: &Path,
+        _file_schema: &Arc<ArrowSchema>,
+    ) -> DeltaResult<WriterProperties> {
+        info!("Called create_writer_properties for file: {file_path}");
+        Ok(self.writer_properties.clone())
+    }
+}
+
+// More advanced factory with KMS support
+#[cfg(feature = "datafusion")]
+#[derive(Clone, Debug)]
+pub struct KMSWriterPropertiesFactory {
+    writer_properties: WriterProperties,
+    encryption: Option<crate::operations::encryption::TableEncryption>,
+}
+
+#[cfg(feature = "datafusion")]
+impl WriterPropertiesFactory for KMSWriterPropertiesFactory {
+    fn compression(&self, column_path: &ColumnPath) -> Compression {
+        self.writer_properties.compression(column_path)
+    }
+
+    fn create_writer_properties(
+        &self,
+        file_path: &Path,
+        file_schema: &Arc<ArrowSchema>,
+    ) -> DeltaResult<WriterProperties> {
+        let mut builder = self.writer_properties.to_builder();
+        if let Some(encryption) = self.encryption.as_ref() {
+            builder = encryption.update_writer_properties(builder, file_path, file_schema)?;
+        }
+        Ok(builder.build())
+    }
+}
+
+/// AI generated code to get builder from existing WriterProperties
+/// May not be right
+///
+/// Extension to construct a WriterPropertiesBuilder from existing WriterProperties
+pub trait WriterPropertiesExt {
+    fn to_builder(&self) -> WriterPropertiesBuilder;
+}
+
+impl WriterPropertiesExt for WriterProperties {
+    fn to_builder(&self) -> WriterPropertiesBuilder {
+        // Start with copying top-level writer properties
+        let mut builder = WriterProperties::builder()
+            .set_writer_version(self.writer_version())
+            .set_data_page_size_limit(self.data_page_size_limit())
+            .set_data_page_row_count_limit(self.data_page_row_count_limit())
+            .set_dictionary_page_size_limit(self.dictionary_page_size_limit())
+            .set_write_batch_size(self.write_batch_size())
+            .set_max_row_group_size(self.max_row_group_size())
+            .set_bloom_filter_position(self.bloom_filter_position())
+            .set_created_by(self.created_by().to_string())
+            .set_offset_index_disabled(self.offset_index_disabled())
+            .set_key_value_metadata(self.key_value_metadata().cloned())
+            .set_sorting_columns(self.sorting_columns().cloned())
+            .set_column_index_truncate_length(self.column_index_truncate_length())
+            .set_statistics_truncate_length(self.statistics_truncate_length())
+            .set_coerce_types(self.coerce_types());
+
+        // Use an empty ColumnPath to read default column-level properties
+        let empty = ColumnPath::new(Vec::new());
+
+        // Default compression
+        let default_compression = self.compression(&empty);
+        builder = builder.set_compression(default_compression);
+
+        // Default encoding (if explicitly set)
+        if let Some(enc) = self.encoding(&empty) {
+            builder = builder.set_encoding(enc);
+        }
+
+        // Default dictionary enabled
+        builder = builder.set_dictionary_enabled(self.dictionary_enabled(&empty));
+
+        // Default statistics setting
+        builder = builder.set_statistics_enabled(self.statistics_enabled(&empty));
+
+        // Default max statistics size (deprecated in parquet, but preserve value if used)
+        #[allow(deprecated)]
+        {
+            let max_stats = self.max_statistics_size(&empty);
+            builder = builder.set_max_statistics_size(max_stats);
+        }
+
+        // Default bloom filter settings
+        if let Some(bfp) = self.bloom_filter_properties(&empty) {
+            builder = builder
+                .set_bloom_filter_enabled(true)
+                .set_bloom_filter_fpp(bfp.fpp)
+                .set_bloom_filter_ndv(bfp.ndv);
+        } else {
+            // Ensure bloom filters are disabled if not present
+            builder = builder.set_bloom_filter_enabled(false);
+        }
+
+        // Preserve encryption properties if present
+        if let Some(fep) = self.file_encryption_properties() {
+            builder = builder.with_file_encryption_properties(fep.clone());
+        }
+        builder
+    }
 }

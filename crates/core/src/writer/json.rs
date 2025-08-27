@@ -10,10 +10,7 @@ use delta_kernel::expressions::Scalar;
 use indexmap::IndexMap;
 use itertools::Itertools;
 use object_store::path::Path;
-use parquet::{
-    arrow::ArrowWriter, basic::Compression, errors::ParquetError,
-    file::properties::WriterProperties,
-};
+use parquet::{arrow::ArrowWriter, errors::ParquetError, file::properties::WriterProperties};
 use serde_json::Value;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -29,6 +26,9 @@ use crate::kernel::{scalars::ScalarExt, Add, PartitionsExt};
 use crate::logstore::ObjectStoreRetryExt;
 use crate::table::builder::DeltaTableBuilder;
 use crate::table::config::TablePropertiesExt as _;
+use crate::table::table_parquet_options::{
+    build_writer_properties_factory_or_default_tpo, WriterPropertiesFactory,
+};
 use crate::writer::utils::ShareableBuffer;
 use crate::DeltaTable;
 
@@ -40,7 +40,7 @@ pub struct JsonWriter {
     table: DeltaTable,
     /// Optional schema to use, otherwise try to rely on the schema from the [DeltaTable]
     schema_ref: Option<ArrowSchemaRef>,
-    writer_properties: WriterProperties,
+    writer_properties_factory: Arc<dyn WriterPropertiesFactory>,
     partition_columns: Vec<String>,
     arrow_writers: HashMap<String, DataArrowWriter>,
 }
@@ -54,6 +54,7 @@ pub(crate) struct DataArrowWriter {
     arrow_writer: ArrowWriter<ShareableBuffer>,
     partition_values: IndexMap<String, Scalar>,
     buffered_record_batch_count: usize,
+    path: Path,
 }
 
 impl DataArrowWriter {
@@ -116,11 +117,6 @@ impl DataArrowWriter {
         partition_columns: &[String],
         record_batch: RecordBatch,
     ) -> Result<(), DeltaWriterError> {
-        if self.partition_values.is_empty() {
-            let partition_values = extract_partition_values(partition_columns, &record_batch)?;
-            self.partition_values = partition_values;
-        }
-
         // Copy current buffered bytes so we can recover from failures
         let buffer_bytes = self.buffer.to_vec();
 
@@ -152,6 +148,8 @@ impl DataArrowWriter {
     fn new(
         arrow_schema: Arc<ArrowSchema>,
         writer_properties: WriterProperties,
+        partition_values: IndexMap<String, Scalar>,
+        path: Path,
     ) -> Result<Self, ParquetError> {
         let buffer = ShareableBuffer::default();
         let arrow_writer = Self::new_underlying_writer(
@@ -160,7 +158,6 @@ impl DataArrowWriter {
             writer_properties.clone(),
         )?;
 
-        let partition_values = IndexMap::new();
         let buffered_record_batch_count = 0;
 
         Ok(Self {
@@ -170,6 +167,7 @@ impl DataArrowWriter {
             arrow_writer,
             partition_values,
             buffered_record_batch_count,
+            path,
         })
     }
 
@@ -194,16 +192,14 @@ impl JsonWriter {
             .with_storage_options(storage_options.unwrap_or_default())
             .load()
             .await?;
-        // Initialize writer properties for the underlying arrow writer
-        let writer_properties = WriterProperties::builder()
-            // NOTE: Consider extracting config for writer properties and setting more than just compression
-            .set_compression(Compression::SNAPPY)
-            .build();
+
+        let writer_properties_factory =
+            build_writer_properties_factory_or_default_tpo(&table.table_parquet_options);
 
         Ok(Self {
             table,
             schema_ref: Some(schema_ref),
-            writer_properties,
+            writer_properties_factory,
             partition_columns: partition_columns.unwrap_or_default(),
             arrow_writers: HashMap::new(),
         })
@@ -215,15 +211,12 @@ impl JsonWriter {
         let metadata = table.snapshot()?.metadata();
         let partition_columns = metadata.partition_columns().clone();
 
-        // Initialize writer properties for the underlying arrow writer
-        let writer_properties = WriterProperties::builder()
-            // NOTE: Consider extracting config for writer properties and setting more than just compression
-            .set_compression(Compression::SNAPPY)
-            .build();
+        let writer_properties_factory =
+            build_writer_properties_factory_or_default_tpo(&table.table_parquet_options);
 
         Ok(Self {
             table: table.clone(),
-            writer_properties,
+            writer_properties_factory,
             partition_columns,
             schema_ref: None,
             arrow_writers: HashMap::new(),
@@ -321,7 +314,6 @@ impl DeltaWriter<Vec<Value>> for JsonWriter {
         let arrow_schema = self.arrow_schema();
         let divided = self.divide_by_partition_values(values)?;
         let partition_columns = self.partition_columns.clone();
-        let writer_properties = self.writer_properties.clone();
 
         for (key, values) in divided {
             match self.arrow_writers.get_mut(&key) {
@@ -333,7 +325,21 @@ impl DeltaWriter<Vec<Value>> for JsonWriter {
                 }
                 None => {
                     let schema = arrow_schema_without_partitions(&arrow_schema, &partition_columns);
-                    let mut writer = DataArrowWriter::new(schema, writer_properties.clone())?;
+
+                    let record_batch =
+                        record_batch_from_message(arrow_schema.clone(), &values[..1])?;
+                    let partition_values =
+                        extract_partition_values(&partition_columns, &record_batch)?;
+                    let prefix = Path::parse(partition_values.hive_partition_path())?;
+                    let uuid = Uuid::new_v4();
+                    let path =
+                        next_data_path(&prefix, 0, &uuid, self.writer_properties_factory.clone());
+                    let writer_properties = self
+                        .writer_properties_factory
+                        .create_writer_properties(&path, &arrow_schema)?;
+                    let mut writer =
+                        DataArrowWriter::new(schema, writer_properties, partition_values, path)?;
+
                     let result = writer
                         .write_values(&partition_columns, arrow_schema.clone(), values)
                         .await;
@@ -376,23 +382,19 @@ impl DeltaWriter<Vec<Value>> for JsonWriter {
 
         for (_, writer) in writers {
             let metadata = writer.arrow_writer.close()?;
-            let prefix = writer.partition_values.hive_partition_path();
-            let prefix = Path::parse(prefix)?;
-            let uuid = Uuid::new_v4();
 
-            let path = next_data_path(&prefix, 0, &uuid, &writer.writer_properties);
             let obj_bytes = Bytes::from(writer.buffer.to_vec());
             let file_size = obj_bytes.len() as i64;
             self.table
                 .object_store()
-                .put_with_retries(&path, obj_bytes.into(), 15)
+                .put_with_retries(&writer.path, obj_bytes.into(), 15)
                 .await?;
 
             let table_config = self.table.snapshot()?.table_config();
 
             actions.push(create_add(
                 &writer.partition_values,
-                path.to_string(),
+                writer.path.to_string(),
                 file_size,
                 &metadata,
                 table_config.num_indexed_cols(),
@@ -769,7 +771,12 @@ mod tests {
         writer.write(vec![data]).await.unwrap();
         writer.flush_and_commit(&mut table).await.unwrap();
         assert_eq!(table.version(), Some(1));
-        let add_actions = table.state.unwrap().file_actions().unwrap();
+        let add_actions = table
+            .state
+            .unwrap()
+            .file_actions(&table.log_store)
+            .await
+            .unwrap();
         assert_eq!(add_actions.len(), 1);
         let expected_stats = "{\"numRecords\":1,\"minValues\":{\"id\":\"A\",\"value\":42},\"maxValues\":{\"id\":\"A\",\"value\":42},\"nullCount\":{\"id\":0,\"value\":0}}";
         assert_eq!(
@@ -818,7 +825,12 @@ mod tests {
         writer.write(vec![data]).await.unwrap();
         writer.flush_and_commit(&mut table).await.unwrap();
         assert_eq!(table.version(), Some(1));
-        let add_actions = table.state.unwrap().file_actions().unwrap();
+        let add_actions = table
+            .state
+            .unwrap()
+            .file_actions(&table.log_store)
+            .await
+            .unwrap();
         assert_eq!(add_actions.len(), 1);
         let expected_stats = "{\"numRecords\":1,\"minValues\":{\"id\":\"A\"},\"maxValues\":{\"id\":\"A\"},\"nullCount\":{\"id\":0}}";
         assert_eq!(
