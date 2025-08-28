@@ -36,8 +36,10 @@ use futures::{Future, StreamExt, TryStreamExt};
 use indexmap::IndexMap;
 use itertools::Itertools;
 use num_cpus;
+use parquet::arrow::arrow_reader::ArrowReaderOptions;
 use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
 use parquet::basic::{Compression, ZstdLevel};
+use parquet::encryption::decrypt::FileDecryptionProperties;
 use parquet::errors::ParquetError;
 use parquet::file::properties::WriterProperties;
 use serde::{de::Error as DeError, Deserialize, Deserializer, Serialize, Serializer};
@@ -54,6 +56,8 @@ use crate::logstore::{LogStore, LogStoreRef, ObjectStoreRef};
 use crate::protocol::DeltaOperation;
 use crate::table::config::TablePropertiesExt as _;
 use crate::table::state::DeltaTableState;
+use crate::table::table_parquet_options::build_writer_properties;
+use crate::table::TableParquetOptions;
 use crate::writer::utils::arrow_schema_without_partitions;
 use crate::{crate_version, DeltaTable, ObjectMeta, PartitionFilter};
 
@@ -197,6 +201,8 @@ pub struct OptimizeBuilder<'a> {
     snapshot: DeltaTableState,
     /// Delta object store for handling data files
     log_store: LogStoreRef,
+    /// Parquet options for the table
+    table_parquet_options: Option<TableParquetOptions>,
     /// Filters to select specific table partitions to be optimized
     filters: &'a [PartitionFilter],
     /// Desired file size after bin-packing files
@@ -228,13 +234,19 @@ impl super::Operation<()> for OptimizeBuilder<'_> {
 
 impl<'a> OptimizeBuilder<'a> {
     /// Create a new [`OptimizeBuilder`]
-    pub fn new(log_store: LogStoreRef, snapshot: DeltaTableState) -> Self {
+    pub fn new(
+        log_store: LogStoreRef,
+        snapshot: DeltaTableState,
+        table_parquet_options: Option<TableParquetOptions>,
+    ) -> Self {
+        let writer_properties = build_writer_properties(&table_parquet_options);
         Self {
             snapshot,
             log_store,
+            table_parquet_options,
             filters: &[],
             target_size: None,
-            writer_properties: None,
+            writer_properties,
             commit_properties: CommitProperties::default(),
             preserve_insertion_order: false,
             max_concurrent_tasks: num_cpus::get(),
@@ -341,6 +353,7 @@ impl<'a> std::future::IntoFuture for OptimizeBuilder<'a> {
                 .execute(
                     this.log_store.clone(),
                     &this.snapshot,
+                    this.table_parquet_options.clone(),
                     this.max_concurrent_tasks,
                     this.max_spill_size,
                     this.min_commit_interval,
@@ -353,7 +366,11 @@ impl<'a> std::future::IntoFuture for OptimizeBuilder<'a> {
             if let Some(handler) = this.custom_execute_handler {
                 handler.post_execute(&this.log_store, operation_id).await?;
             }
-            let mut table = DeltaTable::new_with_state(this.log_store, this.snapshot);
+            let mut table = DeltaTable::new_with_state(
+                this.log_store,
+                this.snapshot,
+                this.table_parquet_options,
+            );
             table.update().await?;
             Ok((table, metrics))
         })
@@ -601,6 +618,7 @@ impl MergePlan {
         mut self,
         log_store: LogStoreRef,
         snapshot: &DeltaTableState,
+        table_parquet_options: Option<TableParquetOptions>,
         max_concurrent_tasks: usize,
         #[allow(unused_variables)] // used behind a feature flag
         max_spill_size: usize,
@@ -624,18 +642,35 @@ impl MergePlan {
                     for file in files.iter() {
                         debug!("  file {}", file.path);
                     }
+
                     let object_store_ref = log_store.object_store(Some(operation_id));
+                    let decrypt: Option<FileDecryptionProperties> =
+                        table_parquet_options.as_ref().and_then(|tpo| {
+                            tpo.crypto
+                                .file_decryption
+                                .as_ref()
+                                .map(|file_decryption| file_decryption.clone().into())
+                        });
                     let batch_stream = futures::stream::iter(files.clone())
                         .then(move |file| {
                             let object_store_ref = object_store_ref.clone();
+                            let decrypt = decrypt.clone();
                             let meta = ObjectMeta::try_from(file).unwrap();
                             async move {
                                 let file_reader =
                                     ParquetObjectReader::new(object_store_ref, meta.location)
                                         .with_file_size(meta.size);
-                                ParquetRecordBatchStreamBuilder::new(file_reader)
-                                    .await?
-                                    .build()
+                                let mut options = ArrowReaderOptions::new();
+                                if let Some(decrypt) = decrypt {
+                                    options = options.with_file_decryption_properties(decrypt);
+                                }
+
+                                ParquetRecordBatchStreamBuilder::new_with_options(
+                                    file_reader,
+                                    options,
+                                )
+                                .await?
+                                .build()
                             }
                         })
                         .try_flatten()
@@ -674,18 +709,19 @@ impl MergePlan {
                 // For each rewrite evaluate the predicate and then modify each expression
                 // to either compute the new value or obtain the old one then write these batches
                 let log_store = log_store.clone();
+                let tpo = table_parquet_options.clone();
                 futures::stream::iter(bins)
                     .map(move |(_, (partition, files))| {
-                        let batch_stream = Self::read_zorder(
-                            files.clone(),
-                            exec_context.clone(),
-                            DeltaTableProvider::try_new(
-                                snapshot.clone(),
-                                log_store.clone(),
-                                scan_config.clone(),
-                            )
-                            .unwrap(),
-                        );
+                        let dtp = DeltaTableProvider::try_new(
+                            snapshot.clone(),
+                            log_store.clone(),
+                            scan_config.clone(),
+                        )
+                        .unwrap()
+                        .with_parquet_options(tpo.clone());
+
+                        let batch_stream =
+                            Self::read_zorder(files.clone(), exec_context.clone(), dtp);
                         let rewrite_result = tokio::task::spawn(Self::rewrite_files(
                             task_parameters.clone(),
                             partition,
@@ -701,7 +737,11 @@ impl MergePlan {
 
         let mut stream = stream.buffer_unordered(max_concurrent_tasks);
 
-        let mut table = DeltaTable::new_with_state(log_store.clone(), snapshot.clone());
+        let mut table = DeltaTable::new_with_state(
+            log_store.clone(),
+            snapshot.clone(),
+            table_parquet_options.clone(),
+        );
 
         // Actions buffered so far. These will be flushed either at the end
         // or when we reach the commit interval.

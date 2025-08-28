@@ -26,6 +26,7 @@ use std::{
 
 use async_trait::async_trait;
 use datafusion::common::{Column, ScalarValue};
+use datafusion::config::TableOptions;
 use datafusion::error::Result as DataFusionResult;
 use datafusion::logical_expr::{
     case, col, lit, when, Expr, Extension, LogicalPlan, LogicalPlanBuilder, UserDefinedLogicalNode,
@@ -58,6 +59,10 @@ use crate::logstore::LogStoreRef;
 use crate::operations::cdc::*;
 use crate::protocol::DeltaOperation;
 use crate::table::state::DeltaTableState;
+use crate::table::table_parquet_options::{
+    build_writer_properties, state_with_parquet_options, ConfigFileType,
+};
+use crate::table::TableParquetOptions;
 use crate::{
     delta_datafusion::{
         expr::fmt_expr_to_sql,
@@ -88,6 +93,8 @@ pub struct UpdateBuilder {
     snapshot: DeltaTableState,
     /// Delta object store for handling data files
     log_store: LogStoreRef,
+    /// Parquet options for the table
+    table_parquet_options: Option<TableParquetOptions>,
     /// Datafusion session state relevant for executing the input plan
     state: Option<SessionState>,
     /// Properties passed to underlying parquet writer for when files are rewritten
@@ -128,14 +135,20 @@ impl super::Operation<()> for UpdateBuilder {
 
 impl UpdateBuilder {
     /// Create a new ['UpdateBuilder']
-    pub fn new(log_store: LogStoreRef, snapshot: DeltaTableState) -> Self {
+    pub fn new(
+        log_store: LogStoreRef,
+        snapshot: DeltaTableState,
+        table_parquet_options: Option<TableParquetOptions>,
+    ) -> Self {
+        let writer_properties = build_writer_properties(&table_parquet_options);
         Self {
             predicate: None,
             updates: HashMap::new(),
             snapshot,
             log_store,
+            table_parquet_options,
             state: None,
-            writer_properties: None,
+            writer_properties,
             commit_properties: CommitProperties::default(),
             safe_cast: false,
             custom_execute_handler: None,
@@ -241,6 +254,7 @@ async fn execute(
     updates: HashMap<Column, Expression>,
     log_store: LogStoreRef,
     snapshot: DeltaTableState,
+    parquet_options: Option<TableParquetOptions>,
     state: SessionState,
     writer_properties: Option<WriterProperties>,
     mut commit_properties: CommitProperties,
@@ -269,9 +283,8 @@ async fn execute(
         })
         .cloned()
         .collect();
-    let state = SessionStateBuilder::from(state)
-        .with_optimizer_rules(rules)
-        .build();
+
+    let state = state_with_parquet_options(state, parquet_options.as_ref());
 
     let update_planner = DeltaPlanner::<UpdateMetricExtensionPlanner> {
         extension_planner: UpdateMetricExtensionPlanner {},
@@ -328,6 +341,7 @@ async fn execute(
     // to either compute the new value or obtain the old one then write these batches
     let target_provider = Arc::new(
         DeltaTableProvider::try_new(snapshot.clone(), log_store.clone(), scan_config.clone())?
+            .with_parquet_options(parquet_options)
             .with_files(candidates.candidates.clone()),
     );
 
@@ -513,6 +527,7 @@ impl std::future::IntoFuture for UpdateBuilder {
                 this.updates,
                 this.log_store.clone(),
                 this.snapshot,
+                this.table_parquet_options.clone(),
                 state,
                 this.writer_properties,
                 this.commit_properties,
@@ -527,7 +542,7 @@ impl std::future::IntoFuture for UpdateBuilder {
             }
 
             Ok((
-                DeltaTable::new_with_state(this.log_store, snapshot),
+                DeltaTable::new_with_state(this.log_store, snapshot, this.table_parquet_options),
                 metrics,
             ))
         })

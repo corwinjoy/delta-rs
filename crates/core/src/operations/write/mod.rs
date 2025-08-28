@@ -76,6 +76,8 @@ use crate::kernel::{
 use crate::logstore::LogStoreRef;
 use crate::protocol::{DeltaOperation, SaveMode};
 use crate::table::state::DeltaTableState;
+use crate::table::table_parquet_options::build_writer_properties;
+use crate::table::TableParquetOptions;
 use crate::DeltaTable;
 
 #[derive(thiserror::Error, Debug)]
@@ -133,6 +135,8 @@ pub struct WriteBuilder {
     snapshot: Option<DeltaTableState>,
     /// Delta object store for handling data files
     log_store: LogStoreRef,
+    /// Parquet options for the table
+    table_parquet_options: Option<TableParquetOptions>,
     /// The input plan
     input: Option<Arc<LogicalPlan>>,
     /// Datafusion session state relevant for executing the input plan
@@ -190,10 +194,16 @@ impl super::Operation<()> for WriteBuilder {
 
 impl WriteBuilder {
     /// Create a new [`WriteBuilder`]
-    pub fn new(log_store: LogStoreRef, snapshot: Option<DeltaTableState>) -> Self {
+    pub fn new(
+        log_store: LogStoreRef,
+        snapshot: Option<DeltaTableState>,
+        table_parquet_options: Option<TableParquetOptions>,
+    ) -> Self {
+        let writer_properties = build_writer_properties(&table_parquet_options);
         Self {
             snapshot,
             log_store,
+            table_parquet_options,
             input: None,
             state: None,
             mode: SaveMode::Append,
@@ -203,7 +213,7 @@ impl WriteBuilder {
             write_batch_size: None,
             safe_cast: false,
             schema_mode: None,
-            writer_properties: None,
+            writer_properties,
             commit_properties: CommitProperties::default(),
             name: None,
             description: None,
@@ -749,7 +759,11 @@ impl std::future::IntoFuture for WriteBuilder {
                 handler.post_execute(&this.log_store, operation_id).await?;
             }
 
-            Ok(DeltaTable::new_with_state(this.log_store, commit.snapshot))
+            Ok(DeltaTable::new_with_state(
+                this.log_store,
+                commit.snapshot,
+                this.table_parquet_options,
+            ))
         })
     }
 }
@@ -1551,7 +1565,7 @@ mod tests {
         assert!(table.is_err());
 
         // Verify that table state hasn't changed
-        let table = DeltaTable::new_with_state(table_logstore, table_state);
+        let table = DeltaTable::new_with_state(table_logstore, table_state, None);
         assert_eq!(table.get_latest_version().await.unwrap(), 0);
     }
 
@@ -1955,7 +1969,7 @@ mod tests {
                     .logical_plan()
                     .clone(),
             );
-            let writer = WriteBuilder::new(table.log_store.clone(), table.state)
+            let writer = WriteBuilder::new(table.log_store.clone(), table.state, None)
                 .with_input_execution_plan(plan)
                 .with_save_mode(SaveMode::Overwrite);
 
@@ -1971,8 +1985,8 @@ mod tests {
                 .with_columns(table_schema.fields().cloned())
                 .await?;
             let batch = get_record_batch(None, false);
-            let writer =
-                WriteBuilder::new(table.log_store.clone(), None).with_input_batches(vec![batch]);
+            let writer = WriteBuilder::new(table.log_store.clone(), None, None)
+                .with_input_batches(vec![batch]);
 
             let actions = writer.check_preconditions().await?;
             assert_eq!(
@@ -1992,7 +2006,7 @@ mod tests {
                 .with_columns(table_schema.fields().cloned())
                 .await?;
             let writer =
-                WriteBuilder::new(table.log_store.clone(), None).with_input_batches(vec![]);
+                WriteBuilder::new(table.log_store.clone(), None, None).with_input_batches(vec![]);
 
             match writer.check_preconditions().await {
                 Ok(_) => panic!("Expected check_preconditions to fail!"),

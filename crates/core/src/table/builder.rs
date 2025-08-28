@@ -13,6 +13,7 @@ use url::Url;
 
 use crate::logstore::storage::IORuntime;
 use crate::logstore::{object_store_factories, LogStoreRef, StorageConfig};
+use crate::table::TableParquetOptions;
 use crate::{DeltaResult, DeltaTable, DeltaTableError};
 
 /// possible version specifications for loading a delta table
@@ -90,6 +91,8 @@ pub struct DeltaTableBuilder {
     #[allow(unused_variables)]
     allow_http: Option<bool>,
     table_config: DeltaTableConfig,
+    /// Parquet options to apply when operating on the table
+    pub table_parquet_options: Option<TableParquetOptions>,
 }
 
 impl DeltaTableBuilder {
@@ -136,6 +139,7 @@ impl DeltaTableBuilder {
             storage_options: None,
             allow_http: None,
             table_config: DeltaTableConfig::default(),
+            table_parquet_options: None,
         })
     }
 
@@ -234,6 +238,12 @@ impl DeltaTableBuilder {
         self
     }
 
+    /// Set the parquet options to use when reading/writing parquet files in the table.
+    pub fn with_parquet_config(mut self, table_parquet_options: TableParquetOptions) -> Self {
+        self.table_parquet_options = Some(table_parquet_options);
+        self
+    }
+
     /// Provide a custom runtime handle or runtime config
     pub fn with_io_runtime(mut self, io_runtime: IORuntime) -> Self {
         self.table_config.io_runtime = Some(io_runtime);
@@ -279,7 +289,11 @@ impl DeltaTableBuilder {
     /// This will not load the log, i.e. the table is not initialized. To get an initialized
     /// table use the `load` function
     pub fn build(self) -> DeltaResult<DeltaTable> {
-        Ok(DeltaTable::new(self.build_storage()?, self.table_config))
+        Ok(DeltaTable::new(
+            self.build_storage()?,
+            self.table_config,
+            self.table_parquet_options,
+        ))
     }
 
     /// Build the [`DeltaTable`] and load its state
