@@ -22,9 +22,8 @@ use crate::crate_version;
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::kernel::{Add, PartitionsExt};
 use crate::logstore::ObjectStoreRef;
-use crate::table::table_parquet_options::{
-    build_writer_properties_factory_default, build_writer_properties_factory_wp,
-    WriterPropertiesFactory,
+use crate::table::file_format_options::{
+    build_writer_properties_factory_wp, WriterPropertiesFactory,
 };
 use crate::writer::record_batch::{divide_by_partition_values, PartitionResult};
 use crate::writer::stats::create_add;
@@ -532,8 +531,7 @@ mod tests {
         target_file_size: Option<usize>,
         write_batch_size: Option<usize>,
     ) -> DeltaWriter {
-        let writer_properties_factory =
-            writer_properties.map(|wp| build_writer_properties_factory_wp(wp));
+        let writer_properties_factory = writer_properties.map(build_writer_properties_factory_wp);
 
         let config = WriterConfig::new(
             batch.schema(),
@@ -554,8 +552,7 @@ mod tests {
         target_file_size: Option<usize>,
         write_batch_size: Option<usize>,
     ) -> PartitionWriter {
-        let writer_properties_factory =
-            writer_properties.map(|wp| build_writer_properties_factory_wp(wp));
+        let writer_properties_factory = writer_properties.map(build_writer_properties_factory_wp);
         let config = PartitionWriterConfig::try_new(
             batch.schema(),
             IndexMap::new(),

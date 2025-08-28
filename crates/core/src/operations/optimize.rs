@@ -54,12 +54,11 @@ use crate::kernel::{scalars::ScalarExt, Action, Add, PartitionsExt, Remove};
 use crate::logstore::{LogStore, LogStoreRef, ObjectStoreRef};
 use crate::protocol::DeltaOperation;
 use crate::table::config::TablePropertiesExt as _;
-use crate::table::state::DeltaTableState;
-use crate::table::table_parquet_options::{
-    build_writer_properties_factory_tpo, build_writer_properties_factory_wp,
-    WriterPropertiesFactory,
+use crate::table::file_format_options::{
+    build_writer_properties_factory_ffo, build_writer_properties_factory_wp,
+    to_table_parquet_options_from_ffo, FileFormatRef, WriterPropertiesFactory,
 };
-use crate::table::TableParquetOptions;
+use crate::table::state::DeltaTableState;
 use crate::writer::utils::arrow_schema_without_partitions;
 use crate::{DeltaTable, ObjectMeta, PartitionFilter};
 
@@ -203,8 +202,8 @@ pub struct OptimizeBuilder<'a> {
     snapshot: DeltaTableState,
     /// Delta object store for handling data files
     log_store: LogStoreRef,
-    /// Parquet options for the table
-    table_parquet_options: Option<TableParquetOptions>,
+    /// Options to apply when operating on the table files
+    file_format_options: Option<FileFormatRef>,
     /// Filters to select specific table partitions to be optimized
     filters: &'a [PartitionFilter],
     /// Desired file size after bin-packing files
@@ -239,13 +238,14 @@ impl<'a> OptimizeBuilder<'a> {
     pub fn new(
         log_store: LogStoreRef,
         snapshot: DeltaTableState,
-        table_parquet_options: Option<TableParquetOptions>,
+        file_format_options: Option<FileFormatRef>,
     ) -> Self {
-        let writer_properties_factory = build_writer_properties_factory_tpo(&table_parquet_options);
+        let writer_properties_factory =
+            build_writer_properties_factory_ffo(file_format_options.clone());
         Self {
             snapshot,
             log_store,
-            table_parquet_options,
+            file_format_options,
             filters: &[],
             target_size: None,
             writer_properties_factory,
@@ -349,7 +349,7 @@ impl<'a> std::future::IntoFuture for OptimizeBuilder<'a> {
                 .execute(
                     this.log_store.clone(),
                     &this.snapshot,
-                    this.table_parquet_options.clone(),
+                    this.file_format_options.clone(),
                     this.max_concurrent_tasks,
                     this.max_spill_size,
                     this.min_commit_interval,
@@ -362,11 +362,8 @@ impl<'a> std::future::IntoFuture for OptimizeBuilder<'a> {
             if let Some(handler) = this.custom_execute_handler {
                 handler.post_execute(&this.log_store, operation_id).await?;
             }
-            let mut table = DeltaTable::new_with_state(
-                this.log_store,
-                this.snapshot,
-                this.table_parquet_options,
-            );
+            let mut table =
+                DeltaTable::new_with_state(this.log_store, this.snapshot, this.file_format_options);
             table.update().await?;
             Ok((table, metrics))
         })
@@ -614,7 +611,7 @@ impl MergePlan {
         mut self,
         log_store: LogStoreRef,
         snapshot: &DeltaTableState,
-        table_parquet_options: Option<TableParquetOptions>,
+        file_format_options: Option<FileFormatRef>,
         max_concurrent_tasks: usize,
         #[allow(unused_variables)] // used behind a feature flag
         max_spill_size: usize,
@@ -624,6 +621,7 @@ impl MergePlan {
         handle: Option<&Arc<dyn CustomExecuteHandler>>,
     ) -> Result<Metrics, DeltaTableError> {
         let operations = std::mem::take(&mut self.operations);
+        let table_parquet_options = to_table_parquet_options_from_ffo(file_format_options.as_ref());
 
         let stream = match operations {
             OptimizeOperations::Compact(bins) => futures::stream::iter(bins)
@@ -736,7 +734,7 @@ impl MergePlan {
         let mut table = DeltaTable::new_with_state(
             log_store.clone(),
             snapshot.clone(),
-            table_parquet_options.clone(),
+            file_format_options.clone(),
         );
 
         // Actions buffered so far. These will be flushed either at the end

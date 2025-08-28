@@ -38,7 +38,7 @@ use crate::errors::{DeltaResult, DeltaTableError};
 use crate::logstore::LogStoreRef;
 use crate::table::builder::DeltaTableBuilder;
 use crate::table::config::{TablePropertiesExt as _, DEFAULT_NUM_INDEX_COLS};
-use crate::table::TableParquetOptions;
+use crate::table::file_format_options::FileFormatRef;
 use crate::DeltaTable;
 
 pub mod add_column;
@@ -166,11 +166,8 @@ impl DeltaOps {
     }
 
     /// Set options for parquet files
-    pub fn with_table_parquet_options(
-        mut self,
-        table_parquet_options: TableParquetOptions,
-    ) -> Self {
-        self.0.table_parquet_options = Some(table_parquet_options);
+    pub fn with_file_format_options(mut self, file_format_options: FileFormatRef) -> Self {
+        self.0.file_format_options = Some(file_format_options);
         self
     }
 
@@ -206,8 +203,8 @@ impl DeltaOps {
     #[must_use]
     pub fn create(self) -> CreateBuilder {
         let mut cb = CreateBuilder::default().with_log_store(self.0.log_store);
-        if let Some(table_parquet_options) = self.0.table_parquet_options {
-            cb = cb.with_table_parquet_options(table_parquet_options);
+        if let Some(file_format_options) = self.0.file_format_options {
+            cb = cb.with_file_format_options(file_format_options);
         }
         cb
     }
@@ -219,7 +216,7 @@ impl DeltaOps {
         LoadBuilder::new(
             self.0.log_store,
             self.0.state.unwrap(),
-            self.0.table_parquet_options,
+            self.0.file_format_options,
         )
     }
 
@@ -234,7 +231,7 @@ impl DeltaOps {
     #[cfg(feature = "datafusion")]
     #[must_use]
     pub fn write(self, batches: impl IntoIterator<Item = RecordBatch>) -> WriteBuilder {
-        WriteBuilder::new(self.0.log_store, self.0.state, self.0.table_parquet_options)
+        WriteBuilder::new(self.0.log_store, self.0.state, self.0.file_format_options)
             .with_input_batches(batches)
     }
 
@@ -257,7 +254,7 @@ impl DeltaOps {
         OptimizeBuilder::new(
             self.0.log_store,
             self.0.state.unwrap(),
-            self.0.table_parquet_options,
+            self.0.file_format_options,
         )
     }
 
@@ -268,7 +265,7 @@ impl DeltaOps {
         DeleteBuilder::new(
             self.0.log_store,
             self.0.state.unwrap(),
-            self.0.table_parquet_options,
+            self.0.file_format_options,
         )
     }
 
@@ -279,7 +276,7 @@ impl DeltaOps {
         UpdateBuilder::new(
             self.0.log_store,
             self.0.state.unwrap(),
-            self.0.table_parquet_options,
+            self.0.file_format_options,
         )
     }
 
@@ -300,7 +297,7 @@ impl DeltaOps {
         MergeBuilder::new(
             self.0.log_store,
             self.0.state.unwrap(),
-            self.0.table_parquet_options,
+            self.0.file_format_options,
             predicate.into(),
             source,
         )
@@ -326,7 +323,7 @@ impl DeltaOps {
         DropConstraintBuilder::new(
             self.0.log_store,
             self.0.state.unwrap(),
-            self.0.table_parquet_options,
+            self.0.file_format_options,
         )
     }
 

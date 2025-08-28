@@ -26,6 +26,7 @@ use std::{
 
 use async_trait::async_trait;
 use datafusion::common::{Column, ScalarValue};
+use datafusion::config::TableParquetOptions;
 use datafusion::error::Result as DataFusionResult;
 use datafusion::logical_expr::{
     case, col, lit, when, Expr, Extension, LogicalPlan, LogicalPlanBuilder, UserDefinedLogicalNode,
@@ -57,12 +58,12 @@ use crate::kernel::{Action, Remove};
 use crate::logstore::LogStoreRef;
 use crate::operations::cdc::*;
 use crate::protocol::DeltaOperation;
-use crate::table::state::DeltaTableState;
-use crate::table::table_parquet_options::{
-    build_writer_properties_factory_tpo, build_writer_properties_factory_wp,
-    state_with_parquet_options, WriterPropertiesFactory,
+use crate::table::file_format_options::{
+    build_writer_properties_factory_ffo, build_writer_properties_factory_wp,
+    state_with_parquet_options, to_table_parquet_options_from_ffo, FileFormatRef,
+    WriterPropertiesFactory,
 };
-use crate::table::TableParquetOptions;
+use crate::table::state::DeltaTableState;
 use crate::{
     delta_datafusion::{
         expr::fmt_expr_to_sql,
@@ -93,8 +94,8 @@ pub struct UpdateBuilder {
     snapshot: DeltaTableState,
     /// Delta object store for handling data files
     log_store: LogStoreRef,
-    /// Parquet options for the table
-    table_parquet_options: Option<TableParquetOptions>,
+    /// Options to apply when operating on the table files
+    file_format_options: Option<FileFormatRef>,
     /// Datafusion session state relevant for executing the input plan
     state: Option<SessionState>,
     /// Properties passed to underlying parquet writer for when files are rewritten
@@ -138,15 +139,16 @@ impl UpdateBuilder {
     pub fn new(
         log_store: LogStoreRef,
         snapshot: DeltaTableState,
-        table_parquet_options: Option<TableParquetOptions>,
+        file_format_options: Option<FileFormatRef>,
     ) -> Self {
-        let writer_properties_factory = build_writer_properties_factory_tpo(&table_parquet_options);
+        let writer_properties_factory =
+            build_writer_properties_factory_ffo(file_format_options.clone());
         Self {
             predicate: None,
             updates: HashMap::new(),
             snapshot,
             log_store,
-            table_parquet_options,
+            file_format_options,
             state: None,
             writer_properties_factory,
             commit_properties: CommitProperties::default(),
@@ -276,7 +278,7 @@ async fn execute(
     // NOTE: The optimize_projections rule is being temporarily disabled because it errors with
     // our schemas for Lists due to issues discussed
     // [here](https://github.com/delta-io/delta-rs/pull/2886#issuecomment-2481550560>
-    let rules: Vec<Arc<dyn datafusion::optimizer::OptimizerRule + Send + Sync>> = state
+    let _rules: Vec<Arc<dyn datafusion::optimizer::OptimizerRule + Send + Sync>> = state
         .optimizers()
         .iter()
         .filter(|rule| {
@@ -528,7 +530,7 @@ impl std::future::IntoFuture for UpdateBuilder {
                 this.updates,
                 this.log_store.clone(),
                 this.snapshot,
-                this.table_parquet_options.clone(),
+                to_table_parquet_options_from_ffo(this.file_format_options.as_ref()),
                 state,
                 this.writer_properties_factory,
                 this.commit_properties,
@@ -543,7 +545,7 @@ impl std::future::IntoFuture for UpdateBuilder {
             }
 
             Ok((
-                DeltaTable::new_with_state(this.log_store, snapshot, this.table_parquet_options),
+                DeltaTable::new_with_state(this.log_store, snapshot, this.file_format_options),
                 metrics,
             ))
         })

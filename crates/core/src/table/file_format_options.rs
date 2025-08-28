@@ -8,7 +8,7 @@ use crate::{crate_version, DeltaResult};
 use arrow_schema::Schema as ArrowSchema;
 
 use object_store::path::Path;
-use parquet::basic::{Compression, ZstdLevel};
+use parquet::basic::Compression;
 use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
 use parquet::schema::types::ColumnPath;
 use std::sync::Arc;
@@ -16,7 +16,87 @@ use tracing::info;
 
 #[cfg(not(feature = "datafusion"))]
 #[derive(Clone, Default, Debug, PartialEq)]
-pub struct TableParquetOptions {}
+pub struct TableOptions {}
+
+// Top level trait for file format options used by a DeltaTable
+pub trait FileFormatOptions: Send + Sync + std::fmt::Debug + 'static {
+    fn table_options(&self) -> TableOptions;
+    fn writer_properties_factory(&self) -> Arc<dyn WriterPropertiesFactory>;
+}
+
+/// Convenience alias for file format options reference used across the codebase
+pub type FileFormatRef = Arc<dyn FileFormatOptions>;
+
+#[derive(Clone, Debug, Default)]
+pub struct SimpleFileFormatOptions {
+    table_options: TableOptions,
+}
+
+impl SimpleFileFormatOptions {
+    pub fn new(table_options: TableOptions) -> Self {
+        Self { table_options }
+    }
+}
+
+#[cfg(feature = "datafusion")]
+impl FileFormatOptions for SimpleFileFormatOptions {
+    fn table_options(&self) -> TableOptions {
+        self.table_options.clone()
+    }
+
+    fn writer_properties_factory(&self) -> Arc<dyn WriterPropertiesFactory> {
+        build_writer_properties_factory_tpo(&Some(self.table_options.parquet.clone())).unwrap()
+    }
+}
+
+#[cfg(feature = "datafusion")]
+pub fn build_writer_properties_factory_ffo(
+    file_format_options: Option<FileFormatRef>,
+) -> Option<Arc<dyn WriterPropertiesFactory>> {
+    file_format_options.map(|ffo| ffo.writer_properties_factory())
+}
+
+#[cfg(feature = "datafusion")]
+pub fn build_writer_properties_factory_or_default_ffo(
+    file_format_options: Option<FileFormatRef>,
+) -> Arc<dyn WriterPropertiesFactory> {
+    build_writer_properties_factory_ffo(file_format_options)
+        .unwrap_or_else(|| build_writer_properties_factory_default())
+}
+
+#[cfg(feature = "datafusion")]
+pub fn to_table_parquet_options_from_ffo(
+    file_format_options: Option<&FileFormatRef>,
+) -> Option<TableParquetOptions> {
+    file_format_options.map(|ffo| ffo.table_options().parquet)
+}
+
+#[cfg(feature = "datafusion")]
+pub fn state_with_file_format_options(
+    state: SessionState,
+    file_format_options: Option<&FileFormatRef>,
+) -> SessionState {
+    // Convert file format options to parquet options and delegate to the common implementation
+    let parquet_options = to_table_parquet_options_from_ffo(file_format_options);
+    state_with_parquet_options(state, parquet_options.as_ref())
+}
+
+#[cfg(feature = "datafusion")]
+pub fn state_with_parquet_options(
+    state: SessionState,
+    parquet_options: Option<&TableParquetOptions>,
+) -> SessionState {
+    if let Some(parquet) = parquet_options {
+        let mut sb = SessionStateBuilder::new_from_existing(state.clone());
+        let mut tbl_opts = TableOptions::new();
+        tbl_opts.parquet = parquet.clone();
+        tbl_opts.set_config_format(ConfigFileType::PARQUET);
+        sb = sb.with_table_options(tbl_opts);
+        let state = sb.build();
+        return state;
+    }
+    state
+}
 
 #[cfg(feature = "datafusion")]
 fn build_writer_properties_tpo(
@@ -34,28 +114,13 @@ fn build_writer_properties_tpo(
 }
 
 #[cfg(feature = "datafusion")]
-pub fn build_writer_properties_factory_tpo(
+fn build_writer_properties_factory_tpo(
     table_parquet_options: &Option<TableParquetOptions>,
 ) -> Option<Arc<dyn WriterPropertiesFactory>> {
     let props = build_writer_properties_tpo(table_parquet_options);
     props.map(|wp| {
         Arc::new(SimpleWriterPropertiesFactory::new(wp)) as Arc<dyn WriterPropertiesFactory>
     })
-}
-
-#[cfg(feature = "datafusion")]
-pub fn build_writer_properties_factory_or_default_tpo(
-    table_parquet_options: &Option<TableParquetOptions>,
-) -> Arc<dyn WriterPropertiesFactory> {
-    let maybe_wp = build_writer_properties_factory_tpo(table_parquet_options);
-    maybe_wp.unwrap_or_else(|| build_writer_properties_factory_default())
-}
-
-#[cfg(not(feature = "datafusion"))]
-pub fn build_writer_properties_factory_or_default_tpo(
-    _table_parquet_options: &Option<TableParquetOptions>,
-) -> Arc<dyn WriterPropertiesFactory> {
-    build_writer_properties_factory_default()
 }
 
 pub fn build_writer_properties_factory_wp(
@@ -66,23 +131,6 @@ pub fn build_writer_properties_factory_wp(
 
 pub fn build_writer_properties_factory_default() -> Arc<dyn WriterPropertiesFactory> {
     Arc::new(SimpleWriterPropertiesFactory::default())
-}
-
-#[cfg(feature = "datafusion")]
-pub fn state_with_parquet_options(
-    state: SessionState,
-    parquet_options: Option<&TableParquetOptions>,
-) -> SessionState {
-    if parquet_options.is_some() {
-        let mut sb = SessionStateBuilder::new_from_existing(state.clone());
-        let mut tbl_opts = TableOptions::new();
-        tbl_opts.parquet = parquet_options.unwrap().clone();
-        tbl_opts.set_config_format(ConfigFileType::PARQUET);
-        sb = sb.with_table_options(tbl_opts);
-        let state = sb.build();
-        return state;
-    }
-    state
 }
 
 pub trait WriterPropertiesFactory: Send + Sync + std::fmt::Debug + 'static {

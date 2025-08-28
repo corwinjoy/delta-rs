@@ -75,12 +75,11 @@ use crate::kernel::{
 };
 use crate::logstore::LogStoreRef;
 use crate::protocol::{DeltaOperation, SaveMode};
-use crate::table::state::DeltaTableState;
-use crate::table::table_parquet_options::{
-    build_writer_properties_factory_tpo, build_writer_properties_factory_wp,
+use crate::table::file_format_options::{
+    build_writer_properties_factory_ffo, build_writer_properties_factory_wp, FileFormatRef,
     WriterPropertiesFactory,
 };
-use crate::table::TableParquetOptions;
+use crate::table::state::DeltaTableState;
 use crate::DeltaTable;
 
 #[derive(thiserror::Error, Debug)]
@@ -138,8 +137,8 @@ pub struct WriteBuilder {
     snapshot: Option<DeltaTableState>,
     /// Delta object store for handling data files
     log_store: LogStoreRef,
-    /// Parquet options for the table
-    table_parquet_options: Option<TableParquetOptions>,
+    /// Options to apply when operating on the table files
+    file_format_options: Option<FileFormatRef>,
     /// The input plan
     input: Option<Arc<LogicalPlan>>,
     /// Datafusion session state relevant for executing the input plan
@@ -200,13 +199,14 @@ impl WriteBuilder {
     pub fn new(
         log_store: LogStoreRef,
         snapshot: Option<DeltaTableState>,
-        table_parquet_options: Option<TableParquetOptions>,
+        file_format_options: Option<FileFormatRef>,
     ) -> Self {
-        let writer_properties_factory = build_writer_properties_factory_tpo(&table_parquet_options);
+        let writer_properties_factory =
+            build_writer_properties_factory_ffo(file_format_options.clone());
         Self {
             snapshot,
             log_store,
-            table_parquet_options,
+            file_format_options,
             input: None,
             state: None,
             mode: SaveMode::Append,
@@ -766,7 +766,7 @@ impl std::future::IntoFuture for WriteBuilder {
             Ok(DeltaTable::new_with_state(
                 this.log_store,
                 commit.snapshot,
-                this.table_parquet_options,
+                this.file_format_options,
             ))
         })
     }

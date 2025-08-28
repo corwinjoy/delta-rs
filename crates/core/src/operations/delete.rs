@@ -32,6 +32,7 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 use datafusion::prelude::Expr;
 
+use datafusion::config::TableParquetOptions;
 use futures::future::BoxFuture;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -60,12 +61,12 @@ use crate::operations::write::WriterStatsConfig;
 use crate::operations::CustomExecuteHandler;
 use crate::protocol::DeltaOperation;
 use crate::table::config::TablePropertiesExt as _;
-use crate::table::state::DeltaTableState;
-use crate::table::table_parquet_options::{
-    build_writer_properties_factory_tpo, build_writer_properties_factory_wp,
-    state_with_parquet_options, WriterPropertiesFactory,
+use crate::table::file_format_options::{
+    build_writer_properties_factory_ffo, build_writer_properties_factory_wp,
+    state_with_file_format_options, to_table_parquet_options_from_ffo, FileFormatRef,
+    WriterPropertiesFactory,
 };
-use crate::table::TableParquetOptions;
+use crate::table::state::DeltaTableState;
 use crate::{DeltaTable, DeltaTableError};
 
 const SOURCE_COUNT_ID: &str = "delete_source_count";
@@ -80,8 +81,8 @@ pub struct DeleteBuilder {
     snapshot: DeltaTableState,
     /// Delta object store for handling data files
     log_store: LogStoreRef,
-    /// Parquet options for the table
-    table_parquet_options: Option<TableParquetOptions>,
+    /// Options to apply when operating on the table files
+    file_format_options: Option<FileFormatRef>,
     /// Datafusion session state relevant for executing the input plan
     state: Option<SessionState>,
     /// Properties passed to underlying parquet writer for when files are rewritten
@@ -124,14 +125,15 @@ impl DeleteBuilder {
     pub fn new(
         log_store: LogStoreRef,
         snapshot: DeltaTableState,
-        table_parquet_options: Option<TableParquetOptions>,
+        file_format_options: Option<FileFormatRef>,
     ) -> Self {
-        let writer_properties_factory = build_writer_properties_factory_tpo(&table_parquet_options);
+        let writer_properties_factory =
+            build_writer_properties_factory_ffo(file_format_options.clone());
         Self {
             predicate: None,
             snapshot,
             log_store,
-            table_parquet_options,
+            file_format_options,
             state: None,
             commit_properties: CommitProperties::default(),
             writer_properties_factory,
@@ -444,7 +446,7 @@ impl std::future::IntoFuture for DeleteBuilder {
                 session.state()
             });
 
-            let state = state_with_parquet_options(state, this.table_parquet_options.as_ref());
+            let state = state_with_file_format_options(state, this.file_format_options.as_ref());
 
             let predicate = match this.predicate {
                 Some(predicate) => match predicate {
@@ -460,7 +462,7 @@ impl std::future::IntoFuture for DeleteBuilder {
                 predicate,
                 this.log_store.clone(),
                 this.snapshot,
-                this.table_parquet_options.clone(),
+                to_table_parquet_options_from_ffo(this.file_format_options.as_ref()),
                 state,
                 this.writer_properties_factory,
                 this.commit_properties,
@@ -470,11 +472,7 @@ impl std::future::IntoFuture for DeleteBuilder {
             .await?;
 
             Ok((
-                DeltaTable::new_with_state(
-                    this.log_store,
-                    new_snapshot,
-                    this.table_parquet_options,
-                ),
+                DeltaTable::new_with_state(this.log_store, new_snapshot, this.file_format_options),
                 metrics,
             ))
         })

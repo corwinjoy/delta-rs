@@ -37,6 +37,7 @@ use arrow_schema::{DataType, Field, SchemaBuilder};
 use async_trait::async_trait;
 use datafusion::common::tree_node::{Transformed, TreeNode};
 use datafusion::common::{Column, DFSchema, ExprSchema, ScalarValue, TableReference};
+use datafusion::config::TableParquetOptions;
 use datafusion::datasource::provider_as_source;
 use datafusion::error::Result as DataFusionResult;
 use datafusion::execution::context::SessionConfig;
@@ -58,7 +59,6 @@ use datafusion::{
     physical_plan::ExecutionPlan,
     prelude::{cast, DataFrame, SessionContext},
 };
-
 use delta_kernel::engine::arrow_conversion::{TryIntoArrow as _, TryIntoKernel as _};
 use delta_kernel::schema::{ColumnMetadataKey, StructType};
 use filter::try_construct_early_filter;
@@ -92,12 +92,12 @@ use crate::operations::write::generated_columns::{
 use crate::operations::write::WriterStatsConfig;
 use crate::protocol::{DeltaOperation, MergePredicate};
 use crate::table::config::TablePropertiesExt as _;
-use crate::table::state::DeltaTableState;
-use crate::table::table_parquet_options::{
-    build_writer_properties_factory_tpo, build_writer_properties_factory_wp,
-    state_with_parquet_options, WriterPropertiesFactory,
+use crate::table::file_format_options::{
+    build_writer_properties_factory_ffo, build_writer_properties_factory_wp,
+    state_with_parquet_options, to_table_parquet_options_from_ffo, FileFormatRef,
+    WriterPropertiesFactory,
 };
-use crate::table::TableParquetOptions;
+use crate::table::state::DeltaTableState;
 use crate::{DeltaResult, DeltaTable, DeltaTableError};
 
 mod barrier;
@@ -148,8 +148,8 @@ pub struct MergeBuilder {
     merge_schema: bool,
     /// Delta object store for handling data files
     log_store: LogStoreRef,
-    /// Parquet options for the table
-    table_parquet_options: Option<TableParquetOptions>,
+    /// Options to apply when operating on the table files
+    file_format_options: Option<FileFormatRef>,
     /// Datafusion session state relevant for executing the input plan
     state: Option<SessionState>,
     /// Properties passed to underlying parquet writer for when files are rewritten
@@ -176,18 +176,19 @@ impl MergeBuilder {
     pub fn new<E: Into<Expression>>(
         log_store: LogStoreRef,
         snapshot: DeltaTableState,
-        table_parquet_options: Option<TableParquetOptions>,
+        file_format_options: Option<FileFormatRef>,
         predicate: E,
         source: DataFrame,
     ) -> Self {
         let predicate = predicate.into();
-        let writer_properties_factory = build_writer_properties_factory_tpo(&table_parquet_options);
+        let writer_properties_factory =
+            build_writer_properties_factory_ffo(file_format_options.clone());
         Self {
             predicate,
             source,
             snapshot,
             log_store,
-            table_parquet_options,
+            file_format_options,
             source_alias: None,
             target_alias: None,
             state: None,
@@ -1561,7 +1562,7 @@ impl std::future::IntoFuture for MergeBuilder {
                 this.source,
                 this.log_store.clone(),
                 this.snapshot,
-                this.table_parquet_options.clone(),
+                to_table_parquet_options_from_ffo(this.file_format_options.as_ref()),
                 state,
                 this.writer_properties_factory,
                 this.commit_properties,
@@ -1583,7 +1584,7 @@ impl std::future::IntoFuture for MergeBuilder {
             }
 
             Ok((
-                DeltaTable::new_with_state(this.log_store, snapshot, this.table_parquet_options),
+                DeltaTable::new_with_state(this.log_store, snapshot, this.file_format_options),
                 metrics,
             ))
         })

@@ -10,8 +10,8 @@ use crate::delta_datafusion::DataFusionMixins;
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::kernel::transaction::PROTOCOL;
 use crate::logstore::LogStoreRef;
+use crate::table::file_format_options::FileFormatRef;
 use crate::table::state::DeltaTableState;
-use crate::table::TableParquetOptions;
 use crate::DeltaTable;
 
 #[derive(Debug, Clone)]
@@ -22,8 +22,8 @@ pub struct LoadBuilder {
     log_store: LogStoreRef,
     /// A sub-selection of columns to be loaded
     columns: Option<Vec<String>>,
-    /// Parquet options for the table
-    table_parquet_options: Option<TableParquetOptions>,
+    /// Options to apply when operating on the table files
+    file_format_options: Option<FileFormatRef>,
 }
 
 impl super::Operation<()> for LoadBuilder {
@@ -40,13 +40,13 @@ impl LoadBuilder {
     pub fn new(
         log_store: LogStoreRef,
         snapshot: DeltaTableState,
-        table_parquet_options: Option<TableParquetOptions>,
+        file_format_options: Option<FileFormatRef>,
     ) -> Self {
         Self {
             snapshot,
             log_store,
             columns: None,
-            table_parquet_options: table_parquet_options,
+            file_format_options,
         }
     }
 
@@ -73,7 +73,7 @@ impl std::future::IntoFuture for LoadBuilder {
             let table = DeltaTable::new_with_state(
                 this.log_store,
                 this.snapshot,
-                this.table_parquet_options.clone(),
+                this.file_format_options.clone(),
             );
             let schema = table.snapshot()?.arrow_schema()?;
             let projection = this

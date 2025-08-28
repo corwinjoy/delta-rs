@@ -20,7 +20,7 @@ use crate::logstore::LogStoreRef;
 use crate::protocol::{DeltaOperation, SaveMode};
 use crate::table::builder::ensure_table_uri;
 use crate::table::config::TableProperty;
-use crate::table::TableParquetOptions;
+use crate::table::file_format_options::FileFormatRef;
 use crate::{DeltaTable, DeltaTableBuilder};
 
 #[derive(thiserror::Error, Debug)]
@@ -61,7 +61,7 @@ pub struct CreateBuilder {
     storage_options: Option<HashMap<String, String>>,
     actions: Vec<Action>,
     log_store: Option<LogStoreRef>,
-    table_parquet_options: Option<TableParquetOptions>,
+    file_format_options: Option<FileFormatRef>,
     configuration: HashMap<String, Option<String>>,
     /// Additional information to add to the commit
     commit_properties: CommitProperties,
@@ -99,7 +99,7 @@ impl CreateBuilder {
             storage_options: None,
             actions: Default::default(),
             log_store: None,
-            table_parquet_options: None,
+            file_format_options: None,
             configuration: Default::default(),
             commit_properties: CommitProperties::default(),
             raise_if_key_not_exists: true,
@@ -240,12 +240,9 @@ impl CreateBuilder {
         self
     }
 
-    // Set options for parquet files
-    pub fn with_table_parquet_options(
-        mut self,
-        table_parquet_options: TableParquetOptions,
-    ) -> Self {
-        self.table_parquet_options = Some(table_parquet_options);
+    // Set format options for underlying table files
+    pub fn with_file_format_options(mut self, file_format_options: FileFormatRef) -> Self {
+        self.file_format_options = Some(file_format_options);
         self
     }
 
@@ -276,7 +273,7 @@ impl CreateBuilder {
                 DeltaTable::new(
                     log_store,
                     Default::default(),
-                    self.table_parquet_options.clone(),
+                    self.file_format_options.clone(),
                 ),
             )
         } else {
