@@ -320,8 +320,11 @@ pub mod datafusion {
     use std::sync::Arc;
 
     pub async fn get_data(table: &DeltaTable) -> Vec<RecordBatch> {
-        let table =
-            DeltaTable::new_with_state(table.log_store.clone(), table.snapshot().unwrap().clone());
+        let table = DeltaTable::new_with_state(
+            table.log_store.clone(),
+            table.snapshot().unwrap().clone(),
+            None,
+        );
         let ctx = SessionContext::new();
         ctx.register_table("test", Arc::new(table)).unwrap();
         ctx.sql("select * from test")
@@ -336,6 +339,7 @@ pub mod datafusion {
         let table = DeltaTable::new_with_state(
             table.log_store.clone(),
             table.state.as_ref().unwrap().clone(),
+            None,
         );
         let ctx = SessionContext::new();
         ctx.register_table("test", Arc::new(table)).unwrap();
