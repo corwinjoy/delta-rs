@@ -194,7 +194,7 @@ mod delete_expired_delta_log_in_checkpoint {
         let mut table = fs_common::create_table(
             "../test/tests/data/checkpoints_with_expired_logs/expired",
             Some(hashmap! {
-                TableProperty::LogRetentionDuration.as_ref().into() => Some("interval 10 minute".to_string()),
+                TableProperty::LogRetentionDuration.as_ref().into() => Some("interval 0 minute".to_string()),
                 TableProperty::EnableExpiredLogCleanup.as_ref().into() => Some("true".to_string())
             }),
         )
@@ -257,6 +257,100 @@ mod delete_expired_delta_log_in_checkpoint {
             .load_version(1)
             .await
             .expect_err("Should not load version 1");
+        // log file 2 is kept
+        table.load_version(2).await.expect("Cannot load version 2");
+    }
+
+    #[tokio::test]
+    async fn test_delete_expired_logs_safe_checkpoint() {
+        println!("test_delete_expired_logs_safe_checkpoint");
+        let mut table = fs_common::create_table(
+            "../test/tests/data/checkpoints_with_expired_logs/expired",
+            Some(hashmap! {
+                TableProperty::LogRetentionDuration.as_ref().into() => Some("interval 10 minute".to_string()),
+                TableProperty::EnableExpiredLogCleanup.as_ref().into() => Some("true".to_string())
+            }),
+        )
+            .await;
+
+        let table_path = table.table_uri();
+        let set_file_last_modified = |version: usize, last_modified_millis: u64| {
+            let path = format!("{table_path}_delta_log/{version:020}.json");
+            let file = OpenOptions::new().write(true).open(path).unwrap();
+            let last_modified = SystemTime::now().sub(Duration::from_millis(last_modified_millis));
+            let times = FileTimes::new()
+                .set_modified(last_modified)
+                .set_accessed(last_modified);
+            file.set_times(times).unwrap();
+        };
+
+        let set_checkpoint_last_modified = |version: usize, last_modified_millis: u64| {
+            let path = format!("{table_path}_delta_log/{version:020}.checkpoint.parquet");
+            let file = OpenOptions::new().write(true).open(path).unwrap();
+            let last_modified = SystemTime::now().sub(Duration::from_millis(last_modified_millis));
+            let times = FileTimes::new()
+                .set_modified(last_modified)
+                .set_accessed(last_modified);
+            file.set_times(times).unwrap();
+        };
+
+        // create 2 commits
+        let a1 = fs_common::add(0);
+        let a2 = fs_common::add(0);
+        assert_eq!(1, fs_common::commit_add(&mut table, &a1).await);
+        assert_eq!(2, fs_common::commit_add(&mut table, &a2).await);
+
+        // set last_modified
+        set_file_last_modified(0, 25 * 60 * 1000); // 25 mins ago, should be deleted
+        set_file_last_modified(1, 15 * 60 * 1000); // 25 mins ago, fails retention cutoff, but kept due to version
+        set_file_last_modified(2, 5 * 60 * 1000); // 25 mins ago, should be kept
+
+        table.load_version(0).await.expect("Cannot load version 0");
+        table.load_version(1).await.expect("Cannot load version 1");
+        table.load_version(2).await.expect("Cannot load version 2");
+
+        checkpoints::create_checkpoint_from_table_uri_and_cleanup(
+            deltalake_core::ensure_table_uri(&table.table_uri()).unwrap(),
+            1,
+            Some(false),
+            None,
+        )
+            .await
+            .unwrap();
+        // Update checkpoint time for version 1 to be just after version 1 data
+        set_checkpoint_last_modified(1, 15 * 60 * 1000 - 10);
+
+        checkpoints::create_checkpoint_from_table_uri_and_cleanup(
+            deltalake_core::ensure_table_uri(&table.table_uri()).unwrap(),
+            table.version().unwrap(),
+            None,
+            None,
+        )
+            .await
+            .unwrap();
+
+        table.update().await.unwrap(); // make table to read the checkpoint
+        assert_eq!(
+            table
+                .snapshot()
+                .unwrap()
+                .file_paths_iter()
+                .collect::<Vec<_>>(),
+            vec![
+                ObjectStorePath::from(a2.path.as_ref()),
+                ObjectStorePath::from(a1.path.as_ref()),
+            ]
+        );
+
+        // log files 0 and 1 are deleted
+        table
+            .load_version(0)
+            .await
+            .expect_err("Should not load version 0");
+        table
+            .load_version(1)
+            .await
+            .expect("Should be able to load version 1");
         // log file 2 is kept
         table.load_version(2).await.expect("Cannot load version 2");
     }

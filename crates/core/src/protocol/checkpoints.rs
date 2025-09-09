@@ -6,7 +6,7 @@ use url::Url;
 
 use arrow::compute::filter_record_batch;
 use arrow_array::{BooleanArray, RecordBatch};
-use chrono::Utc;
+use chrono::{DateTime, TimeZone, Utc};
 use delta_kernel::engine::arrow_data::ArrowEngineData;
 use delta_kernel::engine_data::FilteredEngineData;
 use delta_kernel::last_checkpoint_hint::LastCheckpointHint;
@@ -203,75 +203,62 @@ pub async fn cleanup_expired_logs_for(
         return Ok(0);
     };
 
-
     // List all log entries and collect them into a vector
-    let list_stream = log_store
-        .object_store(None)
-        .list(Some(log_store.log_path()));
+    let log_entries: Vec<Result<crate::ObjectMeta, _>> = object_store
+        .list(Some(log_path))
+        .collect()
+        .await;
 
-    let log_entries: Vec<Result<crate::ObjectMeta, _>> = list_stream.collect().await;
+    // Find the timestamp of the _last_checkpoint file
+    let last_checkpoint_ts = log_entries
+        .iter()
+        .filter_map(|m| m.as_ref().ok())
+        .find(|m| m.location.as_ref() == "_delta_log/_last_checkpoint")
+        .map(|m| m.last_modified.timestamp_millis());
 
-    let last_checkpoint_ts = log_entries.iter().find_map(|meta| {
-        if let Ok(meta) = meta {
-            if meta.location.as_ref() == "_last_checkpoint" {
-                Some(meta.last_modified.timestamp_millis())
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    });
+
+    println!("starting until_version: {:?}", until_version);
+    let dt_from_millis: DateTime<Utc> = Utc.timestamp_millis_opt(cutoff_timestamp).unwrap();
+    println!("starting cutoff_timestamp: {:?}", dt_from_millis);
+    println!("last_checkpoint: {:?}", last_checkpoint);
+    let dt_from_millis: DateTime<Utc> = Utc.timestamp_millis_opt(last_checkpoint_ts.unwrap()).unwrap();
+    println!("last_checkpoint_ts: {:?}", dt_from_millis);
+    println!("log_entries: {:?}", log_entries);
 
     let (until_version, cutoff_timestamp) = if cutoff_timestamp < last_checkpoint_ts.unwrap()
         || until_version < last_checkpoint.version as i64
     {
-        // loop through log_entries and find the checkpoint with the highest version <= until_version
-        // and timestamp <= cutoff_timestamp. Use OLD_CHECKPOINT_REGEX to identify checkpoint files.
-        let mut best_ver: Option<i64> = None;
-        let mut best_ts: i64 = i64::MIN;
-        for meta in &log_entries {
-            let Ok(meta) = meta else { continue };
-            let path_str = meta.location.as_ref();
-            // Only consider checkpoint files
-            if let Some(caps) = OLD_CHECKPOINT_REGEX.captures(path_str) {
-                let ts = meta.last_modified.timestamp_millis();
-                // Must satisfy timestamp constraint
-                if ts <= cutoff_timestamp {
-                    // Parse version from filename
-                    if let Ok(ver) = caps.get(1).unwrap().as_str().parse::<i64>() {
-                        if ver <= until_version {
-                            match best_ver {
-                                None => {
-                                    best_ver = Some(ver);
-                                    best_ts = ts;
-                                }
-                                Some(curr) => {
-                                    if ver > curr {
-                                        best_ver = Some(ver);
-                                        best_ts = ts;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        if let Some(v) = best_ver {
-            (v, best_ts)
-        } else {
-            // Unable to find a checkpoint file before cutoff_timestamp and until_version.
-            // Don't delete any logs.
-            return Ok(0);
+        // Find the checkpoint with the highest version <= until_version and ts <= cutoff_timestamp
+        match log_entries
+            .iter()
+            .filter_map(|m| m.as_ref().ok())
+            .filter_map(|m| {
+                let path = m.location.as_ref();
+                OLD_CHECKPOINT_REGEX
+                    .captures(path)
+                    .and_then(|caps| caps.get(1))
+                    .and_then(|v| v.as_str().parse::<i64>().ok())
+                    .map(|ver| (ver, m.last_modified.timestamp_millis()))
+            })
+            .filter(|(ver, ts)| *ver <= until_version && *ts <= cutoff_timestamp)
+            .max_by_key(|(ver, _)| *ver)
+        {
+            Some((best_ver, best_ts)) => (best_ver, best_ts),
+            None =>
+                {
+                    // Can't find a checkpoint before the cutoff timestamp and version.
+                    // Don't delete any logs.
+                    println!("could not find a checkpoint before the cutoff timestamp and version");
+                    return Ok(0)
+                },
         }
     } else {
         (until_version, cutoff_timestamp)
     };
 
-
-    // let until_version = i64::min(until_version, last_checkpoint.version as i64);
-
+    println!("final until_version: {:?}", until_version);
+    let dt_from_millis: DateTime<Utc> = Utc.timestamp_millis_opt(cutoff_timestamp).unwrap();
+    println!("final cutoff_timestamp: {:?}", dt_from_millis);
 
     // Feed a stream of candidate deletion files directly into the delete_stream
     // function to try to improve the speed of cleanup and reduce the need for
@@ -296,12 +283,15 @@ pub async fn cleanup_expired_logs_for(
             let Ok(log_ver) = log_ver_str.parse::<i64>() else { return None; };
             if log_ver < until_version && ts <= cutoff_timestamp {
                 // This location is ready to be deleted
+                println!("to delete: {:?}", meta.location);
                 Some(Ok(meta.location))
             } else {
                 None
             }
         })
         .boxed();
+
+
 
     let deleted = object_store
         .delete_stream(locations)
