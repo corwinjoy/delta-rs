@@ -521,13 +521,64 @@ async fn get_stale_files(
 
 #[cfg(test)]
 mod tests {
-    use object_store::{local::LocalFileSystem, memory::InMemory, PutPayload};
+    use tempfile::TempDir;
+use object_store::{local::LocalFileSystem, memory::InMemory, PutPayload};
 
     use super::*;
     use crate::{checkpoints::create_checkpoint, ensure_table_uri, open_table};
     use std::path::Path;
     use std::{io::Read, time::SystemTime};
     use url::Url;
+    use tokio::io;
+    use fs_extra::dir::{copy, CopyOptions};
+
+
+    fn copy_to_temp_dir(source_dir: &Path) -> Result<TempDir, io::Error> {
+        let temp_dir = TempDir::new()?;
+
+        let mut options = CopyOptions::new();
+        options.overwrite = true; // Set to true if you want to overwrite existing files in the destination
+
+        // Perform the recursive copy operation.
+        let result_= copy(source_dir, temp_dir.path(), &options).unwrap();
+
+        Ok(temp_dir)
+    }
+
+    #[tokio::test]
+    async fn test_vacuum_full_run() -> DeltaResult<()> {
+        let table_source = Path::new("../test/tests/data/simple_commit");
+        let temp_dir = copy_to_temp_dir(table_source).unwrap();
+        let table_path = temp_dir.path().join("simple_commit");
+        let table_uri =
+            Url::from_directory_path(std::fs::canonicalize(table_path).unwrap()).unwrap();
+        let table = open_table(table_uri).await?;
+
+        println!("table version: {:?}", table.version());
+
+
+        let (_table, result) = VacuumBuilder::new(table.log_store(), table.snapshot()?.clone())
+            .with_retention_period(Duration::hours(0))
+            .with_dry_run(false)
+            .with_mode(VacuumMode::Full)
+            .with_enforce_retention_duration(false)
+            .await?;
+        let mut files_deleted = result.files_deleted.clone();
+        files_deleted.sort();
+        // When running with full, these superfluous parquet files which are not actually
+        // referenced in the _delta_log commits should be considered for the
+        // low-orbit ion-cannon
+        assert_eq!(
+            files_deleted,
+            vec![
+                "part-00000-512e1537-8aaa-4193-b8b4-bef3de0de409-c000.snappy.parquet",
+                "part-00000-b44fcdb0-8b06-4f3a-8606-f8311a96f6dc-c000.snappy.parquet",
+                "part-00001-185eca06-e017-4dea-ae49-fc48b973e37e-c000.snappy.parquet",
+                "part-00001-4327c977-2734-4477-9507-7ccf67924649-c000.snappy.parquet",
+            ]
+        );
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_vacuum_full() -> DeltaResult<()> {
