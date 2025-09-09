@@ -223,15 +223,54 @@ pub async fn cleanup_expired_logs_for(
         }
     });
 
-    let (until_version, cutoff_timestamp) = if cutoff_timestamp < last_checkpoint_ts.unwrap() || until_version < last_checkpoint.version as i64 {
-        // TODO: loop through log_entries and find the checkpoint with the highest version <= until_version and timestamp <= cutoff_timestamp
-        (until_version, cutoff_timestamp)
+    let (until_version, cutoff_timestamp) = if cutoff_timestamp < last_checkpoint_ts.unwrap()
+        || until_version < last_checkpoint.version as i64
+    {
+        // loop through log_entries and find the checkpoint with the highest version <= until_version
+        // and timestamp <= cutoff_timestamp. Use OLD_CHECKPOINT_REGEX to identify checkpoint files.
+        let mut best_ver: Option<i64> = None;
+        let mut best_ts: i64 = i64::MIN;
+        for meta in &log_entries {
+            let Ok(meta) = meta else { continue };
+            let path_str = meta.location.as_ref();
+            // Only consider checkpoint files
+            if let Some(caps) = OLD_CHECKPOINT_REGEX.captures(path_str) {
+                let ts = meta.last_modified.timestamp_millis();
+                // Must satisfy timestamp constraint
+                if ts <= cutoff_timestamp {
+                    // Parse version from filename
+                    if let Ok(ver) = caps.get(1).unwrap().as_str().parse::<i64>() {
+                        if ver <= until_version {
+                            match best_ver {
+                                None => {
+                                    best_ver = Some(ver);
+                                    best_ts = ts;
+                                }
+                                Some(curr) => {
+                                    if ver > curr {
+                                        best_ver = Some(ver);
+                                        best_ts = ts;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(v) = best_ver {
+            (v, best_ts)
+        } else {
+            // Unable to find a checkpoint file before cutoff_timestamp and until_version.
+            // Don't delete any logs.
+            return Ok(0);
+        }
     } else {
         (until_version, cutoff_timestamp)
     };
 
 
-    let until_version = i64::min(until_version, last_checkpoint.version as i64);
+    // let until_version = i64::min(until_version, last_checkpoint.version as i64);
 
 
     // Feed a stream of candidate deletion files directly into the delete_stream
