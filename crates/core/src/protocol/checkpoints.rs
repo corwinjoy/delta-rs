@@ -197,9 +197,8 @@ pub async fn cleanup_expired_logs_for(
     static DELTA_LOG_REGEX: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"_delta_log/(\d{20})\.(json|checkpoint|json.tmp).*$").unwrap()
     });
-    static OLD_CHECKPOINT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"_delta_log/(\d{20})\.(checkpoint).*$").unwrap()
-    });
+    static OLD_CHECKPOINT_REGEX: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"_delta_log/(\d{20})\.(checkpoint).*$").unwrap());
 
     let object_store = log_store.object_store(None);
     let log_path = log_store.log_path();
@@ -211,10 +210,8 @@ pub async fn cleanup_expired_logs_for(
     };
 
     // List all log entries and collect them into a vector
-    let log_entries: Vec<Result<crate::ObjectMeta, _>> = object_store
-        .list(Some(log_path))
-        .collect()
-        .await;
+    let log_entries: Vec<Result<crate::ObjectMeta, _>> =
+        object_store.list(Some(log_path)).collect().await;
 
     // Find the timestamp of the _last_checkpoint file
     let last_checkpoint_ts = log_entries
@@ -227,7 +224,9 @@ pub async fn cleanup_expired_logs_for(
     let dt_from_millis: DateTime<Utc> = Utc.timestamp_millis_opt(cutoff_timestamp).unwrap();
     println!("starting cutoff_timestamp: {:?}", dt_from_millis);
     println!("last_checkpoint: {:?}", last_checkpoint);
-    let dt_from_millis: DateTime<Utc> = Utc.timestamp_millis_opt(last_checkpoint_ts.unwrap()).unwrap();
+    let dt_from_millis: DateTime<Utc> = Utc
+        .timestamp_millis_opt(last_checkpoint_ts.unwrap())
+        .unwrap();
     println!("last_checkpoint_ts: {:?}", dt_from_millis);
     println!("log_entries: {:?}", log_entries);
 
@@ -250,13 +249,12 @@ pub async fn cleanup_expired_logs_for(
             .max_by_key(|(ver, _)| *ver)
         {
             Some((best_ver, best_ts)) => (best_ver, best_ts),
-            None =>
-                {
-                    // Can't find a checkpoint before the cutoff timestamp and version.
-                    // Don't delete any logs.
-                    println!("could not find a checkpoint before the cutoff timestamp and version");
-                    return Ok(0)
-                },
+            None => {
+                // Can't find a checkpoint before the cutoff timestamp and version.
+                // Don't delete any logs.
+                println!("could not find a checkpoint before the cutoff timestamp and version");
+                return Ok(0);
+            }
         }
     } else {
         (until_version, cutoff_timestamp)
@@ -286,7 +284,9 @@ pub async fn cleanup_expired_logs_for(
             };
             let ts = meta.last_modified.timestamp_millis();
             let log_ver_str = captures.get(1).unwrap().as_str();
-            let Ok(log_ver) = log_ver_str.parse::<i64>() else { return None; };
+            let Ok(log_ver) = log_ver_str.parse::<i64>() else {
+                return None;
+            };
             if log_ver < until_version && ts <= cutoff_timestamp {
                 // This location is ready to be deleted
                 println!("to delete: {:?}", meta.location);
@@ -296,8 +296,6 @@ pub async fn cleanup_expired_logs_for(
             }
         })
         .boxed();
-
-
 
     let deleted = object_store
         .delete_stream(locations)

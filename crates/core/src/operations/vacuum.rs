@@ -521,17 +521,16 @@ async fn get_stale_files(
 
 #[cfg(test)]
 mod tests {
+    use object_store::{local::LocalFileSystem, memory::InMemory, PutPayload};
     use tempfile::TempDir;
-use object_store::{local::LocalFileSystem, memory::InMemory, PutPayload};
 
     use super::*;
     use crate::{checkpoints::create_checkpoint, ensure_table_uri, open_table};
+    use fs_extra::dir::{copy, CopyOptions};
     use std::path::Path;
     use std::{io::Read, time::SystemTime};
-    use url::Url;
     use tokio::io;
-    use fs_extra::dir::{copy, CopyOptions};
-
+    use url::Url;
 
     fn copy_to_temp_dir(source_dir: &Path) -> Result<TempDir, io::Error> {
         let temp_dir = TempDir::new()?;
@@ -540,7 +539,7 @@ use object_store::{local::LocalFileSystem, memory::InMemory, PutPayload};
         options.overwrite = true; // Set to true if you want to overwrite existing files in the destination
 
         // Perform the recursive copy operation.
-        let result_= copy(source_dir, temp_dir.path(), &options).unwrap();
+        let result_ = copy(source_dir, temp_dir.path(), &options).unwrap();
 
         Ok(temp_dir)
     }
@@ -555,7 +554,6 @@ use object_store::{local::LocalFileSystem, memory::InMemory, PutPayload};
         let table = open_table(table_uri).await?;
 
         println!("table version: {:?}", table.version());
-
 
         let (_table, result) = VacuumBuilder::new(table.log_store(), table.snapshot()?.clone())
             .with_retention_period(Duration::hours(0))
