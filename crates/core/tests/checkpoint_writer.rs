@@ -299,7 +299,6 @@ mod delete_expired_delta_log_in_checkpoint {
         table.load_version(1).await.expect("Cannot load version 1");
         table.load_version(2).await.expect("Cannot load version 2");
 
-
         // Create checkpoint for version 1
         checkpoints::create_checkpoint_from_table_uri_and_cleanup(
             deltalake_core::ensure_table_uri(&table.table_uri()).unwrap(),
@@ -335,16 +334,14 @@ mod delete_expired_delta_log_in_checkpoint {
             ]
         );
 
-        // log files 0 and 1 are deleted
+        // log file 0 is deleted
         table
             .load_version(0)
             .await
             .expect_err("Should not load version 0");
-        table
-            .load_version(1)
-            .await
-            .expect("Should be able to load version 1");
-        // log file 2 is kept
+
+        // log file 1 and 2 are kept
+        table.load_version(1).await.expect("Cannot load version 1");
         table.load_version(2).await.expect("Cannot load version 2");
     }
 
