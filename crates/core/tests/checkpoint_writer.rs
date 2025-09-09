@@ -274,18 +274,8 @@ mod delete_expired_delta_log_in_checkpoint {
             .await;
 
         let table_path = table.table_uri();
-        let set_file_last_modified = |version: usize, last_modified_millis: u64| {
-            let path = format!("{table_path}_delta_log/{version:020}.json");
-            let file = OpenOptions::new().write(true).open(path).unwrap();
-            let last_modified = SystemTime::now().sub(Duration::from_millis(last_modified_millis));
-            let times = FileTimes::new()
-                .set_modified(last_modified)
-                .set_accessed(last_modified);
-            file.set_times(times).unwrap();
-        };
-
-        let set_checkpoint_last_modified = |version: usize, last_modified_millis: u64| {
-            let path = format!("{table_path}_delta_log/{version:020}.checkpoint.parquet");
+        let set_file_last_modified = |version: usize, last_modified_millis: u64, suffix: &str| {
+            let path = format!("{table_path}_delta_log/{version:020}.{suffix}");
             let file = OpenOptions::new().write(true).open(path).unwrap();
             let last_modified = SystemTime::now().sub(Duration::from_millis(last_modified_millis));
             let times = FileTimes::new()
@@ -301,14 +291,16 @@ mod delete_expired_delta_log_in_checkpoint {
         assert_eq!(2, fs_common::commit_add(&mut table, &a2).await);
 
         // set last_modified
-        set_file_last_modified(0, 25 * 60 * 1000); // 25 mins ago, should be deleted
-        set_file_last_modified(1, 15 * 60 * 1000); // 25 mins ago, fails retention cutoff, but kept due to version
-        set_file_last_modified(2, 5 * 60 * 1000); // 25 mins ago, should be kept
+        set_file_last_modified(0, 25 * 60 * 1000, "json"); // 25 mins ago, should be deleted
+        set_file_last_modified(1, 15 * 60 * 1000, "json"); // 25 mins ago, fails retention cutoff, but kept due to version
+        set_file_last_modified(2, 5 * 60 * 1000, "json"); // 25 mins ago, should be kept
 
         table.load_version(0).await.expect("Cannot load version 0");
         table.load_version(1).await.expect("Cannot load version 1");
         table.load_version(2).await.expect("Cannot load version 2");
 
+
+        // Create checkpoint for version 1
         checkpoints::create_checkpoint_from_table_uri_and_cleanup(
             deltalake_core::ensure_table_uri(&table.table_uri()).unwrap(),
             1,
@@ -317,8 +309,9 @@ mod delete_expired_delta_log_in_checkpoint {
         )
             .await
             .unwrap();
+
         // Update checkpoint time for version 1 to be just after version 1 data
-        set_checkpoint_last_modified(1, 15 * 60 * 1000 - 10);
+        set_file_last_modified(1, 15 * 60 * 1000 - 10, "checkpoint.parquet");
 
         checkpoints::create_checkpoint_from_table_uri_and_cleanup(
             deltalake_core::ensure_table_uri(&table.table_uri()).unwrap(),
