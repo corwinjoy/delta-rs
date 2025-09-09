@@ -190,51 +190,82 @@ pub async fn cleanup_expired_logs_for(
     static DELTA_LOG_REGEX: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"_delta_log/(\d{20})\.(json|checkpoint|json.tmp).*$").unwrap()
     });
+    static OLD_CHECKPOINT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"_delta_log/(\d{20})\.(checkpoint).*$").unwrap()
+    });
 
     let object_store = log_store.object_store(None);
     let log_path = log_store.log_path();
+
     let maybe_last_checkpoint = read_last_checkpoint(&object_store, log_path).await?;
 
     let Some(last_checkpoint) = maybe_last_checkpoint else {
         return Ok(0);
     };
 
+
+    // List all log entries and collect them into a vector
+    let list_stream = log_store
+        .object_store(None)
+        .list(Some(log_store.log_path()));
+
+    let log_entries: Vec<Result<crate::ObjectMeta, _>> = list_stream.collect().await;
+
+    let last_checkpoint_ts = log_entries.iter().find_map(|meta| {
+        if let Ok(meta) = meta {
+            if meta.location.as_ref() == "_last_checkpoint" {
+                Some(meta.last_modified.timestamp_millis())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    });
+
+    let (until_version, cutoff_timestamp) = if cutoff_timestamp < last_checkpoint_ts.unwrap() || until_version < last_checkpoint.version as i64 {
+        // TODO: loop through log_entries and find the checkpoint with the highest version <= until_version and timestamp <= cutoff_timestamp
+        (until_version, cutoff_timestamp)
+    } else {
+        (until_version, cutoff_timestamp)
+    };
+
+
     let until_version = i64::min(until_version, last_checkpoint.version as i64);
+
 
     // Feed a stream of candidate deletion files directly into the delete_stream
     // function to try to improve the speed of cleanup and reduce the need for
     // intermediate memory.
     let object_store = log_store.object_store(operation_id);
-    let deleted = object_store
-        .delete_stream(
-            object_store
-                .list(Some(log_store.log_path()))
-                // This predicate function will filter out any locations that don't
-                // match the given timestamp range
-                .filter_map(|meta: Result<crate::ObjectMeta, _>| async move {
-                    if meta.is_err() {
-                        error!("Error received while cleaning up expired logs: {meta:?}");
-                        return None;
-                    }
-                    let meta = meta.unwrap();
-                    let ts = meta.last_modified.timestamp_millis();
 
-                    match DELTA_LOG_REGEX.captures(meta.location.as_ref()) {
-                        Some(captures) => {
-                            let log_ver_str = captures.get(1).unwrap().as_str();
-                            let log_ver: i64 = log_ver_str.parse().unwrap();
-                            if log_ver < until_version && ts <= cutoff_timestamp {
-                                // This location is ready to be deleted
-                                Some(Ok(meta.location))
-                            } else {
-                                None
-                            }
-                        }
-                        None => None,
-                    }
-                })
-                .boxed(),
-        )
+    let locations = futures::stream::iter(log_entries.into_iter())
+        .filter_map(|meta: Result<crate::ObjectMeta, _>| async move {
+            let meta = match meta {
+                Ok(m) => m,
+                Err(err) => {
+                    error!("Error received while cleaning up expired logs: {err:?}");
+                    return None;
+                }
+            };
+            let path_str = meta.location.as_ref();
+            let Some(captures) = DELTA_LOG_REGEX.captures(path_str) else {
+                return None;
+            };
+            let ts = meta.last_modified.timestamp_millis();
+            let log_ver_str = captures.get(1).unwrap().as_str();
+            let Ok(log_ver) = log_ver_str.parse::<i64>() else { return None; };
+            if log_ver < until_version && ts <= cutoff_timestamp {
+                // This location is ready to be deleted
+                Some(Ok(meta.location))
+            } else {
+                None
+            }
+        })
+        .boxed();
+
+    let deleted = object_store
+        .delete_stream(locations)
         .try_collect::<Vec<_>>()
         .await?;
 
