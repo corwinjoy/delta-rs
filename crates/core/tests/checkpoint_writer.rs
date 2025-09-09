@@ -306,8 +306,8 @@ mod delete_expired_delta_log_in_checkpoint {
             Some(false),
             None,
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
 
         // Update checkpoint time for version 1 to be just after version 1 data
         set_file_last_modified(1, 15 * 60 * 1000 - 10, "checkpoint.parquet");
@@ -318,8 +318,8 @@ mod delete_expired_delta_log_in_checkpoint {
             None,
             None,
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
 
         table.update().await.unwrap(); // make table to read the checkpoint
         assert_eq!(
