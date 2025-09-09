@@ -179,8 +179,15 @@ pub async fn create_checkpoint_from_table_uri_and_cleanup(
     Ok(())
 }
 
-/// Deletes all delta log commits that are older than the cutoff time
+/// Conceptually deletes all delta log commits that are older than the cutoff time
 /// and less than the specified version.
+///
+/// In practice, the deleted files are a bit more conservative than this cutoff.
+/// We look for the last checkpoint before the given cutoff_timestamp and version.
+/// Then, we only delete files older than that checkpoint.
+/// The reason for this is that intermediate files may be needed to load the table
+/// at the given `cutoff_timestamp` and `until_version`.
+/// See https://github.com/delta-io/delta-rs/issues/3692
 pub async fn cleanup_expired_logs_for(
     until_version: i64,
     log_store: &dyn LogStore,
@@ -215,7 +222,6 @@ pub async fn cleanup_expired_logs_for(
         .filter_map(|m| m.as_ref().ok())
         .find(|m| m.location.as_ref() == "_delta_log/_last_checkpoint")
         .map(|m| m.last_modified.timestamp_millis());
-
 
     println!("starting until_version: {:?}", until_version);
     let dt_from_millis: DateTime<Utc> = Utc.timestamp_millis_opt(cutoff_timestamp).unwrap();
