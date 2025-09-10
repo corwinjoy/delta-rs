@@ -252,7 +252,7 @@ pub async fn cleanup_expired_logs_for(
             None => {
                 // Can't find a checkpoint before the cutoff timestamp and version.
                 // Don't delete any logs.
-                println!("could not find a checkpoint before the cutoff timestamp and version");
+                debug!("Not cleaning metadata files, could not find a checkpoint before the cutoff timestamp ({}) and version ({})", cutoff_timestamp, until_version);
                 return Ok(0);
             }
         }
