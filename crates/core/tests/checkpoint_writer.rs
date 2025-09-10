@@ -219,7 +219,7 @@ mod delete_expired_delta_log_in_checkpoint {
         // set last_modified
         set_file_last_modified(0, 25 * 60 * 1000); // 25 mins ago, should be deleted
         set_file_last_modified(1, 15 * 60 * 1000); // 15 mins ago, should be deleted
-        set_file_last_modified(2, 5 * 60 * 1000); // 5 mins ago, should be kept
+        set_file_last_modified(2, 5 * 60 * 1000); // 5 mins ago, should be kept as last safe checkpoint
 
         table.load_version(0).await.expect("Cannot load version 0");
         table.load_version(1).await.expect("Cannot load version 1");
