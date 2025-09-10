@@ -245,7 +245,7 @@ pub async fn cleanup_expired_logs_for(
         // last_checkpoint is older than the cutoff timestamp and version
         (until_version, cutoff_timestamp)
     } else {
-        // last_checkpoint is newer than the cutoff timestamp or version  
+        // last_checkpoint is newer than the cutoff timestamp or version
         // Find the checkpoint with the highest version <= until_version and ts <= cutoff_timestamp
         match log_entries
             .iter()
