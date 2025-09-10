@@ -197,8 +197,7 @@ mod delete_expired_delta_log_in_checkpoint {
                 TableProperty::LogRetentionDuration.as_ref().into() => Some("interval 0 minute".to_string()),
                 TableProperty::EnableExpiredLogCleanup.as_ref().into() => Some("true".to_string())
             }),
-        )
-        .await;
+        ).await;
 
         let table_path = table.table_uri();
         let set_file_last_modified = |version: usize, last_modified_millis: u64| {
@@ -266,7 +265,7 @@ mod delete_expired_delta_log_in_checkpoint {
         // For additional tracing:
         // let _ = pretty_env_logger::try_init();
         let mut table = fs_common::create_table(
-            "../test/tests/data/checkpoints_with_expired_logs/expired",
+            "../test/tests/data/checkpoints_with_expired_logs/expired_with_checkpoint",
             Some(hashmap! {
                 TableProperty::LogRetentionDuration.as_ref().into() => Some("interval 10 minute".to_string()),
                 TableProperty::EnableExpiredLogCleanup.as_ref().into() => Some("true".to_string())
@@ -321,6 +320,7 @@ mod delete_expired_delta_log_in_checkpoint {
         // Update checkpoint time for version 1 to be just after version 1 data
         set_file_last_modified(1, 20 * 60 * 1000 - 10, "checkpoint.parquet");
 
+        // Checkpoint final version
         checkpoints::create_checkpoint_from_table_uri_and_cleanup(
             deltalake_core::ensure_table_uri(&table.table_uri()).unwrap(),
             table.version().unwrap(),
@@ -345,7 +345,7 @@ mod delete_expired_delta_log_in_checkpoint {
             ]
         );
 
-        // Without going back to a safe checkpoint, loading version 3 would fail..
+        // Without going back to a safe checkpoint, previously loading version 3 would fail.
         table.load_version(3).await.expect("Cannot load version 3");
         table.load_version(4).await.expect("Cannot load version 4");
     }
