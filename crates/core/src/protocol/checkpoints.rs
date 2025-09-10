@@ -6,7 +6,7 @@ use url::Url;
 
 use arrow::compute::filter_record_batch;
 use arrow_array::{BooleanArray, RecordBatch};
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{TimeZone, Utc};
 use delta_kernel::engine::arrow_data::ArrowEngineData;
 use delta_kernel::engine_data::FilteredEngineData;
 use delta_kernel::last_checkpoint_hint::LastCheckpointHint;
@@ -19,7 +19,7 @@ use parquet::arrow::async_writer::ParquetObjectWriter;
 use parquet::arrow::AsyncArrowWriter;
 use regex::Regex;
 use tokio::task::spawn_blocking;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 use uuid::Uuid;
 
 use crate::logstore::{LogStore, LogStoreExt};
@@ -237,11 +237,15 @@ pub async fn cleanup_expired_logs_for(
         Utc.timestamp_millis_opt(cutoff_timestamp).unwrap()
     );
 
+    // Maybe update version and timestamp based on safe checkpoint
     let (until_version, cutoff_timestamp) = if last_checkpoint_ts
-        .is_some_and(|lct| cutoff_timestamp < lct)
-        || until_version < last_checkpoint.version as i64
+        .is_none_or(|lct| cutoff_timestamp >= lct)
+        && until_version >= last_checkpoint.version as i64
     {
-        // last_checkpoint is newer than the cutoff timestamp or version
+        // last_checkpoint is older than the cutoff timestamp and version
+        (until_version, cutoff_timestamp)
+    } else {
+        // last_checkpoint is newer than the cutoff timestamp or version  
         // Find the checkpoint with the highest version <= until_version and ts <= cutoff_timestamp
         match log_entries
             .iter()
@@ -265,8 +269,6 @@ pub async fn cleanup_expired_logs_for(
                 return Ok(0);
             }
         }
-    } else {
-        (until_version, cutoff_timestamp)
     };
 
     debug!(
