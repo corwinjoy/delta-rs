@@ -280,9 +280,7 @@ pub async fn cleanup_expired_logs_for(
         Utc.timestamp_millis_opt(cutoff_timestamp).unwrap()
     );
 
-    // Feed a stream of candidate deletion files directly into the delete_stream
-    // function to try to improve the speed of cleanup and reduce the need for
-    // intermediate memory.
+    // Feed a stream of candidate deletion files into the delete_strea function
     let object_store = log_store.object_store(operation_id);
 
     let locations = futures::stream::iter(log_entries.into_iter())
