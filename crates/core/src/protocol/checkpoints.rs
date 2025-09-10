@@ -19,7 +19,7 @@ use parquet::arrow::async_writer::ParquetObjectWriter;
 use parquet::arrow::AsyncArrowWriter;
 use regex::Regex;
 use tokio::task::spawn_blocking;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::logstore::{LogStore, LogStoreExt};
@@ -194,10 +194,11 @@ pub async fn cleanup_expired_logs_for(
     cutoff_timestamp: i64,
     operation_id: Option<Uuid>,
 ) -> DeltaResult<usize> {
+    debug!("called cleanup_expired_logs_for");
     static DELTA_LOG_REGEX: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"_delta_log/(\d{20})\.(json|checkpoint|json.tmp).*$").unwrap()
     });
-    static OLD_CHECKPOINT_REGEX: LazyLock<Regex> =
+    static CHECKPOINT_REGEX: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"_delta_log/(\d{20})\.(checkpoint).*$").unwrap());
 
     let object_store = log_store.object_store(None);
@@ -206,6 +207,7 @@ pub async fn cleanup_expired_logs_for(
     let maybe_last_checkpoint = read_last_checkpoint(&object_store, log_path).await?;
 
     let Some(last_checkpoint) = maybe_last_checkpoint else {
+        debug!("no last checkpoint. Exiting cleanup_expired_logs_for");
         return Ok(0);
     };
 
@@ -220,15 +222,9 @@ pub async fn cleanup_expired_logs_for(
         .find(|m| m.location.as_ref() == "_delta_log/_last_checkpoint")
         .map(|m| m.last_modified.timestamp_millis());
 
-    println!("starting until_version: {:?}", until_version);
-    let dt_from_millis: DateTime<Utc> = Utc.timestamp_millis_opt(cutoff_timestamp).unwrap();
-    println!("starting cutoff_timestamp: {:?}", dt_from_millis);
-    println!("last_checkpoint: {:?}", last_checkpoint);
-    let dt_from_millis: DateTime<Utc> = Utc
-        .timestamp_millis_opt(last_checkpoint_ts.unwrap())
-        .unwrap();
-    println!("last_checkpoint_ts: {:?}", dt_from_millis);
-    println!("log_entries: {:?}", log_entries);
+    
+    debug!("starting until_version: {:?}", until_version);
+    debug!("starting cutoff_timestamp: {:?}", Utc.timestamp_millis_opt(cutoff_timestamp).unwrap());
 
     let (until_version, cutoff_timestamp) = if last_checkpoint_ts.is_some_and(|lct| cutoff_timestamp < lct)
         || until_version < last_checkpoint.version as i64
@@ -239,7 +235,7 @@ pub async fn cleanup_expired_logs_for(
             .filter_map(|m| m.as_ref().ok())
             .filter_map(|m| {
                 let path = m.location.as_ref();
-                OLD_CHECKPOINT_REGEX
+                CHECKPOINT_REGEX
                     .captures(path)
                     .and_then(|caps| caps.get(1))
                     .and_then(|v| v.as_str().parse::<i64>().ok())
@@ -260,9 +256,9 @@ pub async fn cleanup_expired_logs_for(
         (until_version, cutoff_timestamp)
     };
 
-    println!("final until_version: {:?}", until_version);
-    let dt_from_millis: DateTime<Utc> = Utc.timestamp_millis_opt(cutoff_timestamp).unwrap();
-    println!("final cutoff_timestamp: {:?}", dt_from_millis);
+    debug!("final until_version based on safe checkpoint: {:?}", until_version);
+    debug!("final cutoff_timestamp  based on safe checkpoin: {:?}", Utc.timestamp_millis_opt(cutoff_timestamp).unwrap());
+
 
     // Feed a stream of candidate deletion files directly into the delete_stream
     // function to try to improve the speed of cleanup and reduce the need for
@@ -289,7 +285,7 @@ pub async fn cleanup_expired_logs_for(
             };
             if log_ver < until_version && ts <= cutoff_timestamp {
                 // This location is ready to be deleted
-                println!("to delete: {:?}", meta.location);
+                debug!("file to delete: {:?}", meta.location);
                 Some(Ok(meta.location))
             } else {
                 None
