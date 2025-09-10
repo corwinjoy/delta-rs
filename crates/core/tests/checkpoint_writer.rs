@@ -287,7 +287,7 @@ mod delete_expired_delta_log_in_checkpoint {
             file.set_times(times).unwrap();
         };
 
-        // create 2 commits
+        // create 4 commits
         let a1 = fs_common::add(0);
         let a2 = fs_common::add(0);
         let a3 = fs_common::add(0);
