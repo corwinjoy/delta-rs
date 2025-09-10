@@ -230,7 +230,7 @@ pub async fn cleanup_expired_logs_for(
     println!("last_checkpoint_ts: {:?}", dt_from_millis);
     println!("log_entries: {:?}", log_entries);
 
-    let (until_version, cutoff_timestamp) = if cutoff_timestamp < last_checkpoint_ts.unwrap()
+    let (until_version, cutoff_timestamp) = if last_checkpoint_ts.is_some_and(|lct| cutoff_timestamp < lct)
         || until_version < last_checkpoint.version as i64
     {
         // Find the checkpoint with the highest version <= until_version and ts <= cutoff_timestamp
