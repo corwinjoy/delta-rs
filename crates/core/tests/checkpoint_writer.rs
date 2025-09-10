@@ -260,7 +260,6 @@ mod delete_expired_delta_log_in_checkpoint {
         table.load_version(2).await.expect("Cannot load version 2");
     }
 
-
     // Test to verify that intermediate versions can still be loaded after the checkpoint is created.
     // This is to verify the behavior of `cleanup_expired_logs_for` and its use of safe checkpoints.
     #[tokio::test]
