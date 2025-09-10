@@ -231,11 +231,14 @@ pub async fn cleanup_expired_logs_for(
         .find(|m| m.location.as_ref() == "_delta_log/_last_checkpoint")
         .map(|m| m.last_modified.timestamp_millis());
 
-    
     debug!("starting until_version: {:?}", until_version);
-    debug!("starting cutoff_timestamp: {:?}", Utc.timestamp_millis_opt(cutoff_timestamp).unwrap());
+    debug!(
+        "starting cutoff_timestamp: {:?}",
+        Utc.timestamp_millis_opt(cutoff_timestamp).unwrap()
+    );
 
-    let (until_version, cutoff_timestamp) = if last_checkpoint_ts.is_some_and(|lct| cutoff_timestamp < lct)
+    let (until_version, cutoff_timestamp) = if last_checkpoint_ts
+        .is_some_and(|lct| cutoff_timestamp < lct)
         || until_version < last_checkpoint.version as i64
     {
         // last_checkpoint is newer than the cutoff timestamp or version
@@ -266,9 +269,14 @@ pub async fn cleanup_expired_logs_for(
         (until_version, cutoff_timestamp)
     };
 
-    debug!("final until_version based on safe checkpoint: {:?}", until_version);
-    debug!("final cutoff_timestamp based on safe checkpoint: {:?}", Utc.timestamp_millis_opt(cutoff_timestamp).unwrap());
-
+    debug!(
+        "final until_version based on safe checkpoint: {:?}",
+        until_version
+    );
+    debug!(
+        "final cutoff_timestamp based on safe checkpoint: {:?}",
+        Utc.timestamp_millis_opt(cutoff_timestamp).unwrap()
+    );
 
     // Feed a stream of candidate deletion files directly into the delete_stream
     // function to try to improve the speed of cleanup and reduce the need for
