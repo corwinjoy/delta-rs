@@ -179,15 +179,24 @@ pub async fn create_checkpoint_from_table_uri_and_cleanup(
     Ok(())
 }
 
-/// Conceptually deletes all delta log commits that are older than the cutoff time
-/// and less than the specified version.
+/// Delete expired Delta log files up to a safe checkpoint boundary.
 ///
-/// In practice, the deleted files are a bit more conservative than this cutoff.
-/// We look for the last checkpoint before the given cutoff_timestamp and version.
-/// Then, we only delete files older than that checkpoint.
-/// The reason for this is that intermediate files may be needed to load the table
-/// at the given `cutoff_timestamp` and `until_version`.
-/// See https://github.com/delta-io/delta-rs/issues/3692
+/// This routine removes JSON commit files, in-progress JSON temp files, and
+/// checkpoint files under `_delta_log/` that are both:
+/// - older than the provided `cutoff_timestamp` (milliseconds since epoch), and
+/// - strictly less than the provided `until_version`.
+///
+/// Safety guarantee:
+/// To avoid deleting files that might still be required to reconstruct the
+/// table state at or before the requested cutoff, the function first identifies
+/// the most recent checkpoint whose version is `<= until_version` and whose file
+/// modification time is `<= cutoff_timestamp`. Only files strictly older than
+/// this checkpoint (both by version and timestamp) are considered for deletion.
+/// If no such checkpoint exists (including when there is no `_last_checkpoint`),
+/// the function performs no deletions and returns `Ok(0)`.
+///
+/// See also: https://github.com/delta-io/delta-rs/issues/3692 for background on
+/// why cleanup must align to an existing checkpoint.
 pub async fn cleanup_expired_logs_for(
     until_version: i64,
     log_store: &dyn LogStore,
@@ -229,6 +238,7 @@ pub async fn cleanup_expired_logs_for(
     let (until_version, cutoff_timestamp) = if last_checkpoint_ts.is_some_and(|lct| cutoff_timestamp < lct)
         || until_version < last_checkpoint.version as i64
     {
+        // last_checkpoint is newer than the cutoff timestamp or version
         // Find the checkpoint with the highest version <= until_version and ts <= cutoff_timestamp
         match log_entries
             .iter()
@@ -257,7 +267,7 @@ pub async fn cleanup_expired_logs_for(
     };
 
     debug!("final until_version based on safe checkpoint: {:?}", until_version);
-    debug!("final cutoff_timestamp  based on safe checkpoin: {:?}", Utc.timestamp_millis_opt(cutoff_timestamp).unwrap());
+    debug!("final cutoff_timestamp based on safe checkpoint: {:?}", Utc.timestamp_millis_opt(cutoff_timestamp).unwrap());
 
 
     // Feed a stream of candidate deletion files directly into the delete_stream
