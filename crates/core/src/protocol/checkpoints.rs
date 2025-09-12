@@ -265,19 +265,21 @@ pub async fn cleanup_expired_logs_for(
         .filter(|ver| *ver <= keep_version)
         .max();
 
-    // Allow falling back to _last_checkpoint when no checkpoint <= keep_version was found in the listing
+    // Allow use of _last_checkpoint if no safe_checkpoint file was found.
     let safe_checkpoint_version = if let Some(v) = safe_checkpoint_version_opt {
         v
     } else {
         // If _last_checkpoint exists and its version is <= keep_version, use it as the safe boundary.
         // This aligns cleanup to an existing checkpoint as hinted by _last_checkpoint.
-        let last_cp_ver = maybe_last_checkpoint.as_ref().map(|h| h.version as i64);
-        match last_cp_ver {
-            Some(v) if v <= keep_version => v,
-            _ => {
-                debug!("Not cleaning metadata files, could not find a checkpoint with version <= keep_version ({})", keep_version);
-                return Ok(0);
-            }
+        let last_cp_ver = maybe_last_checkpoint.unwrap().version as i64;
+        if last_cp_ver as i64 <= keep_version {
+            last_cp_ver
+        } else {
+            debug!(
+                "Not cleaning metadata files, could not find a checkpoint with version <= keep_version ({})",
+                keep_version
+            );
+            return Ok(0);
         }
     };
 
