@@ -198,7 +198,7 @@ pub async fn create_checkpoint_from_table_uri_and_cleanup(
 /// See also: https://github.com/delta-io/delta-rs/issues/3692 for background on
 /// why cleanup must align to an existing checkpoint.
 pub async fn cleanup_expired_logs_for(
-    until_version: i64,
+    mut keep_version: i64,
     log_store: &dyn LogStore,
     cutoff_timestamp: i64,
     operation_id: Option<Uuid>,
@@ -213,74 +213,68 @@ pub async fn cleanup_expired_logs_for(
     let object_store = log_store.object_store(None);
     let log_path = log_store.log_path();
 
+    // Step 0: require presence of _last_checkpoint for safety like previous impl
     let maybe_last_checkpoint = read_last_checkpoint(&object_store, log_path).await?;
-
-    let Some(last_checkpoint) = maybe_last_checkpoint else {
+    if maybe_last_checkpoint.is_none() {
         debug!("no last checkpoint. Exiting cleanup_expired_logs_for");
         return Ok(0);
-    };
+    }
 
-    // List all log entries and collect them into a vector
+    // List all log entries under _delta_log
     let log_entries: Vec<Result<crate::ObjectMeta, _>> =
         object_store.list(Some(log_path)).collect().await;
 
-    // Find the timestamp of the _last_checkpoint file
-    let last_checkpoint_ts = log_entries
-        .iter()
-        .filter_map(|m| m.as_ref().ok())
-        .find(|m| m.location.as_ref() == "_delta_log/_last_checkpoint")
-        .map(|m| m.last_modified.timestamp_millis());
-
-    debug!("starting until_version: {:?}", until_version);
+    debug!("starting keep_version: {:?}", keep_version);
     debug!(
         "starting cutoff_timestamp: {:?}",
         Utc.timestamp_millis_opt(cutoff_timestamp).unwrap()
     );
 
-    // Maybe update version and timestamp based on safe checkpoint
-    let (until_version, cutoff_timestamp) = if last_checkpoint_ts
-        .is_none_or(|lct| cutoff_timestamp >= lct)
-        && until_version >= last_checkpoint.version as i64
-    {
-        // last_checkpoint is older than the cutoff timestamp and version
-        (until_version, cutoff_timestamp)
-    } else {
-        // last_checkpoint is newer than the cutoff timestamp or version
-        // Find the checkpoint with the highest version <= until_version and ts <= cutoff_timestamp
-        match log_entries
-            .iter()
-            .filter_map(|m| m.as_ref().ok())
-            .filter_map(|m| {
-                let path = m.location.as_ref();
-                CHECKPOINT_REGEX
-                    .captures(path)
-                    .and_then(|caps| caps.get(1))
-                    .and_then(|v| v.as_str().parse::<i64>().ok())
-                    .map(|ver| (ver, m.last_modified.timestamp_millis()))
-            })
-            .filter(|(ver, ts)| *ver <= until_version && *ts <= cutoff_timestamp)
-            .max_by_key(|(ver, _)| *ver)
-        {
-            Some((best_ver, best_ts)) => (best_ver, best_ts),
-            None => {
-                // Can't find a checkpoint before the cutoff timestamp and version.
-                // Don't delete any logs.
-                debug!("Not cleaning metadata files, could not find a checkpoint before the cutoff timestamp ({}) and version ({})", cutoff_timestamp, until_version);
-                return Ok(0);
-            }
-        }
+    // Step 1: Find min_retention_version among DELTA_LOG files with ts >= cutoff_timestamp
+    let min_retention_version = log_entries
+        .iter()
+        .filter_map(|m| m.as_ref().ok())
+        .filter_map(|m| {
+            let path = m.location.as_ref();
+            DELTA_LOG_REGEX
+                .captures(path)
+                .and_then(|caps| caps.get(1))
+                .and_then(|v| v.as_str().parse::<i64>().ok())
+                .map(|ver| (ver, m.last_modified.timestamp_millis()))
+        })
+        .filter(|(_, ts)| *ts >= cutoff_timestamp)
+        .map(|(ver, _)| ver)
+        .min();
+
+    let min_retention_version = min_retention_version.unwrap_or(keep_version);
+
+    // Step 2: keep_version = min(keep_version, min_retention_version)
+    keep_version = keep_version.min(min_retention_version);
+
+    // Step 3: Find safe checkpoint with checkpoint_version <= keep_version (no ts restriction)
+    let safe_checkpoint_version_opt = log_entries
+        .iter()
+        .filter_map(|m| m.as_ref().ok())
+        .filter_map(|m| {
+            let path = m.location.as_ref();
+            CHECKPOINT_REGEX
+                .captures(path)
+                .and_then(|caps| caps.get(1))
+                .and_then(|v| v.as_str().parse::<i64>().ok())
+        })
+        .filter(|ver| *ver <= keep_version)
+        .max();
+
+    // TODO. Fix the logic below to allow None when safe_checkpoint_version = maybe_last_checkpoint.version
+
+    let Some(safe_checkpoint_version) = safe_checkpoint_version_opt else {
+        debug!("Not cleaning metadata files, could not find a checkpoint with version <= keep_version ({})", keep_version);
+        return Ok(0);
     };
 
-    debug!(
-        "final until_version based on safe checkpoint: {:?}",
-        until_version
-    );
-    debug!(
-        "final cutoff_timestamp based on safe checkpoint: {:?}",
-        Utc.timestamp_millis_opt(cutoff_timestamp).unwrap()
-    );
+    debug!("safe_checkpoint_version: {}", safe_checkpoint_version);
 
-    // Feed a stream of candidate deletion files into the delete_stream function
+    // Step 4: Delete DELTA_LOG files where log_ver < safe_checkpoint_version && ts <= cutoff_timestamp
     let object_store = log_store.object_store(operation_id);
 
     let locations = futures::stream::iter(log_entries.into_iter())
@@ -301,8 +295,7 @@ pub async fn cleanup_expired_logs_for(
             let Ok(log_ver) = log_ver_str.parse::<i64>() else {
                 return None;
             };
-            if log_ver < until_version && ts <= cutoff_timestamp {
-                // This location is ready to be deleted
+            if log_ver < safe_checkpoint_version && ts <= cutoff_timestamp {
                 debug!("file to delete: {:?}", meta.location);
                 Some(Ok(meta.location))
             } else {
