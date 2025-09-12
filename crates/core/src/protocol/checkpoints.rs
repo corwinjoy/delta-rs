@@ -213,7 +213,7 @@ pub async fn cleanup_expired_logs_for(
     let object_store = log_store.object_store(None);
     let log_path = log_store.log_path();
 
-    // Step 0: require presence of _last_checkpoint for safety like previous impl
+    // Step 0: require presence of _last_checkpoint for safety
     let maybe_last_checkpoint = read_last_checkpoint(&object_store, log_path).await?;
     if maybe_last_checkpoint.is_none() {
         debug!("no last checkpoint. Exiting cleanup_expired_logs_for");
