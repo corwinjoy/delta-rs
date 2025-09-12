@@ -298,9 +298,7 @@ pub async fn cleanup_expired_logs_for(
                 }
             };
             let path_str = meta.location.as_ref();
-            let Some(captures) = DELTA_LOG_REGEX.captures(path_str) else {
-                return None;
-            };
+            let captures = DELTA_LOG_REGEX.captures(path_str)?;
             let ts = meta.last_modified.timestamp_millis();
             let log_ver_str = captures.get(1).unwrap().as_str();
             let Ok(log_ver) = log_ver_str.parse::<i64>() else {
