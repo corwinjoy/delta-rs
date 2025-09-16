@@ -297,7 +297,7 @@ async fn test_conflict_for_remove_actions() -> Result<(), Box<dyn Error>> {
         dt.snapshot()?,
         &filter,
         None,
-        WriterProperties::builder().build(),
+        None,
     )
     .await?;
 
@@ -317,6 +317,7 @@ async fn test_conflict_for_remove_actions() -> Result<(), Box<dyn Error>> {
         .execute(
             dt.log_store(),
             dt.snapshot()?,
+            None,
             1,
             20,
             None,
@@ -357,12 +358,12 @@ async fn test_no_conflict_for_append_actions() -> Result<(), Box<dyn Error>> {
 
     let filter = vec![PartitionFilter::try_from(("date", "=", "2022-05-22"))?];
     let plan = create_merge_plan(
-        &dt.log_store(),
+        &*dt.log_store(),
         OptimizeType::Compact,
         dt.snapshot()?,
         &filter,
         None,
-        WriterProperties::builder().build(),
+        None,
     )
     .await?;
 
@@ -381,6 +382,7 @@ async fn test_no_conflict_for_append_actions() -> Result<(), Box<dyn Error>> {
         .execute(
             dt.log_store(),
             dt.snapshot()?,
+            None,
             1,
             20,
             None,
@@ -424,7 +426,7 @@ async fn test_commit_interval() -> Result<(), Box<dyn Error>> {
         dt.snapshot()?,
         &[],
         None,
-        WriterProperties::builder().build(),
+        None,
     )
     .await?;
 
@@ -432,6 +434,7 @@ async fn test_commit_interval() -> Result<(), Box<dyn Error>> {
         .execute(
             dt.log_store(),
             dt.snapshot()?,
+            None,
             1,
             20,
             Some(Duration::from_secs(0)), // this will cause as many commits as num_files_added
