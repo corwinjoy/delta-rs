@@ -18,7 +18,7 @@ use parquet::basic::Compression;
 use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
 use parquet::schema::types::ColumnPath;
 use std::sync::Arc;
-use tracing::info;
+use tracing::{debug, info};
 use uuid::Uuid;
 
 // Top level trait for file format options used by a DeltaTable

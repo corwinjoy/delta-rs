@@ -34,7 +34,7 @@ use delta_kernel::expressions::Scalar;
 use delta_kernel::table_properties::DataSkippingNumIndexedCols;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
-use futures::{Future, StreamExt, TryStreamExt};
+use futures::{Future, FutureExt, StreamExt, TryStreamExt};
 use indexmap::IndexMap;
 use itertools::Itertools;
 use num_cpus;
@@ -619,87 +619,91 @@ impl MergePlan {
         Ok(stream)
     }
 
-    /// Perform the operations outlined in the plan.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn execute(
-        mut self,
-        log_store: LogStoreRef,
+    /// Build the processing stream for a given set of optimize operations.
+    fn build_stream_for_operations(
+        &mut self,
+        operations: OptimizeOperations,
+        log_store: &LogStoreRef,
         snapshot: &DeltaTableState,
-        file_format_options: Option<FileFormatRef>,
-        max_concurrent_tasks: usize,
-        #[allow(unused_variables)] // used behind a feature flag
+        file_format_options: &Option<FileFormatRef>,
         max_spill_size: usize,
-        min_commit_interval: Option<Duration>,
-        commit_properties: CommitProperties,
         operation_id: Uuid,
-        handle: Option<&Arc<dyn CustomExecuteHandler>>,
-    ) -> Result<Metrics, DeltaTableError> {
-        let operations = std::mem::take(&mut self.operations);
-
-        let stream = match operations {
-            OptimizeOperations::Compact(bins) => futures::stream::iter(bins)
-                .flat_map(|(_, (partition, bins))| {
-                    futures::stream::iter(bins).map(move |bin| (partition.clone(), bin))
-                })
-                .map(|(partition, files)| {
-                    debug!(
-                        "merging a group of {} files in partition {partition:?}",
-                        files.len(),
-                    );
-                    for file in files.iter() {
-                        debug!("  file {}", file.path);
-                    }
-
-                    let object_store_ref = log_store.object_store(Some(operation_id));
-                    let file_format_options = file_format_options.clone();
-                    let batch_stream = futures::stream::iter(files.clone())
-                        .then(move |file| {
-                            let object_store_ref = object_store_ref.clone();
-                            let meta = ObjectMeta::try_from(file).unwrap();
-                            let file_format_options = file_format_options.clone();
-                            async move {
-                                let decrypt: Option<FileDecryptionProperties> =
-                                    match &file_format_options {
-                                        Some(ffo) => {
-                                            get_file_decryption_properties(ffo, &meta.location)
-                                                .await
-                                                .map_err(|e| {
-                                                    ParquetError::General(format!(
-                                                "Error getting file decryption properties: {e}"
-                                            ))
-                                                })?
-                                        }
-                                        None => None,
-                                    };
-                                let file_reader =
-                                    ParquetObjectReader::new(object_store_ref, meta.location)
-                                        .with_file_size(meta.size);
-                                let mut options = ArrowReaderOptions::new();
-                                if let Some(decrypt) = decrypt {
-                                    options = options.with_file_decryption_properties(decrypt);
-                                }
-
-                                ParquetRecordBatchStreamBuilder::new_with_options(
-                                    file_reader,
-                                    options,
-                                )
-                                .await?
-                                .build()
+    ) -> Result<
+        BoxStream<'static, BoxFuture<'static, Result<(Vec<Action>, PartialMetrics), DeltaTableError>>>,
+        DeltaTableError,
+    > {
+        match operations {
+            OptimizeOperations::Compact(bins) => {
+                let stream = futures::stream::iter(bins)
+                    .flat_map(|(_, (partition, bins))| {
+                        futures::stream::iter(bins).map(move |bin| (partition.clone(), bin))
+                    })
+                    .map({
+                        let log_store = log_store.clone();
+                        let file_format_options = file_format_options.clone();
+                        let task_parameters = self.task_parameters.clone();
+                        move |(partition, files)| {
+                            debug!(
+                                "merging a group of {} files in partition {partition:?}",
+                                files.len(),
+                            );
+                            for file in files.iter() {
+                                debug!("  file {}", file.path);
                             }
-                        })
-                        .try_flatten()
-                        .boxed();
 
-                    let rewrite_result = tokio::task::spawn(Self::rewrite_files(
-                        self.task_parameters.clone(),
-                        partition,
-                        files,
-                        log_store.object_store(Some(operation_id)).clone(),
-                        futures::future::ready(Ok(batch_stream)),
-                    ));
-                    util::flatten_join_error(rewrite_result)
-                })
-                .boxed(),
+                            let object_store_ref = log_store.object_store(Some(operation_id));
+                            let file_format_options = file_format_options.clone();
+                            let batch_stream = futures::stream::iter(files.clone())
+                                .then(move |file| {
+                                    let object_store_ref = object_store_ref.clone();
+                                    let meta = ObjectMeta::try_from(file).unwrap();
+                                    let file_format_options = file_format_options.clone();
+                                    async move {
+                                        let decrypt: Option<FileDecryptionProperties> =
+                                            match &file_format_options {
+                                                Some(ffo) => {
+                                                    get_file_decryption_properties(ffo, &meta.location)
+                                                        .await
+                                                        .map_err(|e| {
+                                                            ParquetError::General(format!(
+                                                                "Error getting file decryption properties: {e}"
+                                                            ))
+                                                        })?
+                                                }
+                                                None => None,
+                                            };
+                                        let file_reader =
+                                            ParquetObjectReader::new(object_store_ref, meta.location)
+                                                .with_file_size(meta.size);
+                                        let mut options = ArrowReaderOptions::new();
+                                        if let Some(decrypt) = decrypt {
+                                            options = options.with_file_decryption_properties(decrypt);
+                                        }
+
+                                        ParquetRecordBatchStreamBuilder::new_with_options(
+                                            file_reader,
+                                            options,
+                                        )
+                                        .await?
+                                        .build()
+                                    }
+                                })
+                                .try_flatten()
+                                .boxed();
+
+                            let rewrite_result = tokio::task::spawn(Self::rewrite_files(
+                                task_parameters.clone(),
+                                partition,
+                                files,
+                                log_store.object_store(Some(operation_id)).clone(),
+                                futures::future::ready(Ok(batch_stream)),
+                            ));
+                            util::flatten_join_error(rewrite_result).boxed()
+                        }
+                    })
+                    .boxed();
+                Ok(stream)
+            }
             OptimizeOperations::ZOrder(zorder_columns, bins, session_config) => {
                 debug!("Starting zorder with the columns: {zorder_columns:?} {bins:?}");
 
@@ -715,19 +719,18 @@ impl MergePlan {
                 use crate::delta_datafusion::DeltaScanConfigBuilder;
                 use crate::delta_datafusion::DeltaTableProvider;
 
+                let snapshot_cloned = snapshot.clone();
                 let scan_config = DeltaScanConfigBuilder::default()
                     .with_file_column(false)
-                    .with_schema(snapshot.input_schema()?)
-                    .build(snapshot)?;
+                    .with_schema(snapshot_cloned.input_schema()?)
+                    .build(&snapshot_cloned)?;
 
-                // For each rewrite evaluate the predicate and then modify each expression
-                // to either compute the new value or obtain the old one then write these batches
                 let log_store = log_store.clone();
                 let file_format_options = file_format_options.clone();
-                futures::stream::iter(bins)
+                let stream = futures::stream::iter(bins)
                     .map(move |(_, (partition, files))| {
                         let dtp = DeltaTableProvider::try_new(
-                            snapshot.clone(),
+                            snapshot_cloned.clone(),
                             log_store.clone(),
                             scan_config.clone(),
                         )
@@ -743,12 +746,27 @@ impl MergePlan {
                             log_store.object_store(Some(operation_id)),
                             batch_stream,
                         ));
-                        util::flatten_join_error(rewrite_result)
+                        util::flatten_join_error(rewrite_result).boxed()
                     })
-                    .boxed()
+                    .boxed();
+                Ok(stream)
             }
-        };
+        }
+    }
 
+    /// Process the stream of rewrite results, committing actions according to the interval and aggregating metrics.
+    async fn process_commit_loop(
+        &mut self,
+        stream: BoxStream<'static, BoxFuture<'static, Result<(Vec<Action>, PartialMetrics), DeltaTableError>>>,
+        log_store: LogStoreRef,
+        snapshot: &DeltaTableState,
+        file_format_options: Option<FileFormatRef>,
+        max_concurrent_tasks: usize,
+        min_commit_interval: Option<Duration>,
+        commit_properties: CommitProperties,
+        operation_id: Uuid,
+        handle: Option<&Arc<dyn CustomExecuteHandler>>,
+    ) -> Result<Metrics, DeltaTableError> {
         let mut stream = stream.buffer_unordered(max_concurrent_tasks);
 
         let mut table = DeltaTable::new_with_state(
@@ -839,6 +857,46 @@ impl MergePlan {
         table.state = Some(snapshot);
 
         Ok(total_metrics)
+    }
+
+    /// Perform the operations outlined in the plan.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute(
+        mut self,
+        log_store: LogStoreRef,
+        snapshot: &DeltaTableState,
+        file_format_options: Option<FileFormatRef>,
+        max_concurrent_tasks: usize,
+        #[allow(unused_variables)] // used behind a feature flag
+        max_spill_size: usize,
+        min_commit_interval: Option<Duration>,
+        commit_properties: CommitProperties,
+        operation_id: Uuid,
+        handle: Option<&Arc<dyn CustomExecuteHandler>>,
+    ) -> Result<Metrics, DeltaTableError> {
+        let operations = std::mem::take(&mut self.operations);
+        let stream = self.build_stream_for_operations(
+            operations,
+            &log_store,
+            snapshot,
+            &file_format_options,
+            max_spill_size,
+            operation_id,
+        );
+
+        self
+            .process_commit_loop(
+                stream?,
+                log_store,
+                snapshot,
+                file_format_options,
+                max_concurrent_tasks,
+                min_commit_interval,
+                commit_properties,
+                operation_id,
+                handle,
+            )
+            .await
     }
 }
 
