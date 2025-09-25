@@ -629,7 +629,10 @@ impl MergePlan {
         max_spill_size: usize,
         operation_id: Uuid,
     ) -> Result<
-        BoxStream<'static, BoxFuture<'static, Result<(Vec<Action>, PartialMetrics), DeltaTableError>>>,
+        BoxStream<
+            'static,
+            BoxFuture<'static, Result<(Vec<Action>, PartialMetrics), DeltaTableError>>,
+        >,
         DeltaTableError,
     > {
         match operations {
@@ -757,7 +760,10 @@ impl MergePlan {
     /// Process the stream of rewrite results, committing actions according to the interval and aggregating metrics.
     async fn process_commit_loop(
         &mut self,
-        stream: BoxStream<'static, BoxFuture<'static, Result<(Vec<Action>, PartialMetrics), DeltaTableError>>>,
+        stream: BoxStream<
+            'static,
+            BoxFuture<'static, Result<(Vec<Action>, PartialMetrics), DeltaTableError>>,
+        >,
         log_store: LogStoreRef,
         snapshot: &DeltaTableState,
         file_format_options: Option<FileFormatRef>,
@@ -884,19 +890,18 @@ impl MergePlan {
             operation_id,
         );
 
-        self
-            .process_commit_loop(
-                stream?,
-                log_store,
-                snapshot,
-                file_format_options,
-                max_concurrent_tasks,
-                min_commit_interval,
-                commit_properties,
-                operation_id,
-                handle,
-            )
-            .await
+        self.process_commit_loop(
+            stream?,
+            log_store,
+            snapshot,
+            file_format_options,
+            max_concurrent_tasks,
+            min_commit_interval,
+            commit_properties,
+            operation_id,
+            handle,
+        )
+        .await
     }
 }
 
