@@ -276,7 +276,7 @@ async fn execute(
     // NOTE: The optimize_projections rule is being temporarily disabled because it errors with
     // our schemas for Lists due to issues discussed
     // [here](https://github.com/delta-io/delta-rs/pull/2886#issuecomment-2481550560>
-    let _rules: Vec<Arc<dyn datafusion::optimizer::OptimizerRule + Send + Sync>> = state
+    let rules: Vec<Arc<dyn datafusion::optimizer::OptimizerRule + Send + Sync>> = state
         .optimizers()
         .iter()
         .filter(|rule| {
