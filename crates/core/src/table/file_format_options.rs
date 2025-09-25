@@ -170,7 +170,7 @@ impl WriterPropertiesFactory for SimpleWriterPropertiesFactory {
         file_path: &Path,
         _file_schema: &Arc<ArrowSchema>,
     ) -> DeltaResult<WriterProperties> {
-        info!("Called create_writer_properties for file: {file_path}");
+        debug!("Called create_writer_properties for file: {file_path}");
         Ok(self.writer_properties.clone())
     }
 }
