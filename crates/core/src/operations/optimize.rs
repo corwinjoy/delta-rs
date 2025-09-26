@@ -488,6 +488,20 @@ pub struct MergeTaskParameters {
     stats_columns: Option<Vec<String>>,
 }
 
+/// Consolidated execution context to reduce parameter passing between methods
+#[derive(Clone)]
+pub struct OptimizeExecContext {
+    pub log_store: LogStoreRef,
+    pub snapshot: DeltaTableState,
+    pub file_format_options: Option<FileFormatRef>,
+    pub max_spill_size: usize,
+    pub max_concurrent_tasks: usize,
+    pub min_commit_interval: Option<Duration>,
+    pub commit_properties: CommitProperties,
+    pub operation_id: Uuid,
+    pub handle: Option<Arc<dyn CustomExecuteHandler>>,
+}
+
 /// A stream of record batches, with a ParquetError on failure.
 type ParquetReadStream = BoxStream<'static, Result<RecordBatch, ParquetError>>;
 
@@ -623,11 +637,7 @@ impl MergePlan {
     fn build_stream_for_operations(
         &mut self,
         operations: OptimizeOperations,
-        log_store: &LogStoreRef,
-        snapshot: &DeltaTableState,
-        file_format_options: &Option<FileFormatRef>,
-        max_spill_size: usize,
-        operation_id: Uuid,
+        ctx: &OptimizeExecContext,
     ) -> Result<
         BoxStream<
             'static,
@@ -642,8 +652,9 @@ impl MergePlan {
                         futures::stream::iter(bins).map(move |bin| (partition.clone(), bin))
                     })
                     .map({
-                        let log_store = log_store.clone();
-                        let file_format_options = file_format_options.clone();
+                        let log_store = ctx.log_store.clone();
+                        let file_format_options = ctx.file_format_options.clone();
+                        let operation_id = ctx.operation_id;
                         let task_parameters = self.task_parameters.clone();
                         move |(partition, files)| {
                             debug!(
@@ -712,8 +723,8 @@ impl MergePlan {
 
                 let exec_context = Arc::new(zorder::ZOrderExecContext::new(
                     zorder_columns,
-                    log_store.object_store(Some(operation_id)),
-                    max_spill_size,
+                    ctx.log_store.object_store(Some(ctx.operation_id)),
+                    ctx.max_spill_size,
                     session_config,
                 )?);
                 let task_parameters = self.task_parameters.clone();
@@ -722,14 +733,15 @@ impl MergePlan {
                 use crate::delta_datafusion::DeltaScanConfigBuilder;
                 use crate::delta_datafusion::DeltaTableProvider;
 
-                let snapshot_cloned = snapshot.clone();
+                let snapshot_cloned = ctx.snapshot.clone();
                 let scan_config = DeltaScanConfigBuilder::default()
                     .with_file_column(false)
                     .with_schema(snapshot_cloned.input_schema()?)
                     .build(&snapshot_cloned)?;
 
-                let log_store = log_store.clone();
-                let file_format_options = file_format_options.clone();
+                let log_store = ctx.log_store.clone();
+                let file_format_options = ctx.file_format_options.clone();
+                let operation_id = ctx.operation_id;
                 let stream = futures::stream::iter(bins)
                     .map(move |(_, (partition, files))| {
                         let dtp = DeltaTableProvider::try_new(
@@ -764,21 +776,14 @@ impl MergePlan {
             'static,
             BoxFuture<'static, Result<(Vec<Action>, PartialMetrics), DeltaTableError>>,
         >,
-        log_store: LogStoreRef,
-        snapshot: &DeltaTableState,
-        file_format_options: Option<FileFormatRef>,
-        max_concurrent_tasks: usize,
-        min_commit_interval: Option<Duration>,
-        commit_properties: CommitProperties,
-        operation_id: Uuid,
-        handle: Option<&Arc<dyn CustomExecuteHandler>>,
+        ctx: &OptimizeExecContext,
     ) -> Result<Metrics, DeltaTableError> {
-        let mut stream = stream.buffer_unordered(max_concurrent_tasks);
+        let mut stream = stream.buffer_unordered(ctx.max_concurrent_tasks);
 
         let mut table = DeltaTable::new_with_state(
-            log_store.clone(),
-            snapshot.clone(),
-            file_format_options.clone(),
+            ctx.log_store.clone(),
+            ctx.snapshot.clone(),
+            ctx.file_format_options.clone(),
         );
 
         // Actions buffered so far. These will be flushed either at the end
@@ -792,7 +797,7 @@ impl MergePlan {
 
         let mut last_commit = Instant::now();
         let mut commits_made = 0;
-        let mut snapshot = snapshot.clone();
+        let mut snapshot = ctx.snapshot.clone();
         loop {
             let next = stream.next().await.transpose()?;
 
@@ -806,7 +811,7 @@ impl MergePlan {
             }
 
             let now = Instant::now();
-            let mature = match min_commit_interval {
+            let mature = match ctx.min_commit_interval {
                 None => false,
                 Some(i) => now.duration_since(last_commit) > i,
             };
@@ -816,7 +821,7 @@ impl MergePlan {
 
                 buffered_metrics.preserve_insertion_order = true;
                 let mut properties = CommitProperties::default();
-                properties.app_metadata = commit_properties.app_metadata.clone();
+                properties.app_metadata = ctx.commit_properties.app_metadata.clone();
                 properties
                     .app_metadata
                     .insert("readVersion".to_owned(), self.read_table_version.into());
@@ -834,12 +839,12 @@ impl MergePlan {
 
                 let commit = CommitBuilder::from(properties)
                     .with_actions(actions)
-                    .with_operation_id(operation_id)
-                    .with_post_commit_hook_handler(handle.cloned())
+                    .with_operation_id(ctx.operation_id)
+                    .with_post_commit_hook_handler(ctx.handle.clone())
                     .with_max_retries(DEFAULT_RETRIES + commits_made)
                     .build(
                         Some(&snapshot),
-                        log_store.clone(),
+                        ctx.log_store.clone(),
                         self.task_parameters.input_parameters.clone().into(),
                     )
                     .await?;
@@ -881,27 +886,23 @@ impl MergePlan {
         handle: Option<&Arc<dyn CustomExecuteHandler>>,
     ) -> Result<Metrics, DeltaTableError> {
         let operations = std::mem::take(&mut self.operations);
-        let stream = self.build_stream_for_operations(
-            operations,
-            &log_store,
-            snapshot,
-            &file_format_options,
-            max_spill_size,
-            operation_id,
-        );
 
-        self.process_commit_loop(
-            stream?,
-            log_store,
-            snapshot,
-            file_format_options,
+        // Consolidate parameters into a single context to simplify downstream calls
+        let ctx = OptimizeExecContext {
+            log_store: log_store.clone(),
+            snapshot: snapshot.clone(),
+            file_format_options: file_format_options.clone(),
+            max_spill_size,
             max_concurrent_tasks,
             min_commit_interval,
             commit_properties,
             operation_id,
-            handle,
-        )
-        .await
+            handle: handle.cloned(),
+        };
+
+        let stream = self.build_stream_for_operations(operations, &ctx);
+
+        self.process_commit_loop(stream?, &ctx).await
     }
 }
 

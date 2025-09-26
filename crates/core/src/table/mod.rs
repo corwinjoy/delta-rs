@@ -10,7 +10,6 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cmp::{min, Ordering};
 use std::fmt;
 use std::fmt::Formatter;
-use std::sync::Arc;
 
 use self::builder::DeltaTableConfig;
 use self::state::DeltaTableState;

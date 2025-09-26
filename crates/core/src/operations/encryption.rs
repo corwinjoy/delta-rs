@@ -7,7 +7,7 @@ use parquet::file::properties::WriterPropertiesBuilder;
 use std::sync::Arc;
 
 pub type SchemaRef = Arc<ArrowSchema>;
-use datafusion::config::{ConfigEntry, ConfigField, EncryptionFactoryOptions, ExtensionOptions};
+use datafusion::config::{ConfigField, EncryptionFactoryOptions, ExtensionOptions};
 use datafusion::execution::parquet_encryption::EncryptionFactory;
 
 #[derive(Clone, Debug)]
