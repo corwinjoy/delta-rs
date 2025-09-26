@@ -739,6 +739,8 @@ impl MergePlan {
                     .with_schema(snapshot_cloned.input_schema()?)
                     .build(&snapshot_cloned)?;
 
+                // For each rewrite evaluate the predicate and then modify each expression
+                // to either compute the new value or obtain the old one then write these batches
                 let log_store = ctx.log_store.clone();
                 let file_format_options = ctx.file_format_options.clone();
                 let operation_id = ctx.operation_id;
