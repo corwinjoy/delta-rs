@@ -14,9 +14,7 @@ use deltalake::kernel::{DataType, PrimitiveType, StructField};
 use deltalake::operations::collect_sendable_stream;
 use deltalake::parquet::encryption::decrypt::FileDecryptionProperties;
 use deltalake::{arrow, parquet, DeltaOps};
-use deltalake_core::operations::encryption::{
-    KmsEncryptionFactory, KmsEncryptionFactoryOptions, TableEncryption,
-};
+use deltalake_core::operations::encryption::TableEncryption;
 use deltalake_core::table::file_format_options::{
     FileFormatRef, KmsFileFormatOptions, SimpleFileFormatOptions,
 };
@@ -24,6 +22,7 @@ use deltalake_core::{
     datafusion::common::test_util::format_batches, operations::optimize::OptimizeType, DeltaTable,
     DeltaTableError,
 };
+use parquet_key_management::datafusion::{KmsEncryptionFactory, KmsEncryptionFactoryOptions};
 use parquet_key_management::{
     crypto_factory::{CryptoFactory, DecryptionConfiguration, EncryptionConfiguration},
     kms::KmsConnectionConfig,

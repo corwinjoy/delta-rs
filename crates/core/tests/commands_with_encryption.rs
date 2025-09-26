@@ -12,15 +12,14 @@ use datafusion::{
 };
 use deltalake_core::kernel::{DataType, PrimitiveType, StructField};
 use deltalake_core::operations::collect_sendable_stream;
-use deltalake_core::operations::encryption::{
-    KmsEncryptionFactory, KmsEncryptionFactoryOptions, TableEncryption,
-};
+use deltalake_core::operations::encryption::TableEncryption;
 use deltalake_core::parquet::encryption::decrypt::FileDecryptionProperties;
 use deltalake_core::table::file_format_options::{
     FileFormatRef, KmsFileFormatOptions, SimpleFileFormatOptions,
 };
 use deltalake_core::{arrow, parquet, DeltaOps};
 use deltalake_core::{operations::optimize::OptimizeType, DeltaTable, DeltaTableError};
+use parquet_key_management::datafusion::{KmsEncryptionFactory, KmsEncryptionFactoryOptions};
 use parquet_key_management::{
     crypto_factory::{CryptoFactory, DecryptionConfiguration, EncryptionConfiguration},
     kms::KmsConnectionConfig,
