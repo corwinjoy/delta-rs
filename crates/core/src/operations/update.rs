@@ -292,6 +292,7 @@ async fn execute(
     };
 
     let state = SessionStateBuilder::new_from_existing(state)
+        .with_optimizer_rules(rules)
         .with_query_planner(Arc::new(update_planner))
         .build();
 
