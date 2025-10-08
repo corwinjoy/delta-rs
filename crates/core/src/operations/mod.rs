@@ -186,9 +186,9 @@ impl DeltaOps {
 
     /// Set options for parquet files
     pub fn with_file_format_options(mut self, file_format_options: FileFormatRef) -> Self {
-        let mut table = self.0.clone();
-        table.state.as_ref().unwrap().snapshot.load_config().file_format_options = Some(file_format_options.clone());
-        Self(table)
+        // Update table-level config so future loads/operations use these options
+        self.0.config.file_format_options = Some(file_format_options);
+        self
     }
 
     /// Create a [`DeltaOps`] instance from uri string with storage options (deprecated)
