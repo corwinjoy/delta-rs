@@ -55,7 +55,7 @@ pub struct DeltaTableConfig {
     #[serde(skip_serializing, skip_deserializing)]
     #[delta(skip)]
     /// Options to apply when operating on the table files
-    file_format_options: Option<FileFormatRef>,
+    pub file_format_options: Option<FileFormatRef>,
 
     #[serde(skip_serializing, skip_deserializing)]
     #[delta(skip)]
@@ -83,6 +83,13 @@ impl PartialEq for DeltaTableConfig {
     }
 }
 
+impl DeltaTableConfig {
+    /// Returns the FileFormatOptions configured for this load, if any
+    pub fn file_format_options(&self) -> Option<FileFormatRef> {
+        self.file_format_options.clone()
+    }
+}
+
 /// builder for configuring a delta table load.
 #[derive(Debug)]
 pub struct DeltaTableBuilder {
@@ -97,8 +104,6 @@ pub struct DeltaTableBuilder {
     #[allow(unused_variables)]
     allow_http: Option<bool>,
     table_config: DeltaTableConfig,
-    /// options to apply when operating on the table files
-    file_format_options: Option<FileFormatRef>,
 }
 
 impl DeltaTableBuilder {
@@ -127,7 +132,6 @@ impl DeltaTableBuilder {
             storage_options: None,
             allow_http: None,
             table_config: DeltaTableConfig::default(),
-            file_format_options: None,
         })
     }
 
@@ -177,7 +181,6 @@ impl DeltaTableBuilder {
             storage_options: None,
             allow_http: None,
             table_config: DeltaTableConfig::default(),
-            file_format_options: None,
         })
     }
 
@@ -278,7 +281,7 @@ impl DeltaTableBuilder {
 
     /// Set the file options to use when reading/writing individual files in the table.
     pub fn with_file_format_options(mut self, file_format_options: FileFormatRef) -> Self {
-        self.file_format_options = Some(file_format_options);
+        self.table_config.file_format_options = Some(file_format_options);
         self
     }
 

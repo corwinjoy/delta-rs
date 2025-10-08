@@ -39,7 +39,7 @@ use crate::logstore::LogStoreRef;
 use crate::table::builder::ensure_table_uri;
 use crate::table::builder::DeltaTableBuilder;
 use crate::table::config::{TablePropertiesExt as _, DEFAULT_NUM_INDEX_COLS};
-use crate::table::file_format_options::FileFormatRef;
+use crate::table::file_format_options::{state_with_file_format_options, FileFormatRef};
 use crate::DeltaTable;
 use url::Url;
 
@@ -186,8 +186,9 @@ impl DeltaOps {
 
     /// Set options for parquet files
     pub fn with_file_format_options(mut self, file_format_options: FileFormatRef) -> Self {
-        self.0.file_format_options = Some(file_format_options);
-        self
+        let mut table = self.0.clone();
+        table.state.as_ref().unwrap().snapshot.load_config().file_format_options = Some(file_format_options.clone());
+        Self(table)
     }
 
     /// Create a [`DeltaOps`] instance from uri string with storage options (deprecated)
@@ -234,9 +235,6 @@ impl DeltaOps {
     #[must_use]
     pub fn create(self) -> CreateBuilder {
         let mut cb = CreateBuilder::default().with_log_store(self.0.log_store);
-        if let Some(file_format_options) = self.0.file_format_options {
-            cb = cb.with_file_format_options(file_format_options);
-        }
         cb
     }
 
@@ -247,7 +245,6 @@ impl DeltaOps {
         LoadBuilder::new(
             self.0.log_store,
             self.0.state.unwrap().snapshot,
-            self.0.file_format_options,
         )
     }
 
@@ -265,7 +262,6 @@ impl DeltaOps {
         WriteBuilder::new(
             self.0.log_store,
             self.0.state.map(|s| s.snapshot),
-            self.0.file_format_options,
         )
         .with_input_batches(batches)
     }
@@ -289,7 +285,6 @@ impl DeltaOps {
         OptimizeBuilder::new(
             self.0.log_store,
             self.0.state.unwrap().snapshot,
-            self.0.file_format_options,
         )
     }
 
@@ -300,7 +295,6 @@ impl DeltaOps {
         DeleteBuilder::new(
             self.0.log_store,
             self.0.state.unwrap().snapshot,
-            self.0.file_format_options,
         )
     }
 
@@ -311,7 +305,6 @@ impl DeltaOps {
         UpdateBuilder::new(
             self.0.log_store,
             self.0.state.unwrap().snapshot,
-            self.0.file_format_options,
         )
     }
 
@@ -332,7 +325,6 @@ impl DeltaOps {
         MergeBuilder::new(
             self.0.log_store,
             self.0.state.unwrap().snapshot,
-            self.0.file_format_options,
             predicate.into(),
             source,
         )
@@ -358,7 +350,6 @@ impl DeltaOps {
         DropConstraintBuilder::new(
             self.0.log_store,
             self.0.state.unwrap().snapshot,
-            self.0.file_format_options,
         )
     }
 

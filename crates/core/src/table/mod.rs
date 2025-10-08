@@ -47,8 +47,6 @@ pub struct DeltaTable {
     pub state: Option<DeltaTableState>,
     /// the load options used during load
     pub config: DeltaTableConfig,
-    /// options to apply when operating on the table files
-    pub file_format_options: Option<FileFormatRef>,
     /// log store
     pub(crate) log_store: LogStoreRef,
 }
@@ -101,7 +99,6 @@ impl<'de> Deserialize<'de> for DeltaTable {
                     state,
                     config,
                     log_store,
-                    file_format_options: None,
                 };
                 Ok(table)
             }
@@ -124,7 +121,6 @@ impl DeltaTable {
             state: None,
             log_store,
             config,
-            file_format_options: None,
         }
     }
 
@@ -141,7 +137,6 @@ impl DeltaTable {
             state: Some(state),
             log_store,
             config: Default::default(),
-            file_format_options: None,
         }
     }
 
