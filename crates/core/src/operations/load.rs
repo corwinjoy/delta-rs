@@ -11,6 +11,7 @@ use crate::errors::{DeltaResult, DeltaTableError};
 use crate::kernel::transaction::PROTOCOL;
 use crate::kernel::EagerSnapshot;
 use crate::logstore::LogStoreRef;
+use crate::table::file_format_options::FileFormatRef;
 use crate::table::state::DeltaTableState;
 use crate::DeltaTable;
 
@@ -22,6 +23,8 @@ pub struct LoadBuilder {
     log_store: LogStoreRef,
     /// A sub-selection of columns to be loaded
     columns: Option<Vec<String>>,
+    /// Options to apply when operating on the table files
+    file_format_options: Option<FileFormatRef>,
 }
 
 impl super::Operation<()> for LoadBuilder {
@@ -38,11 +41,13 @@ impl LoadBuilder {
     pub fn new(
         log_store: LogStoreRef,
         snapshot: EagerSnapshot,
+        file_format_options: Option<FileFormatRef>,
     ) -> Self {
         Self {
             snapshot,
             log_store,
             columns: None,
+            file_format_options,
         }
     }
 
