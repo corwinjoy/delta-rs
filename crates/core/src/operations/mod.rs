@@ -39,7 +39,7 @@ use crate::logstore::LogStoreRef;
 use crate::table::builder::ensure_table_uri;
 use crate::table::builder::DeltaTableBuilder;
 use crate::table::config::{TablePropertiesExt as _, DEFAULT_NUM_INDEX_COLS};
-use crate::table::file_format_options::{state_with_file_format_options, FileFormatRef};
+use crate::table::file_format_options::FileFormatRef;
 use crate::DeltaTable;
 use url::Url;
 
@@ -234,7 +234,7 @@ impl DeltaOps {
     /// ```
     #[must_use]
     pub fn create(self) -> CreateBuilder {
-        let mut cb = CreateBuilder::default().with_log_store(self.0.log_store);
+        let cb = CreateBuilder::default().with_log_store(self.0.log_store);
         cb
     }
 
@@ -242,10 +242,7 @@ impl DeltaOps {
     #[cfg(feature = "datafusion")]
     #[must_use]
     pub fn load(self) -> LoadBuilder {
-        LoadBuilder::new(
-            self.0.log_store,
-            self.0.state.unwrap().snapshot,
-        )
+        LoadBuilder::new(self.0.log_store, self.0.state.unwrap().snapshot)
     }
 
     /// Load a table with CDF Enabled
@@ -259,11 +256,8 @@ impl DeltaOps {
     #[cfg(feature = "datafusion")]
     #[must_use]
     pub fn write(self, batches: impl IntoIterator<Item = RecordBatch>) -> WriteBuilder {
-        WriteBuilder::new(
-            self.0.log_store,
-            self.0.state.map(|s| s.snapshot),
-        )
-        .with_input_batches(batches)
+        WriteBuilder::new(self.0.log_store, self.0.state.map(|s| s.snapshot))
+            .with_input_batches(batches)
     }
 
     /// Vacuum stale files from delta table
@@ -282,30 +276,21 @@ impl DeltaOps {
     #[cfg(feature = "datafusion")]
     #[must_use]
     pub fn optimize<'a>(self) -> OptimizeBuilder<'a> {
-        OptimizeBuilder::new(
-            self.0.log_store,
-            self.0.state.unwrap().snapshot,
-        )
+        OptimizeBuilder::new(self.0.log_store, self.0.state.unwrap().snapshot)
     }
 
     /// Delete data from Delta table
     #[cfg(feature = "datafusion")]
     #[must_use]
     pub fn delete(self) -> DeleteBuilder {
-        DeleteBuilder::new(
-            self.0.log_store,
-            self.0.state.unwrap().snapshot,
-        )
+        DeleteBuilder::new(self.0.log_store, self.0.state.unwrap().snapshot)
     }
 
     /// Update data from Delta table
     #[cfg(feature = "datafusion")]
     #[must_use]
     pub fn update(self) -> UpdateBuilder {
-        UpdateBuilder::new(
-            self.0.log_store,
-            self.0.state.unwrap().snapshot,
-        )
+        UpdateBuilder::new(self.0.log_store, self.0.state.unwrap().snapshot)
     }
 
     /// Restore delta table to a specified version or datetime
@@ -347,10 +332,7 @@ impl DeltaOps {
     #[cfg(feature = "datafusion")]
     #[must_use]
     pub fn drop_constraints(self) -> DropConstraintBuilder {
-        DropConstraintBuilder::new(
-            self.0.log_store,
-            self.0.state.unwrap().snapshot,
-        )
+        DropConstraintBuilder::new(self.0.log_store, self.0.state.unwrap().snapshot)
     }
 
     /// Set table properties

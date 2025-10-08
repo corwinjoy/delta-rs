@@ -330,10 +330,7 @@ impl DeltaTableBuilder {
     /// This will not load the log, i.e. the table is not initialized. To get an initialized
     /// table use the `load` function
     pub fn build(self) -> DeltaResult<DeltaTable> {
-        Ok(DeltaTable::new(
-            self.build_storage()?,
-            self.table_config,
-        ))
+        Ok(DeltaTable::new(self.build_storage()?, self.table_config))
     }
 
     /// Build the [`DeltaTable`] and load its state

@@ -77,7 +77,7 @@ use crate::kernel::{
 use crate::logstore::LogStoreRef;
 use crate::protocol::{DeltaOperation, SaveMode};
 use crate::table::file_format_options::{
-    build_writer_properties_factory_ffo, build_writer_properties_factory_wp, FileFormatRef,
+    build_writer_properties_factory_ffo, build_writer_properties_factory_wp,
     WriterPropertiesFactory,
 };
 use crate::DeltaTable;
@@ -194,15 +194,11 @@ impl super::Operation<()> for WriteBuilder {
 
 impl WriteBuilder {
     /// Create a new [`WriteBuilder`]
-    pub fn new(
-        log_store: LogStoreRef,
-        snapshot: Option<EagerSnapshot>,
-    ) -> Self {
+    pub fn new(log_store: LogStoreRef, snapshot: Option<EagerSnapshot>) -> Self {
         let ffo = snapshot
             .as_ref()
             .and_then(|s| s.load_config().file_format_options.clone());
-        let writer_properties_factory =
-            build_writer_properties_factory_ffo(ffo);
+        let writer_properties_factory = build_writer_properties_factory_ffo(ffo);
         Self {
             snapshot,
             log_store,
@@ -649,8 +645,7 @@ impl std::future::IntoFuture for WriteBuilder {
 
                     match &predicate {
                         Some(pred) => {
-                            let ffo = snapshot
-                                .load_config().file_format_options.clone();
+                            let ffo = snapshot.load_config().file_format_options.clone();
                             let (predicate_actions, cdf_df) = prepare_predicate_actions(
                                 pred.clone(),
                                 this.log_store.clone(),
@@ -754,10 +749,7 @@ impl std::future::IntoFuture for WriteBuilder {
                 handler.post_execute(&this.log_store, operation_id).await?;
             }
 
-            Ok(DeltaTable::new_with_state(
-                this.log_store,
-                commit.snapshot,
-            ))
+            Ok(DeltaTable::new_with_state(this.log_store, commit.snapshot))
         })
     }
 }
@@ -1969,13 +1961,10 @@ mod tests {
                     .logical_plan()
                     .clone(),
             );
-            let writer = WriteBuilder::new(
-                table.log_store.clone(),
-                table.state.map(|f| f.snapshot),
-                None,
-            )
-            .with_input_execution_plan(plan)
-            .with_save_mode(SaveMode::Overwrite);
+            let writer =
+                WriteBuilder::new(table.log_store.clone(), table.state.map(|f| f.snapshot))
+                    .with_input_execution_plan(plan)
+                    .with_save_mode(SaveMode::Overwrite);
 
             let _ = writer.check_preconditions().await?;
             Ok(())
@@ -1989,8 +1978,8 @@ mod tests {
                 .with_columns(table_schema.fields().cloned())
                 .await?;
             let batch = get_record_batch(None, false);
-            let writer = WriteBuilder::new(table.log_store.clone(), None, None)
-                .with_input_batches(vec![batch]);
+            let writer =
+                WriteBuilder::new(table.log_store.clone(), None).with_input_batches(vec![batch]);
 
             let actions = writer.check_preconditions().await?;
             assert_eq!(

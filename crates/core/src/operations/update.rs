@@ -58,7 +58,7 @@ use crate::operations::cdc::*;
 use crate::protocol::DeltaOperation;
 use crate::table::file_format_options::{
     build_writer_properties_factory_ffo, build_writer_properties_factory_wp,
-    state_with_file_format_options, FileFormatRef, WriterPropertiesFactory,
+    state_with_file_format_options, WriterPropertiesFactory,
 };
 use crate::table::state::DeltaTableState;
 use crate::{
@@ -135,12 +135,8 @@ impl super::Operation<()> for UpdateBuilder {
 
 impl UpdateBuilder {
     /// Create a new ['UpdateBuilder']
-    pub fn new(
-        log_store: LogStoreRef,
-        snapshot: EagerSnapshot,
-    ) -> Self {
-        let file_format_options = snapshot
-            .load_config().file_format_options.clone();
+    pub fn new(log_store: LogStoreRef, snapshot: EagerSnapshot) -> Self {
+        let file_format_options = snapshot.load_config().file_format_options.clone();
         let writer_properties_factory =
             build_writer_properties_factory_ffo(file_format_options.clone());
         Self {
@@ -285,8 +281,7 @@ async fn execute(
         .cloned()
         .collect();
 
-    let file_format_options = snapshot
-        .load_config().file_format_options.clone();
+    let file_format_options = snapshot.load_config().file_format_options.clone();
     let state = state_with_file_format_options(state, file_format_options.as_ref())?;
 
     let update_planner = DeltaPlanner::<UpdateMetricExtensionPlanner> {
@@ -558,10 +553,7 @@ impl std::future::IntoFuture for UpdateBuilder {
             }
 
             Ok((
-                DeltaTable::new_with_state(
-                    this.log_store,
-                    DeltaTableState::new(snapshot),
-                ),
+                DeltaTable::new_with_state(this.log_store, DeltaTableState::new(snapshot)),
                 metrics,
             ))
         })

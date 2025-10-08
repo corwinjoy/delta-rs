@@ -46,7 +46,6 @@ use datafusion::{
     prelude::Expr,
     scalar::ScalarValue,
 };
-use futures::TryStreamExt;
 use itertools::Itertools;
 use object_store::ObjectMeta;
 

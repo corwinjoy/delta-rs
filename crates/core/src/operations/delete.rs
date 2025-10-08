@@ -62,7 +62,7 @@ use crate::protocol::DeltaOperation;
 use crate::table::config::TablePropertiesExt as _;
 use crate::table::file_format_options::{
     build_writer_properties_factory_ffo, build_writer_properties_factory_wp,
-    state_with_file_format_options, FileFormatRef, WriterPropertiesFactory,
+    state_with_file_format_options, WriterPropertiesFactory,
 };
 use crate::table::state::DeltaTableState;
 use crate::{DeltaTable, DeltaTableError};
@@ -118,12 +118,8 @@ impl super::Operation<()> for DeleteBuilder {
 
 impl DeleteBuilder {
     /// Create a new [`DeleteBuilder`]
-    pub fn new(
-        log_store: LogStoreRef,
-        snapshot: EagerSnapshot,
-    ) -> Self {
-        let file_format_options = snapshot
-            .load_config().file_format_options.clone();
+    pub fn new(log_store: LogStoreRef, snapshot: EagerSnapshot) -> Self {
+        let file_format_options = snapshot.load_config().file_format_options.clone();
         let writer_properties_factory =
             build_writer_properties_factory_ffo(file_format_options.clone());
         Self {
@@ -229,8 +225,7 @@ async fn execute_non_empty_expr(
         .with_schema(snapshot.input_schema()?)
         .build(snapshot)?;
 
-    let file_format_options = snapshot
-        .load_config().file_format_options.clone();
+    let file_format_options = snapshot.load_config().file_format_options.clone();
 
     let target_provider = Arc::new(
         DeltaTableProvider::try_new(snapshot.clone(), log_store.clone(), scan_config.clone())?
@@ -338,8 +333,7 @@ async fn execute(
         return Err(DeltaTableError::NotInitializedWithFiles("DELETE".into()));
     }
 
-    let file_format_options = snapshot
-        .load_config().file_format_options.clone();
+    let file_format_options = snapshot.load_config().file_format_options.clone();
 
     let exec_start = Instant::now();
     let mut metrics = DeleteMetrics::default();
@@ -452,8 +446,7 @@ impl std::future::IntoFuture for DeleteBuilder {
                 session.state()
             });
 
-            let file_format_options = this.snapshot
-                .load_config().file_format_options.clone();
+            let file_format_options = this.snapshot.load_config().file_format_options.clone();
 
             let state = state_with_file_format_options(state, file_format_options.as_ref())?;
 

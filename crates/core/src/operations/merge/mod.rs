@@ -93,7 +93,7 @@ use crate::protocol::{DeltaOperation, MergePredicate};
 use crate::table::config::TablePropertiesExt as _;
 use crate::table::file_format_options::{
     build_writer_properties_factory_ffo, build_writer_properties_factory_wp,
-    state_with_file_format_options, FileFormatRef, WriterPropertiesFactory,
+    state_with_file_format_options, WriterPropertiesFactory,
 };
 use crate::table::state::DeltaTableState;
 use crate::{DeltaResult, DeltaTable, DeltaTableError};
@@ -176,8 +176,7 @@ impl MergeBuilder {
         source: DataFrame,
     ) -> Self {
         let predicate = predicate.into();
-        let file_format_options = snapshot
-            .load_config().file_format_options.clone();
+        let file_format_options = snapshot.load_config().file_format_options.clone();
         let writer_properties_factory =
             build_writer_properties_factory_ffo(file_format_options.clone());
         Self {
@@ -767,8 +766,7 @@ async fn execute(
         extension_planner: MergeMetricExtensionPlanner {},
     };
 
-    let file_format_options = snapshot
-        .load_config().file_format_options.clone();
+    let file_format_options = snapshot.load_config().file_format_options.clone();
     let state = state_with_file_format_options(state, file_format_options.as_ref())?;
 
     let state = SessionStateBuilder::new_from_existing(state)
@@ -1579,10 +1577,7 @@ impl std::future::IntoFuture for MergeBuilder {
             }
 
             Ok((
-                DeltaTable::new_with_state(
-                    this.log_store,
-                    DeltaTableState { snapshot },
-                ),
+                DeltaTable::new_with_state(this.log_store, DeltaTableState { snapshot }),
                 metrics,
             ))
         })

@@ -39,10 +39,7 @@ impl super::Operation<()> for DropConstraintBuilder {
 
 impl DropConstraintBuilder {
     /// Create a new builder
-    pub fn new(
-        log_store: LogStoreRef,
-        snapshot: EagerSnapshot,
-    ) -> Self {
+    pub fn new(log_store: LogStoreRef, snapshot: EagerSnapshot) -> Self {
         Self {
             name: None,
             raise_if_not_exists: true,

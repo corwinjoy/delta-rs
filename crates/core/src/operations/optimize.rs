@@ -243,12 +243,8 @@ impl super::Operation<()> for OptimizeBuilder<'_> {
 
 impl<'a> OptimizeBuilder<'a> {
     /// Create a new [`OptimizeBuilder`]
-    pub fn new(
-        log_store: LogStoreRef,
-        snapshot: EagerSnapshot,
-    ) -> Self {
-        let file_format_options = snapshot
-            .load_config().file_format_options.clone();
+    pub fn new(log_store: LogStoreRef, snapshot: EagerSnapshot) -> Self {
+        let file_format_options = snapshot.load_config().file_format_options.clone();
         let writer_properties_factory = match file_format_options.as_ref() {
             None => {
                 let wp = WriterProperties::builder()
@@ -392,10 +388,8 @@ impl<'a> std::future::IntoFuture for OptimizeBuilder<'a> {
             if let Some(handler) = this.custom_execute_handler {
                 handler.post_execute(&this.log_store, operation_id).await?;
             }
-            let mut table = DeltaTable::new_with_state(
-                this.log_store,
-                DeltaTableState::new(this.snapshot),
-            );
+            let mut table =
+                DeltaTable::new_with_state(this.log_store, DeltaTableState::new(this.snapshot));
             table.update().await?;
             Ok((table, metrics))
         })
@@ -655,8 +649,7 @@ impl MergePlan {
     ) -> Result<Metrics, DeltaTableError> {
         let operations = std::mem::take(&mut self.operations);
         let object_store = log_store.object_store(Some(operation_id));
-        let ffo = snapshot
-            .load_config().file_format_options.clone();
+        let ffo = snapshot.load_config().file_format_options.clone();
 
         let stream = match operations {
             OptimizeOperations::Compact(bins) => futures::stream::iter(bins)
@@ -681,16 +674,15 @@ impl MergePlan {
                             async move {
                                 let decrypt: Option<FileDecryptionProperties> =
                                     match &file_format_options {
-                                        Some(ffo) => get_file_decryption_properties(
-                                            ffo,
-                                            &meta.location,
-                                        )
-                                        .await
-                                        .map_err(|e| {
-                                            ParquetError::General(format!(
+                                        Some(ffo) => {
+                                            get_file_decryption_properties(ffo, &meta.location)
+                                                .await
+                                                .map_err(|e| {
+                                                    ParquetError::General(format!(
                                                 "Error getting file decryption properties: {e}"
                                             ))
-                                        })?,
+                                                })?
+                                        }
                                         None => None,
                                     };
                                 let file_reader =
@@ -783,10 +775,8 @@ impl MergePlan {
 
         let mut stream = stream.buffer_unordered(max_concurrent_tasks);
 
-        let mut table = DeltaTable::new_with_state(
-            log_store.clone(),
-            DeltaTableState::new(snapshot.clone()),
-        );
+        let mut table =
+            DeltaTable::new_with_state(log_store.clone(), DeltaTableState::new(snapshot.clone()));
 
         // Actions buffered so far. These will be flushed either at the end
         // or when we reach the commit interval.

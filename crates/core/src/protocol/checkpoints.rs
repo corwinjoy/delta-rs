@@ -9,17 +9,16 @@ use arrow_array::{BooleanArray, RecordBatch};
 use chrono::{TimeZone, Utc};
 use delta_kernel::engine::arrow_data::ArrowEngineData;
 use delta_kernel::engine_data::FilteredEngineData;
-use delta_kernel::last_checkpoint_hint::LastCheckpointHint;
 use delta_kernel::snapshot::Snapshot;
 use delta_kernel::FileMeta;
 use futures::{StreamExt, TryStreamExt};
 use object_store::path::Path;
-use object_store::{Error, ObjectStore};
+use object_store::{ObjectStore};
 use parquet::arrow::async_writer::ParquetObjectWriter;
 use parquet::arrow::AsyncArrowWriter;
 use regex::Regex;
 use tokio::task::spawn_blocking;
-use tracing::{debug, error, warn};
+use tracing::{debug, error};
 use uuid::Uuid;
 
 use crate::logstore::{LogStore, LogStoreExt, DELTA_LOG_REGEX};
@@ -313,6 +312,9 @@ mod tests {
     use arrow_schema::Schema as ArrowSchema;
     use chrono::Duration;
     use object_store::path::Path;
+    use object_store::{Error};
+    use tracing::warn;
+
 
     use super::*;
     use crate::ensure_table_uri;
@@ -321,6 +323,8 @@ mod tests {
     use crate::operations::DeltaOps;
     use crate::writer::test_utils::get_delta_schema;
     use crate::DeltaResult;
+    use delta_kernel::last_checkpoint_hint::LastCheckpointHint;
+
 
     /// Try reading the `_last_checkpoint` file.
     ///
