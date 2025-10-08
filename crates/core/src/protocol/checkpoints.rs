@@ -13,7 +13,7 @@ use delta_kernel::snapshot::Snapshot;
 use delta_kernel::FileMeta;
 use futures::{StreamExt, TryStreamExt};
 use object_store::path::Path;
-use object_store::{ObjectStore};
+use object_store::ObjectStore;
 use parquet::arrow::async_writer::ParquetObjectWriter;
 use parquet::arrow::AsyncArrowWriter;
 use regex::Regex;
@@ -312,9 +312,8 @@ mod tests {
     use arrow_schema::Schema as ArrowSchema;
     use chrono::Duration;
     use object_store::path::Path;
-    use object_store::{Error};
+    use object_store::Error;
     use tracing::warn;
-
 
     use super::*;
     use crate::ensure_table_uri;
@@ -324,7 +323,6 @@ mod tests {
     use crate::writer::test_utils::get_delta_schema;
     use crate::DeltaResult;
     use delta_kernel::last_checkpoint_hint::LastCheckpointHint;
-
 
     /// Try reading the `_last_checkpoint` file.
     ///
