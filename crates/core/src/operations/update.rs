@@ -95,8 +95,6 @@ pub struct UpdateBuilder {
     snapshot: EagerSnapshot,
     /// Delta object store for handling data files
     log_store: LogStoreRef,
-    /// Options to apply when operating on the table files
-    file_format_options: Option<FileFormatRef>,
     /// Datafusion session state relevant for executing the input plan
     state: Option<SessionState>,
     /// Properties passed to underlying parquet writer for when files are rewritten
@@ -140,8 +138,9 @@ impl UpdateBuilder {
     pub fn new(
         log_store: LogStoreRef,
         snapshot: EagerSnapshot,
-        file_format_options: Option<FileFormatRef>,
     ) -> Self {
+        let file_format_options = snapshot
+            .load_config().file_format_options.clone();
         let writer_properties_factory =
             build_writer_properties_factory_ffo(file_format_options.clone());
         Self {
@@ -149,7 +148,6 @@ impl UpdateBuilder {
             updates: HashMap::new(),
             snapshot,
             log_store,
-            file_format_options,
             state: None,
             writer_properties_factory,
             commit_properties: CommitProperties::default(),
@@ -258,7 +256,6 @@ async fn execute(
     updates: HashMap<Column, Expression>,
     log_store: LogStoreRef,
     snapshot: EagerSnapshot,
-    file_format_options: Option<FileFormatRef>,
     state: SessionState,
     writer_properties_factory: Option<Arc<dyn WriterPropertiesFactory>>,
     mut commit_properties: CommitProperties,
@@ -288,6 +285,8 @@ async fn execute(
         .cloned()
         .collect();
 
+    let file_format_options = snapshot
+        .load_config().file_format_options.clone();
     let state = state_with_file_format_options(state, file_format_options.as_ref())?;
 
     let update_planner = DeltaPlanner::<UpdateMetricExtensionPlanner> {
@@ -545,7 +544,6 @@ impl std::future::IntoFuture for UpdateBuilder {
                 this.updates,
                 this.log_store.clone(),
                 this.snapshot,
-                this.file_format_options.clone(),
                 state,
                 this.writer_properties_factory,
                 this.commit_properties,

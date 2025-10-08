@@ -137,8 +137,6 @@ pub struct WriteBuilder {
     snapshot: Option<EagerSnapshot>,
     /// Delta object store for handling data files
     log_store: LogStoreRef,
-    /// Options to apply when operating on the table files
-    file_format_options: Option<FileFormatRef>,
     /// The input plan
     input: Option<Arc<LogicalPlan>>,
     /// Datafusion session state relevant for executing the input plan
@@ -199,14 +197,15 @@ impl WriteBuilder {
     pub fn new(
         log_store: LogStoreRef,
         snapshot: Option<EagerSnapshot>,
-        file_format_options: Option<FileFormatRef>,
     ) -> Self {
+        let ffo = snapshot
+            .as_ref()
+            .and_then(|s| s.load_config().file_format_options.clone());
         let writer_properties_factory =
-            build_writer_properties_factory_ffo(file_format_options.clone());
+            build_writer_properties_factory_ffo(ffo);
         Self {
             snapshot,
             log_store,
-            file_format_options,
             input: None,
             state: None,
             mode: SaveMode::Append,
@@ -650,13 +649,15 @@ impl std::future::IntoFuture for WriteBuilder {
 
                     match &predicate {
                         Some(pred) => {
+                            let ffo = snapshot
+                                .load_config().file_format_options.clone();
                             let (predicate_actions, cdf_df) = prepare_predicate_actions(
                                 pred.clone(),
                                 this.log_store.clone(),
                                 snapshot,
                                 state.clone(),
                                 partition_columns.clone(),
-                                this.file_format_options.as_ref(),
+                                ffo.as_ref(),
                                 this.writer_properties_factory.clone(),
                                 deletion_timestamp,
                                 writer_stats_config.clone(),
@@ -2009,7 +2010,7 @@ mod tests {
                 .with_columns(table_schema.fields().cloned())
                 .await?;
             let writer =
-                WriteBuilder::new(table.log_store.clone(), None, None).with_input_batches(vec![]);
+                WriteBuilder::new(table.log_store.clone(), None).with_input_batches(vec![]);
 
             match writer.check_preconditions().await {
                 Ok(_) => panic!("Expected check_preconditions to fail!"),

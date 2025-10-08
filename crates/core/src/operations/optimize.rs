@@ -210,8 +210,6 @@ pub struct OptimizeBuilder<'a> {
     snapshot: EagerSnapshot,
     /// Delta object store for handling data files
     log_store: LogStoreRef,
-    /// Options to apply when operating on the table files
-    file_format_options: Option<FileFormatRef>,
     /// Filters to select specific table partitions to be optimized
     filters: &'a [PartitionFilter],
     /// Desired file size after bin-packing files
@@ -248,8 +246,9 @@ impl<'a> OptimizeBuilder<'a> {
     pub fn new(
         log_store: LogStoreRef,
         snapshot: EagerSnapshot,
-        file_format_options: Option<FileFormatRef>,
     ) -> Self {
+        let file_format_options = snapshot
+            .load_config().file_format_options.clone();
         let writer_properties_factory = match file_format_options.as_ref() {
             None => {
                 let wp = WriterProperties::builder()
@@ -265,7 +264,6 @@ impl<'a> OptimizeBuilder<'a> {
         Self {
             snapshot,
             log_store,
-            file_format_options,
             filters: &[],
             target_size: None,
             writer_properties_factory,
@@ -382,7 +380,6 @@ impl<'a> std::future::IntoFuture for OptimizeBuilder<'a> {
                 .execute(
                     this.log_store.clone(),
                     &this.snapshot,
-                    this.file_format_options.clone(),
                     this.max_concurrent_tasks,
                     this.max_spill_size,
                     this.min_commit_interval,
@@ -648,7 +645,6 @@ impl MergePlan {
         mut self,
         log_store: LogStoreRef,
         snapshot: &EagerSnapshot,
-        file_format_options: Option<FileFormatRef>,
         max_concurrent_tasks: usize,
         #[allow(unused_variables)] // used behind a feature flag
         max_spill_size: usize,
@@ -659,7 +655,8 @@ impl MergePlan {
     ) -> Result<Metrics, DeltaTableError> {
         let operations = std::mem::take(&mut self.operations);
         let object_store = log_store.object_store(Some(operation_id));
-        let ffo = file_format_options.clone();
+        let ffo = snapshot
+            .load_config().file_format_options.clone();
 
         let stream = match operations {
             OptimizeOperations::Compact(bins) => futures::stream::iter(bins)
