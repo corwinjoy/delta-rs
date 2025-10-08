@@ -54,6 +54,11 @@ pub struct DeltaTableConfig {
 
     #[serde(skip_serializing, skip_deserializing)]
     #[delta(skip)]
+    /// Options to apply when operating on the table files
+    file_format_options: Option<FileFormatRef>,
+
+    #[serde(skip_serializing, skip_deserializing)]
+    #[delta(skip)]
     /// When a runtime handler is provided, all IO tasks are spawn in that handle
     pub io_runtime: Option<IORuntime>,
 }
@@ -64,6 +69,7 @@ impl Default for DeltaTableConfig {
             require_files: true,
             log_buffer_size: num_cpus::get() * 4,
             log_batch_size: 1024,
+            file_format_options: None,
             io_runtime: None,
         }
     }
