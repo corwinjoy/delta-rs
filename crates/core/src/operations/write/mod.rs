@@ -756,7 +756,6 @@ impl std::future::IntoFuture for WriteBuilder {
             Ok(DeltaTable::new_with_state(
                 this.log_store,
                 commit.snapshot,
-                this.file_format_options,
             ))
         })
     }
@@ -1565,7 +1564,7 @@ mod tests {
         assert!(table.is_err());
 
         // Verify that table state hasn't changed
-        let table = DeltaTable::new_with_state(table_logstore, table_state, None);
+        let table = DeltaTable::new_with_state(table_logstore, table_state);
         assert_eq!(table.get_latest_version().await.unwrap(), 0);
     }
 

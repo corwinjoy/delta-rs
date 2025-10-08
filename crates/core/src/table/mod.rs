@@ -136,13 +136,12 @@ impl DeltaTable {
     pub(crate) fn new_with_state(
         log_store: LogStoreRef,
         state: DeltaTableState,
-        file_format_options: Option<FileFormatRef>,
     ) -> Self {
         Self {
             state: Some(state),
             log_store,
             config: Default::default(),
-            file_format_options,
+            file_format_options: None,
         }
     }
 

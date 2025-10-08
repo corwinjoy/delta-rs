@@ -482,7 +482,6 @@ impl std::future::IntoFuture for DeleteBuilder {
                     DeltaTableState {
                         snapshot: new_snapshot,
                     },
-                    this.file_format_options,
                 ),
                 metrics,
             ))

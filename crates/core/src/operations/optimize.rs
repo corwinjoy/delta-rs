@@ -398,7 +398,6 @@ impl<'a> std::future::IntoFuture for OptimizeBuilder<'a> {
             let mut table = DeltaTable::new_with_state(
                 this.log_store,
                 DeltaTableState::new(this.snapshot),
-                this.file_format_options,
             );
             table.update().await?;
             Ok((table, metrics))
@@ -790,7 +789,6 @@ impl MergePlan {
         let mut table = DeltaTable::new_with_state(
             log_store.clone(),
             DeltaTableState::new(snapshot.clone()),
-            file_format_options.clone(),
         );
 
         // Actions buffered so far. These will be flushed either at the end

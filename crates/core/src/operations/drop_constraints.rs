@@ -114,7 +114,6 @@ impl std::future::IntoFuture for DropConstraintBuilder {
                     DeltaTableState {
                         snapshot: this.snapshot,
                     },
-                    this.file_format_options,
                 ));
             }
 
@@ -135,7 +134,6 @@ impl std::future::IntoFuture for DropConstraintBuilder {
             Ok(DeltaTable::new_with_state(
                 this.log_store,
                 commit.snapshot(),
-                this.file_format_options.clone(),
             ))
         })
     }

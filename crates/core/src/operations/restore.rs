@@ -367,7 +367,6 @@ impl std::future::IntoFuture for RestoreBuilder {
                 DeltaTableState {
                     snapshot: this.snapshot,
                 },
-                None,
             );
             table.update().await?;
             Ok((table, metrics))

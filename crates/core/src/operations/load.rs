@@ -76,7 +76,6 @@ impl std::future::IntoFuture for LoadBuilder {
                 DeltaTableState {
                     snapshot: this.snapshot,
                 },
-                this.file_format_options.clone(),
             );
             let schema = table.snapshot()?.arrow_schema()?;
             let projection = this
