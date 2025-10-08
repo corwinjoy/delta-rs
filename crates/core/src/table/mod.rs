@@ -119,13 +119,12 @@ impl DeltaTable {
     pub fn new(
         log_store: LogStoreRef,
         config: DeltaTableConfig,
-        file_format_options: Option<FileFormatRef>,
     ) -> Self {
         Self {
             state: None,
             log_store,
             config,
-            file_format_options,
+            file_format_options: None,
         }
     }
 

@@ -330,7 +330,6 @@ impl DeltaTableBuilder {
         Ok(DeltaTable::new(
             self.build_storage()?,
             self.table_config,
-            self.file_format_options,
         ))
     }
 

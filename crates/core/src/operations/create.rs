@@ -273,7 +273,6 @@ impl CreateBuilder {
                 DeltaTable::new(
                     log_store,
                     Default::default(),
-                    self.file_format_options.clone(),
                 ),
             )
         } else {

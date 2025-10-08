@@ -172,7 +172,7 @@ async fn execute(
     {
         return Err(DeltaTableError::from(RestoreError::InvalidRestoreParameter));
     }
-    let mut table = DeltaTable::new(log_store.clone(), DeltaTableConfig::default(), None);
+    let mut table = DeltaTable::new(log_store.clone(), DeltaTableConfig::default());
 
     let version = match datetime_to_restore {
         Some(datetime) => {
