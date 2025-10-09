@@ -106,6 +106,7 @@ pub struct DeltaTableBuilder {
     table_config: DeltaTableConfig,
 }
 
+
 impl DeltaTableBuilder {
     /// Creates `DeltaTableBuilder` from table URL
     ///
@@ -184,6 +185,11 @@ impl DeltaTableBuilder {
         })
     }
 
+    /// Sets the overall table configuration
+    pub fn with_table_config(mut self, table_config: DeltaTableConfig) -> Self {
+        self.table_config = table_config;
+        self
+    }
     /// Sets `require_files=false` to the builder
     pub fn without_files(mut self) -> Self {
         self.table_config.require_files = false;

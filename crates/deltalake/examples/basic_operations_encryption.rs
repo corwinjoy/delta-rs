@@ -103,6 +103,8 @@ async fn create_table(
     fs::create_dir(uri)?;
     let ops = ops_with_crypto(uri, file_format_options).await?;
 
+    // println!("Initial ops config: {:?}", ops.0.config);
+
     // The operations module uses a builder pattern that allows specifying several options
     // on how the command behaves. The builders implement `Into<Future>`, so once
     // options are set you can run the command using `.await`.
@@ -115,15 +117,19 @@ async fn create_table(
 
     assert_eq!(table.version(), Some(0));
 
+    // println!("Version 0 table config: {:?}", table.config);
+
     let batch = get_table_batches();
     let table = DeltaOps(table).write(vec![batch.clone()]).await?;
 
     assert_eq!(table.version(), Some(1));
+    // println!("\n\nVersion 1 table config: {:?}", table.config);
 
     // Append records to the table
     let table = DeltaOps(table).write(vec![batch.clone()]).await?;
 
     assert_eq!(table.version(), Some(2));
+    // println!("\n\nVersion 2 table config: {:?}", table.config);
 
     Ok(table)
 }
@@ -315,8 +321,9 @@ fn kms_crypto_format() -> Result<FileFormatRef, DeltaTableError> {
 async fn round_trip_test(
     file_format_options: FileFormatRef,
 ) -> Result<(), deltalake::errors::DeltaTableError> {
-    let temp_dir = TempDir::new()?;
-    let uri = temp_dir.path().to_str().unwrap();
+    // let temp_dir = TempDir::new()?;
+    let uri_str = String::from("/home/cjoy/src/delta-rs/tmp");
+    let uri = uri_str.as_str();
 
     let table_name = "roundtrip";
 
