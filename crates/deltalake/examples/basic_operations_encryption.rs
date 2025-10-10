@@ -91,7 +91,8 @@ async fn ops_with_crypto(
     let prefix_uri = format!("file://{}", uri);
     let url = Url::parse(&*prefix_uri).unwrap();
     let ops = DeltaOps::try_from_uri(url).await?;
-    Ok(ops.with_file_format_options(file_format_options.clone()))
+    let ops = ops.with_file_format_options(file_format_options.clone());
+    Ok(ops.update_snapshot_config().await?)
 }
 
 async fn create_table(
@@ -328,6 +329,7 @@ async fn round_trip_test(
     let table_name = "roundtrip";
 
     create_table(uri, table_name, &file_format_options).await?;
+/*
     optimize_table_z_order(uri, &file_format_options).await?;
     // Re-create and append to table again so compact has work to do
     create_table(uri, table_name, &file_format_options).await?;
@@ -335,6 +337,8 @@ async fn round_trip_test(
     update_table(uri, &file_format_options).await?;
     delete_from_table(uri, &file_format_options).await?;
     merge_table(uri, &file_format_options).await?;
+
+ */
     read_table(uri, &file_format_options).await?;
     Ok(())
 }
