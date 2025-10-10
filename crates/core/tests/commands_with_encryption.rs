@@ -310,6 +310,37 @@ fn kms_crypto_format() -> Result<FileFormatRef, DeltaTableError> {
     Ok(file_format_options)
 }
 
+// Macro to generate the common encryption test matrix for a given runner function
+macro_rules! encryption_tests {
+    ($runner:ident, $plain:ident, $plain_no_decryptor:ident, $kms:ident, $kms_no_decryptor:ident) => {
+        #[tokio::test]
+        async fn $plain() {
+            let file_format_options = plain_crypto_format().unwrap();
+            $runner(file_format_options, true).await;
+        }
+
+        #[tokio::test]
+        #[should_panic(expected = "Failed to read encrypted table")]
+        async fn $plain_no_decryptor() {
+            let file_format_options = plain_crypto_format().unwrap();
+            $runner(file_format_options, false).await;
+        }
+
+        #[tokio::test]
+        async fn $kms() {
+            let file_format_options = kms_crypto_format().unwrap();
+            $runner(file_format_options, true).await;
+        }
+
+        #[tokio::test]
+        #[should_panic(expected = "Failed to read encrypted table")]
+        async fn $kms_no_decryptor() {
+            let file_format_options = kms_crypto_format().unwrap();
+            $runner(file_format_options, false).await;
+        }
+    };
+}
+
 fn full_table_data() -> Vec<&'static str> {
     vec![
         "+-----+--------+----------------------------+",
@@ -429,31 +460,13 @@ async fn test_optimize(file_format_options: FileFormatRef, decrypt_final_read: b
     .await;
 }
 
-#[tokio::test]
-async fn test_optimize_plain_crypto() {
-    let file_format_options = plain_crypto_format().unwrap();
-    test_optimize(file_format_options, true).await;
-}
-
-#[tokio::test]
-#[should_panic(expected = "Failed to read encrypted table")]
-async fn test_optimize_plain_crypto_no_decryptor() {
-    let file_format_options = plain_crypto_format().unwrap();
-    test_optimize(file_format_options, false).await;
-}
-
-#[tokio::test]
-async fn test_optimize_kms() {
-    let file_format_options = kms_crypto_format().unwrap();
-    test_optimize(file_format_options, true).await;
-}
-
-#[tokio::test]
-#[should_panic(expected = "Failed to read encrypted table")]
-async fn test_optimize_kms_no_decryptor() {
-    let file_format_options = kms_crypto_format().unwrap();
-    test_optimize(file_format_options, false).await;
-}
+encryption_tests!(
+    test_optimize,
+    test_optimize_plain_crypto,
+    test_optimize_plain_crypto_no_decryptor,
+    test_optimize_kms,
+    test_optimize_kms_no_decryptor
+);
 
 async fn test_update(file_format_options: FileFormatRef, decrypt_final_read: bool) {
     let base = full_table_data();
@@ -471,31 +484,13 @@ async fn test_update(file_format_options: FileFormatRef, decrypt_final_read: boo
     .await;
 }
 
-#[tokio::test]
-async fn test_update_plain_crypto() {
-    let file_format_options = plain_crypto_format().unwrap();
-    test_update(file_format_options, true).await;
-}
-
-#[tokio::test]
-#[should_panic(expected = "Failed to read encrypted table")]
-async fn test_update_plain_crypto_no_decryptor() {
-    let file_format_options = plain_crypto_format().unwrap();
-    test_update(file_format_options, false).await;
-}
-
-#[tokio::test]
-async fn test_update_kms() {
-    let file_format_options = kms_crypto_format().unwrap();
-    test_update(file_format_options, true).await;
-}
-
-#[tokio::test]
-#[should_panic(expected = "Failed to read encrypted table")]
-async fn test_update_kms_no_decryptor() {
-    let file_format_options = kms_crypto_format().unwrap();
-    test_update(file_format_options, false).await;
-}
+encryption_tests!(
+    test_update,
+    test_update_plain_crypto,
+    test_update_plain_crypto_no_decryptor,
+    test_update_kms,
+    test_update_kms_no_decryptor
+);
 
 async fn test_delete(file_format_options: FileFormatRef, decrypt_final_read: bool) {
     let base = full_table_data();
@@ -514,32 +509,13 @@ async fn test_delete(file_format_options: FileFormatRef, decrypt_final_read: boo
     .await;
 }
 
-#[tokio::test]
-async fn test_delete_plain_crypto() {
-    let file_format_options = plain_crypto_format().unwrap();
-    test_delete(file_format_options, true).await;
-}
-
-#[tokio::test]
-#[should_panic(expected = "Failed to read encrypted table")]
-async fn test_delete_plain_crypto_no_decryptor() {
-    let file_format_options = plain_crypto_format().unwrap();
-    test_delete(file_format_options, false).await;
-}
-
-
-#[tokio::test]
-async fn test_delete_kms() {
-    let file_format_options = kms_crypto_format().unwrap();
-    test_delete(file_format_options, true).await;
-}
-
-#[tokio::test]
-#[should_panic(expected = "Failed to read encrypted table")]
-async fn test_delete_kms_no_decryptor() {
-    let file_format_options = kms_crypto_format().unwrap();
-    test_delete(file_format_options, false).await;
-}
+encryption_tests!(
+    test_delete,
+    test_delete_plain_crypto,
+    test_delete_plain_crypto_no_decryptor,
+    test_delete_kms,
+    test_delete_kms_no_decryptor
+);
 
 async fn test_merge(file_format_options: FileFormatRef, decrypt_final_read: bool) {
     let expected_str = vec![
@@ -560,28 +536,10 @@ async fn test_merge(file_format_options: FileFormatRef, decrypt_final_read: bool
     .await;
 }
 
-#[tokio::test]
-async fn test_merge_plain_crypto() {
-    let file_format_options = plain_crypto_format().unwrap();
-    test_merge(file_format_options, true).await;
-}
-
-#[tokio::test]
-#[should_panic(expected = "Failed to read encrypted table")]
-async fn test_merge_plain_crypto_no_decryptor() {
-    let file_format_options = plain_crypto_format().unwrap();
-    test_merge(file_format_options, false).await;
-}
-
-#[tokio::test]
-async fn test_merge_kms() {
-    let file_format_options = kms_crypto_format().unwrap();
-    test_merge(file_format_options, true).await;
-}
-
-#[tokio::test]
-#[should_panic(expected = "Failed to read encrypted table")]
-async fn test_merge_kms_no_decryptor() {
-    let file_format_options = kms_crypto_format().unwrap();
-    test_merge(file_format_options, false).await;
-}
+encryption_tests!(
+    test_merge,
+    test_merge_plain_crypto,
+    test_merge_plain_crypto_no_decryptor,
+    test_merge_kms,
+    test_merge_kms_no_decryptor
+);
