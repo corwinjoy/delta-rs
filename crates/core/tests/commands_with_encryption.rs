@@ -310,36 +310,6 @@ fn kms_crypto_format() -> Result<FileFormatRef, DeltaTableError> {
     Ok(file_format_options)
 }
 
-// Macro to generate the common encryption test matrix for a given runner function
-macro_rules! encryption_tests {
-    ($runner:ident, $plain:ident, $plain_no_decryptor:ident, $kms:ident, $kms_no_decryptor:ident) => {
-        #[tokio::test]
-        async fn $plain() {
-            let file_format_options = plain_crypto_format().unwrap();
-            $runner(file_format_options, true).await;
-        }
-
-        #[tokio::test]
-        #[should_panic(expected = "Failed to read encrypted table")]
-        async fn $plain_no_decryptor() {
-            let file_format_options = plain_crypto_format().unwrap();
-            $runner(file_format_options, false).await;
-        }
-
-        #[tokio::test]
-        async fn $kms() {
-            let file_format_options = kms_crypto_format().unwrap();
-            $runner(file_format_options, true).await;
-        }
-
-        #[tokio::test]
-        #[should_panic(expected = "Failed to read encrypted table")]
-        async fn $kms_no_decryptor() {
-            let file_format_options = kms_crypto_format().unwrap();
-            $runner(file_format_options, false).await;
-        }
-    };
-}
 
 fn full_table_data() -> Vec<&'static str> {
     vec![
@@ -413,6 +383,37 @@ async fn test_create_and_read(file_format_options: FileFormatRef, decrypt_final_
         decrypt_final_read,
     )
     .await;
+}
+
+// Macro to generate the common encryption test matrix for a given runner function
+macro_rules! encryption_tests {
+    ($runner:ident, $plain:ident, $plain_no_decryptor:ident, $kms:ident, $kms_no_decryptor:ident) => {
+        #[tokio::test]
+        async fn $plain() {
+            let file_format_options = plain_crypto_format().unwrap();
+            $runner(file_format_options, true).await;
+        }
+
+        #[tokio::test]
+        #[should_panic(expected = "Failed to read encrypted table")]
+        async fn $plain_no_decryptor() {
+            let file_format_options = plain_crypto_format().unwrap();
+            $runner(file_format_options, false).await;
+        }
+
+        #[tokio::test]
+        async fn $kms() {
+            let file_format_options = kms_crypto_format().unwrap();
+            $runner(file_format_options, true).await;
+        }
+
+        #[tokio::test]
+        #[should_panic(expected = "Failed to read encrypted table")]
+        async fn $kms_no_decryptor() {
+            let file_format_options = kms_crypto_format().unwrap();
+            $runner(file_format_options, false).await;
+        }
+    };
 }
 
 encryption_tests!(
