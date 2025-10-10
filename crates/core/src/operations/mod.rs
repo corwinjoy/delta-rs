@@ -192,8 +192,8 @@ impl DeltaOps {
         self
     }
 
-    // Update in-memory snapshot config from table config
-    pub async fn update_snapshot_config(mut self) -> DeltaResult<Self> {
+    // Update the in-memory state and snapshot config to match the top level table config
+    pub async fn update_state_config(mut self) -> DeltaResult<Self> {
         if self.0.state.is_some() {
             self.0.state = Some(DeltaTableState::try_new(&self.0.log_store, self.0.config.clone(), Some(self.0.state.unwrap().version())).await?);
         }

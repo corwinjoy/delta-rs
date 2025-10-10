@@ -89,8 +89,10 @@ async fn ops_with_crypto(
     let prefix_uri = format!("file://{}", uri);
     let url = Url::parse(&*prefix_uri).unwrap();
     let ops = DeltaOps::try_from_uri(url).await?;
-    Ok(ops.with_file_format_options(file_format_options.clone()))
+    let ops = ops.with_file_format_options(file_format_options.clone());
+    Ok(ops.update_state_config().await?)
 }
+
 
 async fn create_table(
     uri: &str,
