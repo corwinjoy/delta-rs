@@ -415,11 +415,14 @@ async fn test_create_and_read(file_format_options: FileFormatRef, decrypt_final_
     .await;
 }
 
-#[tokio::test]
-async fn test_create_and_read_plain_crypto() {
-    let file_format_options = plain_crypto_format().unwrap();
-    test_create_and_read(file_format_options, true).await;
-}
+encryption_tests!(
+    test_create_and_read,
+    test_create_and_read_plain_crypto,
+    test_create_and_read_plain_crypto_no_decryptor,
+    test_create_and_read_kms,
+    test_create_and_read_kms_no_decryptor
+);
+
 
 #[tokio::test]
 #[should_panic(expected = "Failed to read encrypted table")]
@@ -428,18 +431,6 @@ async fn test_create_and_read_bad_crypto() {
     test_create_and_read(file_format_options, true).await;
 }
 
-#[tokio::test]
-async fn test_create_and_read_kms() {
-    let file_format_options = kms_crypto_format().unwrap();
-    test_create_and_read(file_format_options, true).await;
-}
-
-#[tokio::test]
-#[should_panic(expected = "Failed to read encrypted table")]
-async fn test_create_and_read_kms_no_decryptor() {
-    let file_format_options = kms_crypto_format().unwrap();
-    test_create_and_read(file_format_options, false).await;
-}
 
 async fn test_optimize(file_format_options: FileFormatRef, decrypt_final_read: bool) {
     // Use the shared modify test template; perform optimization steps inside the modifier
