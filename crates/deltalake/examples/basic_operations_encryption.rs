@@ -91,7 +91,8 @@ async fn ops_with_crypto(
     let prefix_uri = format!("file://{}", uri);
     let url = Url::parse(&*prefix_uri).unwrap();
     let ops = DeltaOps::try_from_uri(url).await?;
-    Ok(ops.with_file_format_options(file_format_options.clone()))
+    let ops = ops.with_file_format_options(file_format_options.clone());
+    Ok(ops.update_state_config().await?)
 }
 
 async fn create_table(
@@ -102,6 +103,8 @@ async fn create_table(
     fs::remove_dir_all(uri)?;
     fs::create_dir(uri)?;
     let ops = ops_with_crypto(uri, file_format_options).await?;
+
+    // println!("Initial ops config: {:?}", ops.0.config);
 
     // The operations module uses a builder pattern that allows specifying several options
     // on how the command behaves. The builders implement `Into<Future>`, so once
@@ -115,15 +118,19 @@ async fn create_table(
 
     assert_eq!(table.version(), Some(0));
 
+    // println!("Version 0 table config: {:?}", table.config);
+
     let batch = get_table_batches();
     let table = DeltaOps(table).write(vec![batch.clone()]).await?;
 
     assert_eq!(table.version(), Some(1));
+    // println!("\n\nVersion 1 table config: {:?}", table.config);
 
     // Append records to the table
     let table = DeltaOps(table).write(vec![batch.clone()]).await?;
 
     assert_eq!(table.version(), Some(2));
+    // println!("\n\nVersion 2 table config: {:?}", table.config);
 
     Ok(table)
 }
