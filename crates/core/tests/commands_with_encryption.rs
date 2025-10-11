@@ -25,10 +25,10 @@ use parquet_key_management::{
     kms::KmsConnectionConfig,
     test_kms::TestKmsClientFactory,
 };
+use paste::paste;
 use std::{fs, sync::Arc};
 use tempfile::TempDir;
 use url::Url;
-use paste::paste;
 
 fn get_table_columns() -> Vec<StructField> {
     vec![
@@ -83,9 +83,7 @@ fn get_table_batches() -> RecordBatch {
 }
 
 // Create a DeltaOps instance with the specified file_format_options to apply crypto settings.
-async fn ops_from_uri(
-    uri: &str
-) -> Result<DeltaOps, DeltaTableError> {
+async fn ops_from_uri(uri: &str) -> Result<DeltaOps, DeltaTableError> {
     let prefix_uri = format!("file://{}", uri);
     let url = Url::parse(&*prefix_uri).unwrap();
     let ops = DeltaOps::try_from_uri(url).await?;
@@ -101,7 +99,6 @@ async fn ops_with_crypto(
     let ops = ops.with_file_format_options(file_format_options.clone());
     Ok(ops.update_state_config().await?)
 }
-
 
 async fn create_table(
     uri: &str,
@@ -259,11 +256,15 @@ async fn optimize_table_compact(
 }
 
 // Create a direct encryption / decryption configuration using EncryptionProperties and the provided keys
-fn create_plain_crypto_format(encrypt_key: Vec<u8>, decrypt_key: Vec<u8>) -> Result<FileFormatRef, DeltaTableError> {
-    let crypt = parquet::encryption::encrypt::FileEncryptionProperties::builder(encrypt_key.clone())
-        .with_column_key("int", encrypt_key.clone())
-        .with_column_key("string", encrypt_key.clone())
-        .build()?;
+fn create_plain_crypto_format(
+    encrypt_key: Vec<u8>,
+    decrypt_key: Vec<u8>,
+) -> Result<FileFormatRef, DeltaTableError> {
+    let crypt =
+        parquet::encryption::encrypt::FileEncryptionProperties::builder(encrypt_key.clone())
+            .with_column_key("int", encrypt_key.clone())
+            .with_column_key("string", encrypt_key.clone())
+            .build()?;
 
     let decrypt = FileDecryptionProperties::builder(decrypt_key.clone())
         .with_column_key("int", decrypt_key.clone())
@@ -310,7 +311,6 @@ fn kms_crypto_format() -> Result<FileFormatRef, DeltaTableError> {
         Arc::new(KmsFileFormatOptions::new(table_encryption.clone())) as FileFormatRef;
     Ok(file_format_options)
 }
-
 
 fn full_table_data() -> Vec<&'static str> {
     vec![
@@ -366,8 +366,7 @@ async fn run_modify_test(
     modifier(uri, &file_format_options)
         .await
         .expect("Failed to modify encrypted table");
-    let data =
-        read_table(uri, &file_format_options, decrypt_final_read)
+    let data = read_table(uri, &file_format_options, decrypt_final_read)
         .await
         .expect("Failed to read encrypted table");
     let expected_refs: Vec<&str> = expected.iter().map(AsRef::as_ref).collect();
@@ -421,14 +420,12 @@ macro_rules! encryption_tests {
 
 encryption_tests!(test_create_and_read);
 
-
 #[tokio::test]
 #[should_panic(expected = "Failed to read encrypted table")]
 async fn test_create_and_read_bad_crypto() {
     let file_format_options = plain_crypto_format_bad_decryptor().unwrap();
     test_create_and_read(file_format_options, true).await;
 }
-
 
 async fn test_optimize(file_format_options: FileFormatRef, decrypt_final_read: bool) {
     // Use the shared modify test template; perform optimization steps inside the modifier
@@ -444,7 +441,7 @@ async fn test_optimize(file_format_options: FileFormatRef, decrypt_final_read: b
         file_format_options,
         |uri, opts| Box::pin(optimize_table_compact(uri, opts)),
         expected,
-        decrypt_final_read
+        decrypt_final_read,
     )
     .await;
 }

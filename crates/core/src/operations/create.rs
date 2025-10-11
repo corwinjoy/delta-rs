@@ -20,7 +20,6 @@ use crate::logstore::LogStoreRef;
 use crate::protocol::{DeltaOperation, SaveMode};
 use crate::table::builder::ensure_table_uri;
 use crate::table::config::TableProperty;
-use crate::table::file_format_options::FileFormatRef;
 use crate::{DeltaTable, DeltaTableBuilder, DeltaTableConfig};
 
 #[derive(thiserror::Error, Debug)]

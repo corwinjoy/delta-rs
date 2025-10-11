@@ -322,14 +322,12 @@ fn kms_crypto_format() -> Result<FileFormatRef, DeltaTableError> {
 async fn round_trip_test(
     file_format_options: FileFormatRef,
 ) -> Result<(), deltalake::errors::DeltaTableError> {
-    // let temp_dir = TempDir::new()?;
-    let uri_str = String::from("/home/cjoy/src/delta-rs/tmp");
-    let uri = uri_str.as_str();
+    let temp_dir = TempDir::new()?;
+    let uri = temp_dir.path().to_str().unwrap();
 
     let table_name = "roundtrip";
 
     create_table(uri, table_name, &file_format_options).await?;
-
     optimize_table_z_order(uri, &file_format_options).await?;
     // Re-create and append to table again so compact has work to do
     create_table(uri, table_name, &file_format_options).await?;
@@ -337,7 +335,6 @@ async fn round_trip_test(
     update_table(uri, &file_format_options).await?;
     delete_from_table(uri, &file_format_options).await?;
     merge_table(uri, &file_format_options).await?;
-
     read_table(uri, &file_format_options).await?;
     Ok(())
 }

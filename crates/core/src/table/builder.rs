@@ -106,7 +106,6 @@ pub struct DeltaTableBuilder {
     table_config: DeltaTableConfig,
 }
 
-
 impl DeltaTableBuilder {
     /// Creates `DeltaTableBuilder` from table URL
     ///

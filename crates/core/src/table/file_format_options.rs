@@ -97,16 +97,16 @@ pub fn state_with_file_format_options(
 fn build_writer_properties_tpo(
     table_parquet_options: &Option<TableParquetOptions>,
 ) -> Option<WriterProperties> {
-    use datafusion::common::file_options::parquet_writer::ParquetWriterOptions;
     table_parquet_options.as_ref().map(|tpo| {
         let mut tpo = tpo.clone();
         tpo.global.skip_arrow_metadata = true;
-        let mut wp_build = WriterPropertiesBuilder::try_from(&tpo).expect("Failed to convert TableParquetOptions to ParquetWriterOptions");
+        let mut wp_build = WriterPropertiesBuilder::try_from(&tpo)
+            .expect("Failed to convert TableParquetOptions to ParquetWriterOptions");
         if tpo.crypto.file_encryption.is_some() {
-            wp_build = wp_build.with_file_encryption_properties(tpo.crypto.file_encryption.unwrap().into());
+            wp_build = wp_build
+                .with_file_encryption_properties(tpo.crypto.file_encryption.unwrap().into());
         }
-        let wp = wp_build.build();
-        wp
+        wp_build.build()
     })
 }
 
