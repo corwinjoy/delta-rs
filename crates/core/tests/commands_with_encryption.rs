@@ -427,16 +427,9 @@ async fn test_create_and_read_bad_crypto() {
     test_create_and_read(file_format_options, true).await;
 }
 
-async fn test_optimize(file_format_options: FileFormatRef, decrypt_final_read: bool) {
+async fn test_optimize_compact(file_format_options: FileFormatRef, decrypt_final_read: bool) {
     // Use the shared modify test template; perform optimization steps inside the modifier
     let expected: Vec<String> = full_table_data().iter().map(|s| s.to_string()).collect();
-    run_modify_test(
-        file_format_options.clone(),
-        |uri, opts| Box::pin(optimize_table_z_order(uri, opts)),
-        expected.clone(),
-        decrypt_final_read,
-    )
-    .await;
     run_modify_test(
         file_format_options,
         |uri, opts| Box::pin(optimize_table_compact(uri, opts)),
@@ -446,7 +439,21 @@ async fn test_optimize(file_format_options: FileFormatRef, decrypt_final_read: b
     .await;
 }
 
-encryption_tests!(test_optimize);
+async fn test_optimize_z_order(file_format_options: FileFormatRef, decrypt_final_read: bool) {
+    // Use the shared modify test template; perform optimization steps inside the modifier
+    let expected: Vec<String> = full_table_data().iter().map(|s| s.to_string()).collect();
+    run_modify_test(
+        file_format_options.clone(),
+        |uri, opts| Box::pin(optimize_table_z_order(uri, opts)),
+        expected,
+        decrypt_final_read,
+    )
+    .await;
+}
+
+encryption_tests!(test_optimize_compact);
+
+encryption_tests!(test_optimize_z_order);
 
 async fn test_update(file_format_options: FileFormatRef, decrypt_final_read: bool) {
     let base = full_table_data();
