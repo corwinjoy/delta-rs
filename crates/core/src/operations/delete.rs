@@ -62,7 +62,7 @@ use crate::protocol::DeltaOperation;
 use crate::table::config::TablePropertiesExt as _;
 use crate::table::file_format_options::{
     build_writer_properties_factory_ffo, build_writer_properties_factory_wp,
-    state_with_file_format_options, WriterPropertiesFactory,
+    state_with_file_format_options, WriterPropertiesFactoryRef,
 };
 use crate::table::state::DeltaTableState;
 use crate::{DeltaTable, DeltaTableError};
@@ -82,7 +82,7 @@ pub struct DeleteBuilder {
     /// Datafusion session state relevant for executing the input plan
     state: Option<SessionState>,
     /// Properties passed to underlying parquet writer for when files are rewritten
-    writer_properties_factory: Option<Arc<dyn WriterPropertiesFactory>>,
+    writer_properties_factory: Option<WriterPropertiesFactoryRef>,
     /// Commit properties and configuration
     commit_properties: CommitProperties,
     custom_execute_handler: Option<Arc<dyn CustomExecuteHandler>>,
@@ -203,7 +203,7 @@ async fn execute_non_empty_expr(
     expression: &Expr,
     rewrite: &[Add],
     metrics: &mut DeleteMetrics,
-    writer_properties_factory: Option<Arc<dyn WriterPropertiesFactory>>,
+    writer_properties_factory: Option<WriterPropertiesFactoryRef>,
     partition_scan: bool,
     operation_id: Uuid,
 ) -> DeltaResult<Vec<Action>> {
@@ -324,7 +324,7 @@ async fn execute(
     log_store: LogStoreRef,
     snapshot: EagerSnapshot,
     state: SessionState,
-    writer_properties_factory: Option<Arc<dyn WriterPropertiesFactory>>,
+    writer_properties_factory: Option<WriterPropertiesFactoryRef>,
     mut commit_properties: CommitProperties,
     operation_id: Uuid,
     handle: Option<&Arc<dyn CustomExecuteHandler>>,

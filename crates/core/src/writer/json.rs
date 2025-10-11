@@ -28,7 +28,7 @@ use crate::logstore::ObjectStoreRetryExt;
 use crate::table::builder::{ensure_table_uri, DeltaTableBuilder};
 use crate::table::config::TablePropertiesExt as _;
 use crate::table::file_format_options::{
-    build_writer_properties_factory_or_default_ffo, WriterPropertiesFactory,
+    build_writer_properties_factory_or_default_ffo, WriterPropertiesFactoryRef,
 };
 use crate::writer::utils::ShareableBuffer;
 use crate::DeltaTable;
@@ -41,7 +41,7 @@ pub struct JsonWriter {
     table: DeltaTable,
     /// Optional schema to use, otherwise try to rely on the schema from the [DeltaTable]
     schema_ref: Option<ArrowSchemaRef>,
-    writer_properties_factory: Arc<dyn WriterPropertiesFactory>,
+    writer_properties_factory: WriterPropertiesFactoryRef,
     partition_columns: Vec<String>,
     arrow_writers: HashMap<String, DataArrowWriter>,
 }
