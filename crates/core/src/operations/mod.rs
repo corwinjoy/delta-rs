@@ -273,8 +273,6 @@ impl DeltaOps {
     #[cfg(feature = "datafusion")]
     #[must_use]
     pub fn write(self, batches: impl IntoIterator<Item = RecordBatch>) -> WriteBuilder {
-        // println!("\n\nDelta Ops write self.0.config.file_format_options: {:?}", self.0.config.file_format_options);
-        // println!("\n\nDelta Ops write self.0.state.file_format_options: {:?}", self.0.state.as_ref().unwrap().snapshot.load_config().file_format_options);
         WriteBuilder::new(self.0.log_store, self.0.state.map(|s| s.snapshot))
             .with_input_batches(batches)
     }

@@ -376,6 +376,7 @@ impl std::future::IntoFuture for RestoreBuilder {
 
 #[cfg(test)]
 mod tests {
+
     use crate::writer::test_utils::{create_bare_table, get_record_batch};
     use crate::{DeltaOps, DeltaResult};
 

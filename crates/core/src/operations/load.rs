@@ -86,11 +86,11 @@ impl std::future::IntoFuture for LoadBuilder {
                 .transpose()?;
 
             let ctx = SessionContext::new();
-            let state = ctx.state();
-
-            let scan_plan = table.scan(&state, projection.as_ref(), &[], None).await?;
+            let scan_plan = table
+                .scan(&ctx.state(), projection.as_ref(), &[], None)
+                .await?;
             let plan = CoalescePartitionsExec::new(scan_plan);
-            let task_ctx = Arc::new(TaskContext::from(&state));
+            let task_ctx = Arc::new(TaskContext::from(&ctx.state()));
             let stream = plan.execute(0, task_ctx)?;
 
             Ok((table, stream))

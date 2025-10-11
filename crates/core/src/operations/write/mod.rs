@@ -198,9 +198,7 @@ impl WriteBuilder {
         let ffo = snapshot
             .as_ref()
             .and_then(|s| s.load_config().file_format_options.clone());
-        // println!("\n\nWriteBuilder new file_format_options: {:?}", ffo);
         let writer_properties_factory = build_writer_properties_factory_ffo(ffo);
-        // println!("\n\nWriteBuilder new writer_properties_factory: {:?}", writer_properties_factory);
         Self {
             snapshot,
             log_store,
@@ -429,8 +427,6 @@ impl std::future::IntoFuture for WriteBuilder {
         let this = self;
 
         Box::pin(async move {
-            // println!("\n\nWriteBuilder into_future writer_properties_factory: {:?}", this.writer_properties_factory);
-
             // Runs pre execution handler.
             let operation_id = this.get_operation_id();
             this.pre_execute(operation_id).await?;
