@@ -83,13 +83,6 @@ impl PartialEq for DeltaTableConfig {
     }
 }
 
-impl DeltaTableConfig {
-    /// Returns the FileFormatOptions configured for this load, if any
-    pub fn file_format_options(&self) -> Option<FileFormatRef> {
-        self.file_format_options.clone()
-    }
-}
-
 /// builder for configuring a delta table load.
 #[derive(Debug)]
 pub struct DeltaTableBuilder {

@@ -75,7 +75,11 @@ impl RecordBatchWriter {
             .with_storage_options(storage_options.unwrap_or_default())
             .build()?;
         let writer_properties_factory = build_writer_properties_factory_or_default_ffo(
-            delta_table.snapshot()?.load_config().file_format_options(),
+            delta_table
+                .snapshot()?
+                .load_config()
+                .file_format_options
+                .clone(),
         );
 
         // if metadata fails to load, use an empty hashmap and default values for num_indexed_cols and stats_columns
@@ -117,7 +121,7 @@ impl RecordBatchWriter {
         let partition_columns = metadata.partition_columns().clone();
 
         let writer_properties_factory = build_writer_properties_factory_or_default_ffo(
-            table.snapshot()?.load_config().file_format_options(),
+            table.snapshot()?.load_config().file_format_options.clone(),
         );
 
         let configuration = table.snapshot()?.metadata().configuration().clone();

@@ -96,8 +96,10 @@ async fn ops_with_crypto(
     file_format_options: &FileFormatRef,
 ) -> Result<DeltaOps, DeltaTableError> {
     let ops = ops_from_uri(uri).await?;
-    let ops = ops.with_file_format_options(file_format_options.clone());
-    Ok(ops.update_state_config().await?)
+    let ops = ops
+        .with_file_format_options(file_format_options.clone())
+        .await?;
+    Ok(ops)
 }
 
 async fn create_table(

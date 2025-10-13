@@ -186,14 +186,14 @@ impl DeltaOps {
     }
 
     /// Set options for parquet files
-    pub fn with_file_format_options(mut self, file_format_options: FileFormatRef) -> Self {
+    pub async fn with_file_format_options(
+        mut self,
+        file_format_options: FileFormatRef,
+    ) -> DeltaResult<Self> {
         // Update table-level config so future loads/operations use these options
         self.0.config.file_format_options = Some(file_format_options);
-        self
-    }
 
-    // Update the in-memory state and snapshot config to match the top level table config
-    pub async fn update_state_config(mut self) -> DeltaResult<Self> {
+        // Update the in-memory state and snapshot config to match the top level table config
         if self.0.state.is_some() {
             self.0.state = Some(
                 DeltaTableState::try_new(

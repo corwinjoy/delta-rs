@@ -195,7 +195,7 @@ impl JsonWriter {
             .await?;
 
         let writer_properties_factory = build_writer_properties_factory_or_default_ffo(
-            table.snapshot()?.load_config().file_format_options(),
+            table.snapshot()?.load_config().file_format_options.clone(),
         );
 
         Ok(Self {
@@ -214,7 +214,7 @@ impl JsonWriter {
         let partition_columns = metadata.partition_columns().clone();
 
         let writer_properties_factory = build_writer_properties_factory_or_default_ffo(
-            table.snapshot()?.load_config().file_format_options(),
+            table.snapshot()?.load_config().file_format_options.clone(),
         );
 
         Ok(Self {
