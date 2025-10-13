@@ -119,7 +119,7 @@ impl super::Operation<()> for DeleteBuilder {
 impl DeleteBuilder {
     /// Create a new [`DeleteBuilder`]
     pub fn new(log_store: LogStoreRef, snapshot: EagerSnapshot) -> Self {
-        let file_format_options = snapshot.load_config().file_format_options.clone();
+        let file_format_options = &snapshot.load_config().file_format_options;
         let writer_properties_factory =
             build_writer_properties_factory_ffo(file_format_options.clone());
         Self {
