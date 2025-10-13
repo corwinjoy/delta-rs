@@ -645,7 +645,7 @@ impl std::future::IntoFuture for WriteBuilder {
 
                     match &predicate {
                         Some(pred) => {
-                            let ffo = snapshot.load_config().file_format_options.clone();
+                            let ffo = &snapshot.load_config().file_format_options;
                             let (predicate_actions, cdf_df) = prepare_predicate_actions(
                                 pred.clone(),
                                 this.log_store.clone(),
