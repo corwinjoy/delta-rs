@@ -446,7 +446,7 @@ impl std::future::IntoFuture for DeleteBuilder {
                 session.state()
             });
 
-            let file_format_options = this.snapshot.load_config().file_format_options.clone();
+            let file_format_options = &this.snapshot.load_config().file_format_options;
 
             let state = state_with_file_format_options(state, file_format_options.as_ref())?;
 
