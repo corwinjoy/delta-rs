@@ -1,10 +1,9 @@
-use std::sync::Arc;
-
 use datafusion::datasource::TableProvider;
 use datafusion::execution::context::{SessionContext, TaskContext};
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::{ExecutionPlan, SendableRecordBatchStream};
 use futures::future::BoxFuture;
+use std::sync::Arc;
 
 use super::CustomExecuteHandler;
 use crate::delta_datafusion::DataFusionMixins;
