@@ -46,6 +46,7 @@ pub mod drop_constraints;
 pub mod filesystem_check;
 pub mod generate;
 pub mod restore;
+pub mod clone;
 pub mod update_field_metadata;
 pub mod update_table_metadata;
 pub mod vacuum;
