@@ -10,7 +10,7 @@
 
 use futures::TryStreamExt;
 use object_store::path::Path;
-
+use url::Url;
 use crate::kernel::{Action, EagerSnapshot};
 use crate::kernel::transaction::{CommitBuilder, TransactionError};
 use crate::operations::create::CreateBuilder;
@@ -23,9 +23,9 @@ use crate::{DeltaResult, DeltaTable};
 ///
 /// Note: This clones the table metadata and references to the data files. It does
 /// not copy the underlying data files themselves.
-pub async fn clone(source_url: impl AsRef<str>, target_url: impl AsRef<str>) -> DeltaResult<DeltaTable> {
+pub async fn clone(source: Url, target: Url) -> DeltaResult<DeltaTable> {
     // 1) Load source table and get snapshot/metadata
-    let source_table = DeltaTableBuilder::from_uri(ensure_table_uri(source_url.as_ref())?)?
+    let source_table = DeltaTableBuilder::from_uri(source)?
             .load()
             .await?;
     let source_state = source_table.snapshot()?;
@@ -41,7 +41,7 @@ pub async fn clone(source_url: impl AsRef<str>, target_url: impl AsRef<str>) -> 
     // 2) Create target table with schema/partitions/config and source protocol
     //    (Use CreateBuilder to mirror CreateTable).
     let mut create = CreateBuilder::new()
-        .with_location(target_url.as_ref().to_string())
+        .with_location(target.as_ref().to_string())
         .with_columns(src_schema.fields().cloned())
         .with_partition_columns(partition_columns.clone())
         .with_configuration(configuration.iter().map(|(k, v)| (k.clone(), Some(v.clone()))));
