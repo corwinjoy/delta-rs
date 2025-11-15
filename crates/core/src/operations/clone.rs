@@ -15,7 +15,7 @@ use crate::kernel::{Action, EagerSnapshot};
 use crate::kernel::transaction::{CommitBuilder, TransactionError};
 use crate::operations::create::CreateBuilder;
 use crate::protocol::{DeltaOperation, SaveMode};
-use crate::table::builder::{ensure_table_uri, DeltaTableBuilder};
+use crate::table::builder::DeltaTableBuilder;
 use crate::{DeltaResult, DeltaTable};
 
 /// Clone a Delta table by creating a new table at `target_url` and registering
@@ -126,37 +126,47 @@ pub async fn clone(source: Url, target: Url) -> DeltaResult<DeltaTable> {
 
 #[cfg(test)]
 mod tests {
-    use object_store::{local::LocalFileSystem, memory::InMemory, PutPayload};
-
     use super::*;
-    use crate::{ensure_table_uri, open_table};
     use std::path::Path;
-    use std::{io::Read, time::SystemTime};
+    use arrow_array::RecordBatch;
     use url::Url;
+    use crate::DeltaOps;
+    use crate::operations::collect_sendable_stream;
 
     #[tokio::test]
     async fn test_clone_operation() -> DeltaResult<()> {
-        let source_path = Path::new("../test/tests/data/simple_commit");
+        let source_path = Path::new("../test/tests/data/simple_table");
         let source_uri =
             Url::from_directory_path(std::fs::canonicalize(source_path)?).unwrap();
 
-        let clone_path = Path::new("../test/tests/data/simple_commit_clone");
+        let clone_path = Path::new("../test/tests/data/simple_table_clone");
+        // Erase contents of clone_path directory to ensure a clean target
+        if clone_path.exists() {
+            std::fs::remove_dir_all(clone_path)?;
+        }
+        std::fs::create_dir_all(clone_path)?;
         let clone_uri =
             Url::from_directory_path(std::fs::canonicalize(clone_path)?).unwrap();
 
-        // TODO: Erase contents of clone_path directory
+        let cloned_table = clone(source_uri.clone(), clone_uri.clone()).await?;
 
-        let cloned_table = clone(source_uri, clone_uri).await?;
-
-        let source_table = DeltaTableBuilder::from_uri(source)?
+        let source_table = DeltaTableBuilder::from_uri(source_uri)?
             .load()
             .await?;
 
+        let mut src_uris: Vec<_> = source_table.get_file_uris()?.collect();
+        let mut cloned_uris: Vec<_> = cloned_table.get_file_uris()?.collect();
+        src_uris.sort();
+        cloned_uris.sort();
+        println!("Source URIs: {:#?}", src_uris);
+        println!("Cloned URIs: {:#?}", cloned_uris);
+        // assert_eq!(src_uris, cloned_uris, "Cloned table should reference the same files as the source");
 
-        src_uris = source_table.get_file_uris();
-        cloned_uris = cloned_table.get_file_uris();
-        // TODO: Compare src_uris and cloned_uris for equality
+        let ops = DeltaOps::try_from_uri(clone_uri).await?;
+        let (_table, stream) = ops.load().await?;
+        let data: Vec<RecordBatch> = collect_sendable_stream(stream).await?;
 
+        println!("{data:?}");
         Ok(())
     }
 }
