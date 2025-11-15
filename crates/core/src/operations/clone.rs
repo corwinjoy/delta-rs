@@ -8,15 +8,17 @@
 //! 4. Convert file paths to absolute URIs.
 //! 5. Add files to the target table using Add actions (mirrors WriteBuilder logic).
 
+use std::path::PathBuf;
 use futures::TryStreamExt;
 use object_store::path::Path;
 use url::Url;
-use crate::kernel::{Action, EagerSnapshot};
+use crate::kernel::{Action, Add, EagerSnapshot};
 use crate::kernel::transaction::{CommitBuilder, TransactionError};
 use crate::operations::create::CreateBuilder;
 use crate::protocol::{DeltaOperation, SaveMode};
 use crate::table::builder::DeltaTableBuilder;
 use crate::{DeltaResult, DeltaTable};
+use crate::logstore::LogStoreRef;
 
 /// Clone a Delta table by creating a new table at `target_url` and registering
 /// all data files from the source table at `source_url`.
@@ -69,14 +71,30 @@ pub async fn clone(source: Url, target: Url) -> DeltaResult<DeltaTable> {
     actions.push(Action::Metadata(src_metadata.clone()));
 
     // 4) Add files to target table using Add actions (mirrors WriteBuilder logic)
-    actions.extend(file_views.into_iter().map(|view| {
+    //    and, for local filesystems, create symlinks in the target table that point
+    //    to the source data files.
+    // Determine target table root path if it is a local filesystem URL.
+    let target_root_path = target_table
+        .log_store()
+        .config()
+        .location
+        .to_file_path()
+        .unwrap();
+
+    let source_root_path = source_log
+        .config()
+        .location
+        .to_file_path()
+        .unwrap();
+
+    for view in file_views.into_iter() {
         let mut add = view.add_action();
-        // Absolutize using the source log store root
-        // let abs_uri = source_log.to_uri(&Path::from(add.path.clone()));
-        // add.path = abs_uri;
-        add.data_change = true; // explicit, mirrors WriteBuilder
-        Action::Add(add)
-    }));
+        // Note: We keep the path in the Add action as-is (relative to table root)
+        // and set data_change explicitly to mirror WriteBuilder behavior.
+        add.data_change = true;
+        add_symlink(source_root_path.clone(), target_root_path.clone(), add.path.clone());
+        actions.push(Action::Add(add));
+    }
 
     // 5) Commit ADD operations to the target table
     // Use a Write operation metadata similar to WriteBuilder
@@ -124,6 +142,31 @@ pub async fn clone(source: Url, target: Url) -> DeltaResult<DeltaTable> {
     Ok(target_table)
 }
 
+fn add_symlink(source_root_path: PathBuf, target_root_path: PathBuf, add_filename: String) {
+    // Best-effort symlink creation: only when both source and target are local filesystems.
+    // Build absolute source file path from the source Add path using the source log store.
+    println!("add_filename {:?}", add_filename);
+    // Use only the file name for the link name.
+    let file_name = std::path::Path::new(&add_filename);
+    let src_path = source_root_path.join(file_name);
+    let link_path = target_root_path.join(file_name);
+    println!("src_path {:?}", src_path);
+    println!("link_path {:?}", link_path);
+    // Create the symlink if it doesn't already exist.
+    if !link_path.exists() {
+        // On Windows, use symlink_file; on Unix, use symlink.
+        #[cfg(target_family = "windows")]
+        {
+            use std::os::windows::fs::symlink_file;
+            let _ = symlink_file(&src_path, &link_path);
+        }
+        #[cfg(target_family = "unix")]
+        {
+            use std::os::unix::fs::symlink;
+            let _ = symlink(&src_path, &link_path);
+        }
+    }
+}
 
 #[cfg(all(test, feature = "datafusion"))]
 mod tests {
