@@ -5,12 +5,11 @@
 //! 1. Create a new table at the clone location (mirrors CreateTable logic).
 //! 2. Copy metadata from the source snapshot (mirrors AddColumnBuilder metadata handling).
 //! 3. List files represented by the source snapshot.
-//! 4. Convert file paths to absolute URIs.
+//! 4. Copy files to the target table location as symlinks.
 //! 5. Add files to the target table using Add actions (mirrors WriteBuilder logic).
 
 use std::path::PathBuf;
 use futures::TryStreamExt;
-use object_store::path::Path;
 use url::Url;
 use crate::kernel::{Action, Add, EagerSnapshot};
 use crate::kernel::transaction::{CommitBuilder, TransactionError};
@@ -18,7 +17,6 @@ use crate::operations::create::CreateBuilder;
 use crate::protocol::{DeltaOperation, SaveMode};
 use crate::table::builder::DeltaTableBuilder;
 use crate::{DeltaResult, DeltaTable};
-use crate::logstore::LogStoreRef;
 
 /// Clone a Delta table by creating a new table at `target_url` and registering
 /// all data files from the source table at `source_url`.
@@ -73,7 +71,7 @@ pub async fn clone(source: Url, target: Url) -> DeltaResult<DeltaTable> {
     // 4) Add files to target table using Add actions (mirrors WriteBuilder logic)
     //    and, for local filesystems, create symlinks in the target table that point
     //    to the source data files.
-    // Determine target table root path if it is a local filesystem URL.
+
     let target_root_path = target_table
         .log_store()
         .config()
@@ -89,8 +87,7 @@ pub async fn clone(source: Url, target: Url) -> DeltaResult<DeltaTable> {
 
     for view in file_views.into_iter() {
         let mut add = view.add_action();
-        // Note: We keep the path in the Add action as-is (relative to table root)
-        // and set data_change explicitly to mirror WriteBuilder behavior.
+        // For now, it seems we have to use relative paths only and have to create symlinks.
         add.data_change = true;
         add_symlink(source_root_path.clone(), target_root_path.clone(), add.path.clone());
         actions.push(Action::Add(add));
@@ -144,38 +141,32 @@ pub async fn clone(source: Url, target: Url) -> DeltaResult<DeltaTable> {
 
 fn add_symlink(source_root_path: PathBuf, target_root_path: PathBuf, add_filename: String) {
     // Best-effort symlink creation: only when both source and target are local filesystems.
-    // Build absolute source file path from the source Add path using the source log store.
-    println!("add_filename {:?}", add_filename);
-    // Use only the file name for the link name.
     let file_name = std::path::Path::new(&add_filename);
     let src_path = source_root_path.join(file_name);
     let link_path = target_root_path.join(file_name);
-    println!("src_path {:?}", src_path);
-    println!("link_path {:?}", link_path);
-    // Create the symlink if it doesn't already exist.
-    if !link_path.exists() {
-        // On Windows, use symlink_file; on Unix, use symlink.
-        #[cfg(target_family = "windows")]
-        {
-            use std::os::windows::fs::symlink_file;
-            let _ = symlink_file(&src_path, &link_path);
-        }
-        #[cfg(target_family = "unix")]
-        {
-            use std::os::unix::fs::symlink;
-            let _ = symlink(&src_path, &link_path);
-        }
+    // On Windows, use symlink_file; on Unix, use symlink.
+    #[cfg(target_family = "windows")]
+    {
+        use std::os::windows::fs::symlink_file;
+        let _ = symlink_file(&src_path, &link_path);
+    }
+    #[cfg(target_family = "unix")]
+    {
+        use std::os::unix::fs::symlink;
+        let _ = symlink(&src_path, &link_path);
     }
 }
 
 #[cfg(all(test, feature = "datafusion"))]
 mod tests {
-    use super::*;
+use super::*;
     use std::path::Path;
     use arrow::array::RecordBatch;
     use url::Url;
     use crate::DeltaOps;
     use crate::operations::collect_sendable_stream;
+    use datafusion::assert_batches_sorted_eq;
+    use datafusion::common::test_util::format_batches;
 
     #[tokio::test]
     async fn test_clone_operation() -> DeltaResult<()> {
@@ -194,7 +185,7 @@ mod tests {
 
         let cloned_table = clone(source_uri.clone(), clone_uri.clone()).await?;
 
-        let source_table = DeltaTableBuilder::from_uri(source_uri)?
+        let source_table = DeltaTableBuilder::from_uri(source_uri.clone())?
             .load()
             .await?;
 
@@ -217,11 +208,29 @@ mod tests {
         println!("Cloned files: {:#?}", cloned_files);
         assert_eq!(src_files, cloned_files, "Cloned table should reference the same files as the source");
 
-        let ops = DeltaOps::try_from_uri(clone_uri).await?;
-        let (_table, stream) = ops.load().await?;
-        let data: Vec<RecordBatch> = collect_sendable_stream(stream).await?;
+        let cloned_ops = DeltaOps::try_from_uri(clone_uri).await?;
+        let (_table, stream) = cloned_ops.load().await?;
+        let cloned_data: Vec<RecordBatch> = collect_sendable_stream(stream).await?;
 
-        println!("{data:?}");
+        // println!("{cloned_data:?}");
+
+        let pretty_cloned_data = format_batches(&*cloned_data)?.to_string();
+        println!();
+        println!("Cloned data:");
+        println!("{pretty_cloned_data}");
+
+        let src_ops = DeltaOps::try_from_uri(source_uri).await?;
+        let (_table, stream) = src_ops.load().await?;
+        let source_data: Vec<RecordBatch> = collect_sendable_stream(stream).await?;
+
+        let expected_lines = format_batches(&*source_data)?.to_string();
+        let expected_lines_vec: Vec<&str> = expected_lines.trim().lines().collect();
+
+        assert_batches_sorted_eq!(&expected_lines_vec, &cloned_data);
+
+        println!();
+        println!("Source data:");
+        println!("{expected_lines}");
         Ok(())
     }
 }
