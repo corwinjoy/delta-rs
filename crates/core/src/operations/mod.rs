@@ -40,6 +40,7 @@ use crate::DeltaTable;
 
 pub mod add_column;
 pub mod add_feature;
+pub mod clone;
 pub mod convert_to_delta;
 pub mod create;
 pub mod drop_constraints;
