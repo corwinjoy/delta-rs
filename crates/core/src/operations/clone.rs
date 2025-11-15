@@ -122,3 +122,41 @@ pub async fn clone(source: Url, target: Url) -> DeltaResult<DeltaTable> {
     target_table.update().await?;
     Ok(target_table)
 }
+
+
+#[cfg(test)]
+mod tests {
+    use object_store::{local::LocalFileSystem, memory::InMemory, PutPayload};
+
+    use super::*;
+    use crate::{ensure_table_uri, open_table};
+    use std::path::Path;
+    use std::{io::Read, time::SystemTime};
+    use url::Url;
+
+    #[tokio::test]
+    async fn test_clone_operation() -> DeltaResult<()> {
+        let source_path = Path::new("../test/tests/data/simple_commit");
+        let source_uri =
+            Url::from_directory_path(std::fs::canonicalize(source_path)?).unwrap();
+
+        let clone_path = Path::new("../test/tests/data/simple_commit_clone");
+        let clone_uri =
+            Url::from_directory_path(std::fs::canonicalize(clone_path)?).unwrap();
+
+        // TODO: Erase contents of clone_path directory
+
+        let cloned_table = clone(source_uri, clone_uri).await?;
+
+        let source_table = DeltaTableBuilder::from_uri(source)?
+            .load()
+            .await?;
+
+
+        src_uris = source_table.get_file_uris();
+        cloned_uris = cloned_table.get_file_uris();
+        // TODO: Compare src_uris and cloned_uris for equality
+
+        Ok(())
+    }
+}
