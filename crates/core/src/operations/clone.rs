@@ -198,13 +198,24 @@ mod tests {
             .load()
             .await?;
 
-        let mut src_uris: Vec<_> = source_table.get_file_uris()?.collect();
-        let mut cloned_uris: Vec<_> = cloned_table.get_file_uris()?.collect();
-        src_uris.sort();
-        cloned_uris.sort();
-        println!("Source URIs: {:#?}", src_uris);
-        println!("Cloned URIs: {:#?}", cloned_uris);
-        // assert_eq!(src_uris, cloned_uris, "Cloned table should reference the same files as the source");
+        let src_uris: Vec<_> = source_table.get_file_uris()?.collect();
+        let cloned_uris: Vec<_> = cloned_table.get_file_uris()?.collect();
+        
+        // Convert URIs to just file names for comparison
+        let mut src_files: Vec<String> = src_uris
+            .into_iter()
+            .filter_map(|url| Some(String::from(Path::new(&url).file_name()?.to_str()?)))
+            .collect();
+        let mut cloned_files: Vec<String> = cloned_uris
+            .into_iter()
+            .filter_map(|url| Some(String::from(Path::new(&url).file_name()?.to_str()?)))
+            .collect();
+
+        src_files.sort();
+        cloned_files.sort();
+        println!("Source files: {:#?}", src_files);
+        println!("Cloned files: {:#?}", cloned_files);
+        assert_eq!(src_files, cloned_files, "Cloned table should reference the same files as the source");
 
         let ops = DeltaOps::try_from_uri(clone_uri).await?;
         let (_table, stream) = ops.load().await?;
