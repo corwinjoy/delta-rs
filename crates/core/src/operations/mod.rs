@@ -40,13 +40,13 @@ use crate::DeltaTable;
 
 pub mod add_column;
 pub mod add_feature;
+pub mod clone;
 pub mod convert_to_delta;
 pub mod create;
 pub mod drop_constraints;
 pub mod filesystem_check;
 pub mod generate;
 pub mod restore;
-pub mod clone;
 pub mod update_field_metadata;
 pub mod update_table_metadata;
 pub mod vacuum;
