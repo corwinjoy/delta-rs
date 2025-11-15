@@ -20,7 +20,7 @@ pub async fn clone(source: Url, target: Url, version: Option<i64>) -> DeltaResul
     let src_state = src_table.snapshot()?;
     let src_snapshot: &EagerSnapshot = src_state.snapshot();
     let src_metadata = src_state.metadata().clone();
-    let src_schema = src_metadata.parse_schema().expect("valid source schema");
+    let src_schema = src_metadata.parse_schema()?;
     let partition_columns = src_metadata.partition_columns().to_vec();
     let configuration = src_metadata.configuration().clone();
     let src_protocol = src_state.protocol().clone();
