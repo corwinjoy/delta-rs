@@ -11,7 +11,11 @@ use crate::protocol::{DeltaOperation, SaveMode};
 use crate::table::builder::DeltaTableBuilder;
 use crate::{DeltaResult, DeltaTable, DeltaTableError};
 
-pub async fn shallow_clone(source: Url, target: Url, version: Option<i64>) -> DeltaResult<DeltaTable> {
+pub async fn shallow_clone(
+    source: Url,
+    target: Url,
+    version: Option<i64>,
+) -> DeltaResult<DeltaTable> {
     // Validate that source and target are both filesystem Urls. If not, return an error.
     if source.scheme() != "file" || target.scheme() != "file" {
         return Err(DeltaTableError::InvalidTableLocation(format!(
@@ -162,7 +166,8 @@ mod tests {
         let clone_uri = Url::from_directory_path(std::fs::canonicalize(clone_path)?).unwrap();
 
         let version = 2;
-        let cloned_table = shallow_clone(source_uri.clone(), clone_uri.clone(), Some(version)).await?;
+        let cloned_table =
+            shallow_clone(source_uri.clone(), clone_uri.clone(), Some(version)).await?;
 
         let mut source_table = DeltaTableBuilder::from_uri(source_uri.clone())?
             .load()
