@@ -64,15 +64,16 @@ pub async fn clone(source: Url, target: Url) -> DeltaResult<DeltaTable> {
         .try_collect()
         .await?;
 
-    // 4) Convert relative paths to absolute URIs (source rooted)
     let mut actions = Vec::with_capacity(file_views.len() + 1);
     // Add metadata from source snapshot explicitly
     actions.push(Action::Metadata(src_metadata.clone()));
+
+    // 4) Add files to target table using Add actions (mirrors WriteBuilder logic)
     actions.extend(file_views.into_iter().map(|view| {
         let mut add = view.add_action();
         // Absolutize using the source log store root
-        let abs_uri = source_log.to_uri(&Path::from(add.path.clone()));
-        add.path = abs_uri;
+        // let abs_uri = source_log.to_uri(&Path::from(add.path.clone()));
+        // add.path = abs_uri;
         add.data_change = true; // explicit, mirrors WriteBuilder
         Action::Add(add)
     }));
@@ -124,11 +125,11 @@ pub async fn clone(source: Url, target: Url) -> DeltaResult<DeltaTable> {
 }
 
 
-#[cfg(test)]
+#[cfg(all(test, feature = "datafusion"))]
 mod tests {
     use super::*;
     use std::path::Path;
-    use arrow_array::RecordBatch;
+    use arrow::array::RecordBatch;
     use url::Url;
     use crate::DeltaOps;
     use crate::operations::collect_sendable_stream;
