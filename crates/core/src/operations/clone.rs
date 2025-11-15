@@ -1,13 +1,5 @@
 //! Clone a Delta table from a source location into a target location by
 //! creating a new table at the target and registering the source table's files.
-//!
-//! Steps:
-//! 1. Create a new table at the clone location (mirrors CreateTable logic).
-//! 2. Copy metadata from the source snapshot (mirrors AddColumnBuilder metadata handling).
-//! 3. List files represented by the source snapshot.
-//! 4. Copy files to the target table location as symlinks.
-//! 5. Add files to the target table using Add actions (mirrors WriteBuilder logic).
-
 use std::path::PathBuf;
 use futures::TryStreamExt;
 use url::Url;
@@ -147,6 +139,7 @@ fn add_symlink(source_root_path: PathBuf, target_root_path: PathBuf, add_filenam
     let file_name = std::path::Path::new(&add_filename);
     let src_path = source_root_path.join(file_name);
     let link_path = target_root_path.join(file_name);
+
     // On Windows, use symlink_file; on Unix, use symlink.
     #[cfg(target_family = "windows")]
     {
