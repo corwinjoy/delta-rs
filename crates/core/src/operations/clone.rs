@@ -23,11 +23,14 @@ use crate::{DeltaResult, DeltaTable};
 ///
 /// Note: This clones the table metadata and references to the data files. It does
 /// not copy the underlying data files themselves.
-pub async fn clone(source: Url, target: Url) -> DeltaResult<DeltaTable> {
+pub async fn clone(source: Url, target: Url, version: Option<i64>) -> DeltaResult<DeltaTable> {
     // 1) Load source table and get snapshot/metadata
-    let source_table = DeltaTableBuilder::from_uri(source)?
+    let mut source_table = DeltaTableBuilder::from_uri(source)?
             .load()
             .await?;
+    if let Some(v) = version {
+        source_table.load_version(v).await?;
+    }
     let source_state = source_table.snapshot()?;
     let source_snapshot: &EagerSnapshot = source_state.snapshot();
     let source_log = source_table.log_store();
@@ -183,11 +186,14 @@ use super::*;
         let clone_uri =
             Url::from_directory_path(std::fs::canonicalize(clone_path)?).unwrap();
 
-        let cloned_table = clone(source_uri.clone(), clone_uri.clone()).await?;
+        let version = 3;
+        let cloned_table = clone(source_uri.clone(), clone_uri.clone(), Some(version)).await?;
 
-        let source_table = DeltaTableBuilder::from_uri(source_uri.clone())?
+        let mut source_table = DeltaTableBuilder::from_uri(source_uri.clone())?
             .load()
             .await?;
+
+        source_table.load_version(version).await?;
 
         let src_uris: Vec<_> = source_table.get_file_uris()?.collect();
         let cloned_uris: Vec<_> = cloned_table.get_file_uris()?.collect();
@@ -219,7 +225,8 @@ use super::*;
         println!("Cloned data:");
         println!("{pretty_cloned_data}");
 
-        let src_ops = DeltaOps::try_from_uri(source_uri).await?;
+        let mut src_ops = DeltaOps::try_from_uri(source_uri).await?;
+        src_ops.0.load_version(version).await?;
         let (_table, stream) = src_ops.load().await?;
         let source_data: Vec<RecordBatch> = collect_sendable_stream(stream).await?;
 
