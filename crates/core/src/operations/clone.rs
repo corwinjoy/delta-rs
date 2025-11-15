@@ -4,7 +4,7 @@ use futures::TryStreamExt;
 use std::path::Path;
 use url::Url;
 
-use crate::kernel::transaction::{CommitBuilder, TransactionError};
+use crate::kernel::transaction::CommitBuilder;
 use crate::kernel::{Action, EagerSnapshot};
 use crate::operations::create::CreateBuilder;
 use crate::protocol::{DeltaOperation, SaveMode};
@@ -101,22 +101,9 @@ pub async fn clone(source: Url, target: Url, version: Option<i64>) -> DeltaResul
     let commit_bytes = prepared_commit.commit_or_bytes();
     let operation_id = uuid::Uuid::new_v4();
 
-    match log_store
+    log_store
         .write_commit_entry(commit_version, commit_bytes.clone(), operation_id)
-        .await
-    {
-        Ok(_) => {}
-        Err(err @ TransactionError::VersionAlreadyExists(_)) => {
-            return Err(err.into());
-        }
-        Err(err) => {
-            // Abort and return error
-            log_store
-                .abort_commit_entry(commit_version, commit_bytes.clone(), operation_id)
-                .await?;
-            return Err(err.into());
-        }
-    }
+        .await?;
 
     target_table.update().await?;
     Ok(target_table)
