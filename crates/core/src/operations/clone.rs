@@ -11,7 +11,6 @@ use crate::protocol::{DeltaOperation, SaveMode};
 use crate::table::builder::DeltaTableBuilder;
 use crate::{DeltaResult, DeltaTable, DeltaTableError};
 
-
 /// Shallow clone a Delta table from a source location to a target location.
 /// This function creates a new Delta table at the target location that
 /// references the same data files as the source table,
