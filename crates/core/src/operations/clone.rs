@@ -188,13 +188,16 @@ mod tests {
         test_shallow_clone(source_path, version).await?
     }
 
-    async fn test_shallow_clone(source_path: &Path, maybe_version: Option<i64>) -> Result<Result<(), DeltaTableError>, DeltaTableError> {
+    async fn test_shallow_clone(
+        source_path: &Path,
+        maybe_version: Option<i64>,
+    ) -> Result<Result<(), DeltaTableError>, DeltaTableError> {
         let source_uri = Url::from_directory_path(std::fs::canonicalize(source_path)?).unwrap();
         let clone_path = tempfile::TempDir::new()?.path().to_owned();
         let clone_uri = Url::from_directory_path(clone_path).unwrap();
 
         let cloned_table =
-            shallow_clone(source_uri.clone(), clone_uri.clone(),maybe_version).await?;
+            shallow_clone(source_uri.clone(), clone_uri.clone(), maybe_version).await?;
 
         let mut source_table = DeltaTableBuilder::from_uri(source_uri.clone())?
             .load()
