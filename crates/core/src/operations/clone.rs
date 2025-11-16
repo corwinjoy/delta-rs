@@ -11,6 +11,16 @@ use crate::protocol::{DeltaOperation, SaveMode};
 use crate::table::builder::DeltaTableBuilder;
 use crate::{DeltaResult, DeltaTable, DeltaTableError};
 
+
+/// Shallow clone a Delta table from a source location to a target location.
+/// This function creates a new Delta table at the target location that
+/// references the same data files as the source table,
+/// without copying the actual data files.
+/// # Arguments
+/// * `source` - The URL of the source Delta table to clone.
+/// * `target` - The URL where the cloned Delta table will be created.
+/// * `version` - Optional version of the source table to clone.
+///               If `None`, use the latest version.
 pub async fn shallow_clone(
     source: Url,
     target: Url,
@@ -28,10 +38,11 @@ pub async fn shallow_clone(
     }
 
     // 1) Load source table and snapshot
-    let mut src_table = DeltaTableBuilder::from_uri(source)?.load().await?;
+    let mut src_table_bld = DeltaTableBuilder::from_uri(source)?;
     if let Some(v) = version {
-        src_table.load_version(v).await?;
+        src_table_bld = src_table_bld.with_version(v);
     }
+    let src_table = src_table_bld.load().await?;
     let src_state = src_table.snapshot()?;
     let src_snapshot: &EagerSnapshot = src_state.snapshot();
     let src_metadata = src_state.metadata().clone();
