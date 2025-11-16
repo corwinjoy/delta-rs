@@ -26,6 +26,8 @@ pub async fn shallow_clone(
     version: Option<i64>,
 ) -> DeltaResult<DeltaTable> {
     // Validate that source and target are both filesystem Urls. If not, return an error.
+    // We need this because we use symlinks to create the target files.
+    // We hope to replace this once delta-rs supports absolute paths.
     if source.scheme() != "file" || target.scheme() != "file" {
         return Err(DeltaTableError::InvalidTableLocation(format!(
             "shallow_clone() requires file:// URLs for both source and target; got source='{}' (scheme='{}'), target='{}' (scheme='{}')",
