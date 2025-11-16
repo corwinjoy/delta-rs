@@ -164,25 +164,44 @@ mod tests {
     use url::Url;
 
     #[tokio::test]
-    async fn test_clone_operation() -> DeltaResult<()> {
+    async fn test_simple_table_clone_with_version() -> DeltaResult<()> {
         let source_path = Path::new("../test/tests/data/simple_table");
+        let version = Some(2);
+        test_shallow_clone(source_path, version).await?
+    }
+
+    #[tokio::test]
+    async fn test_simple_table_clone_no_version() -> DeltaResult<()> {
+        let source_path = Path::new("../test/tests/data/simple_table");
+        let version = None;
+        test_shallow_clone(source_path, version).await?
+    }
+
+    // For now, deletion vectors are not supported in shallow clones.
+    // This gives the error
+    // Error: Transaction { source: UnsupportedReaderFeatures([DeletionVectors]) }
+    #[ignore]
+    #[tokio::test]
+    async fn test_deletion_vector() -> DeltaResult<()> {
+        let source_path = Path::new("../test/tests/data/table-with-dv-small");
+        let version = None;
+        test_shallow_clone(source_path, version).await?
+    }
+
+    async fn test_shallow_clone(source_path: &Path, maybe_version: Option<i64>) -> Result<Result<(), DeltaTableError>, DeltaTableError> {
         let source_uri = Url::from_directory_path(std::fs::canonicalize(source_path)?).unwrap();
+        let clone_path = tempfile::TempDir::new()?.path().to_owned();
+        let clone_uri = Url::from_directory_path(clone_path).unwrap();
 
-        let clone_path = Path::new("../test/tests/data/simple_table_clone");
-        if clone_path.exists() {
-            std::fs::remove_dir_all(clone_path)?;
-        }
-        std::fs::create_dir_all(clone_path)?;
-        let clone_uri = Url::from_directory_path(std::fs::canonicalize(clone_path)?).unwrap();
-
-        let version = 2;
         let cloned_table =
-            shallow_clone(source_uri.clone(), clone_uri.clone(), Some(version)).await?;
+            shallow_clone(source_uri.clone(), clone_uri.clone(),maybe_version).await?;
 
         let mut source_table = DeltaTableBuilder::from_uri(source_uri.clone())?
             .load()
             .await?;
-        source_table.load_version(version).await?;
+        if let Some(version) = maybe_version {
+            source_table.load_version(version).await?;
+        }
 
         let src_uris: Vec<_> = source_table.get_file_uris()?.collect();
         let cloned_uris: Vec<_> = cloned_table.get_file_uris()?.collect();
@@ -198,8 +217,10 @@ mod tests {
 
         src_files.sort();
         cloned_files.sort();
+        /*
         println!("Source files: {:#?}", src_files);
         println!("Cloned files: {:#?}", cloned_files);
+         */
         assert_eq!(
             src_files, cloned_files,
             "Cloned table should reference the same files as the source"
@@ -210,12 +231,16 @@ mod tests {
         let cloned_data: Vec<RecordBatch> = collect_sendable_stream(stream).await?;
 
         let pretty_cloned_data = format_batches(&*cloned_data)?.to_string();
+        /*
         println!();
         println!("Cloned data:");
         println!("{pretty_cloned_data}");
+        */
 
         let mut src_ops = DeltaOps::try_from_uri(source_uri).await?;
-        src_ops.0.load_version(version).await?;
+        if let Some(version) = maybe_version {
+            src_ops.0.load_version(version).await?;
+        }
         let (_table, stream) = src_ops.load().await?;
         let source_data: Vec<RecordBatch> = collect_sendable_stream(stream).await?;
 
@@ -224,9 +249,11 @@ mod tests {
 
         assert_batches_sorted_eq!(&expected_lines_vec, &cloned_data);
 
+        /*
         println!();
         println!("Source data:");
         println!("{expected_lines}");
-        Ok(())
+        */
+        Ok(Ok(()))
     }
 }
