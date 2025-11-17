@@ -270,6 +270,6 @@ mod tests {
         println!("Source data:");
         println!("{expected_lines}");
         */
-        Ok(Ok(()))
+        Ok(())
     }
 }
