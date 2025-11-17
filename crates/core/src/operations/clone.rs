@@ -79,6 +79,7 @@ impl std::future::IntoFuture for CloneBuilder {
 /// # Returns
 /// Returns a [`DeltaResult<DeltaTable>`]. On success, contains the cloned [`DeltaTable`] instance.
 /// On error, returns a [`DeltaTableError`] describing the failure.
+/// In the event of an error, the target directory may contain partial data and files.
 ///
 /// # Errors
 /// This function returns an error if:
