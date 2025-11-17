@@ -15,12 +15,34 @@ use crate::{DeltaResult, DeltaTable, DeltaTableError};
 /// This function creates a new Delta table at the target location that
 /// references the same data files as the source table,
 /// without copying the actual data files.
+///
 /// # Arguments
 /// * `source` - The URL of the source Delta table to clone.
 /// * `target` - The URL where the cloned Delta table will be created.
-/// * `version` - Optional version of the source table to clone.
-///               If `None`, use the latest version.
-pub async fn shallow_clone(
+/// * `version` - Optional version of the source table to clone. If `None`, uses the latest version.
+///
+/// # Returns
+/// Returns a [`DeltaResult<DeltaTable>`]. On success, contains the cloned [`DeltaTable`] instance.
+/// On error, returns a [`DeltaTableError`] describing the failure.
+///
+/// # Errors
+/// This function returns an error if:
+/// - Either `source` or `target` URL is not a `file://` URL.
+/// - The source table cannot be loaded.
+/// - The target table cannot be created.
+/// - File path conversion fails.
+/// - Symlink creation fails (if implemented with error handling).
+///
+/// # Example
+/// ```
+/// use url::Url;
+/// # async fn example() -> Result<(), delta::DeltaTableError> {
+/// let source = Url::parse("file:///path/to/source")?;
+/// let target = Url::parse("file:///path/to/target")?;
+/// let table = delta::shallow_clone(source, target, None).await?;
+/// # Ok(())
+/// # }
+/// ```
     source: Url,
     target: Url,
     version: Option<i64>,
