@@ -141,22 +141,28 @@ pub async fn shallow_clone(
     Ok(target_table)
 }
 
-fn add_symlink(source_root: &Path, target_root: &Path, add_filename: &str) {
+fn add_symlink(source_root: &Path, target_root: &Path, add_filename: &str) -> std::io::Result<()> {
     let file_name = Path::new(add_filename);
     let src_path = source_root.join(file_name);
     let link_path = target_root.join(file_name);
+
+    // Create parent directories if needed
+    if let Some(parent) = link_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
 
     // Best-effort symlink creation: only when both source and target are local filesystems.
     #[cfg(target_family = "windows")]
     {
         use std::os::windows::fs::symlink_file;
-        let _ = symlink_file(&src_path, &link_path);
+        symlink_file(&src_path, &link_path)?;
     }
     #[cfg(target_family = "unix")]
     {
         use std::os::unix::fs::symlink;
-        let _ = symlink(&src_path, &link_path);
+        symlink(&src_path, &link_path)?;
     }
+    Ok(())
 }
 
 #[cfg(all(test, feature = "datafusion"))]
