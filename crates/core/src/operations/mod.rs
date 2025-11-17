@@ -19,7 +19,7 @@ use url::Url;
 use uuid::Uuid;
 
 use self::{
-    add_column::AddColumnBuilder, add_feature::AddTableFeatureBuilder, create::CreateBuilder,
+    add_column::AddColumnBuilder, add_feature::AddTableFeatureBuilder, clone::CloneBuilder, create::CreateBuilder,
     filesystem_check::FileSystemCheckBuilder, restore::RestoreBuilder,
     set_tbl_properties::SetTablePropertiesBuilder,
     update_field_metadata::UpdateFieldMetadataBuilder,
@@ -228,6 +228,13 @@ impl DeltaOps {
     /// Generate a symlink_format_manifest for other engines
     pub fn generate(self) -> GenerateBuilder {
         GenerateBuilder::new(self.0.log_store, self.0.state.map(|s| s.snapshot))
+    }
+
+    /// Shallow-clone a table from a source location into a target location via builder API
+    ///
+    /// Construct a [`CloneBuilder`], then set `source`, `target`, and optionally `version`.
+    pub fn clone_table(self) -> CloneBuilder {
+        CloneBuilder::new()
     }
 
     /// Load data from a DeltaTable
