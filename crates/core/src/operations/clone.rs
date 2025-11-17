@@ -31,18 +31,20 @@ use crate::{DeltaResult, DeltaTable, DeltaTableError};
 /// - The source table cannot be loaded.
 /// - The target table cannot be created.
 /// - File path conversion fails.
-/// - Symlink creation fails (if implemented with error handling).
+/// - Symlink creation fails.
 ///
 /// # Example
 /// ```
 /// use url::Url;
-/// # async fn example() -> Result<(), delta::DeltaTableError> {
-/// let source = Url::parse("file:///path/to/source")?;
-/// let target = Url::parse("file:///path/to/target")?;
-/// let table = delta::shallow_clone(source, target, None).await?;
+/// # async fn shallow_clone_example() -> Result<(), delta::DeltaTableError> {
+/// let source = Url::parse("file:///path/to/source_table")?;
+/// let target = Url::parse("file:///path/to/target_table")?;
+/// let version = None; // use latest version
+/// let table = delta::shallow_clone(source, target, version).await?;
 /// # Ok(())
 /// # }
 /// ```
+pub async fn shallow_clone(
     source: Url,
     target: Url,
     version: Option<i64>,
@@ -61,7 +63,7 @@ use crate::{DeltaResult, DeltaTable, DeltaTableError};
     }
 
     // 1) Load source table and snapshot
-    let mut src_table_bld = DeltaTableBuilder::from_uri(source)?;
+    let mut src_table_bld = DeltaTableBuilder::from_uri(source.clone())?;
     if let Some(v) = version {
         src_table_bld = src_table_bld.with_version(v);
     }
@@ -112,13 +114,19 @@ use crate::{DeltaResult, DeltaTable, DeltaTableError};
         .config()
         .location
         .to_file_path()
-        .map_err(|_| DeltaTableError::InvalidTableLocation(
-            format!("Failed to convert target URL to file path: {}", target.as_ref())
-        ))?;
-    let source_root_path = src_log.config().location.to_file_path()
-        .map_err(|_| DeltaTableError::InvalidTableLocation(
-            format!("Failed to convert source URL to file path: {}", source.as_ref())
-        ))?;
+        .map_err(|_| {
+            DeltaTableError::InvalidTableLocation(format!(
+                "Failed to convert target URL to file path: {}",
+                target.as_ref()
+            ))
+        })?;
+
+    let source_root_path = src_log.config().location.to_file_path().map_err(|_| {
+        DeltaTableError::InvalidTableLocation(format!(
+            "Failed to convert source URL to file path: {}",
+            source.as_ref()
+        ))
+    })?;
 
     for view in file_views {
         let mut add = view.add_action();
@@ -128,7 +136,7 @@ use crate::{DeltaResult, DeltaTable, DeltaTableError};
             source_root_path.as_path(),
             target_root_path.as_path(),
             &add.path,
-        );
+        )?;
         actions.push(Action::Add(add));
     }
 
@@ -195,21 +203,38 @@ mod tests {
     use arrow::array::RecordBatch;
     use datafusion::assert_batches_sorted_eq;
     use datafusion::common::test_util::format_batches;
-    use std::path::Path;
-    use url::Url;
 
+    #[tokio::test]
+    async fn test_non_file_url_rejected() {
+        let source = Url::parse("s3://bucket/path").unwrap();
+        let target = Url::parse("file:///tmp/target").unwrap();
+        let result = shallow_clone(source, target, None).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            DeltaTableError::InvalidTableLocation(_)
+        ));
+    }
     #[tokio::test]
     async fn test_simple_table_clone_with_version() -> DeltaResult<()> {
         let source_path = Path::new("../test/tests/data/simple_table");
         let version = Some(2);
-        test_shallow_clone(source_path, version).await?
+        test_shallow_clone(source_path, version).await
     }
 
     #[tokio::test]
     async fn test_simple_table_clone_no_version() -> DeltaResult<()> {
         let source_path = Path::new("../test/tests/data/simple_table");
         let version = None;
-        test_shallow_clone(source_path, version).await?
+        test_shallow_clone(source_path, version).await
+    }
+
+    #[tokio::test]
+    async fn test_table_with_simple_partition() -> DeltaResult<()> {
+        // This partition test ensures that directories are created as needed by symlink creation.
+        let source_path = Path::new("../test/tests/data/delta-0.8.0-partitioned");
+        let version = None;
+        test_shallow_clone(source_path, version).await
     }
 
     // For now, deletion vectors are not supported in shallow clones.
@@ -220,13 +245,10 @@ mod tests {
     async fn test_deletion_vector() -> DeltaResult<()> {
         let source_path = Path::new("../test/tests/data/table-with-dv-small");
         let version = None;
-        test_shallow_clone(source_path, version).await?
+        test_shallow_clone(source_path, version).await
     }
 
-    async fn test_shallow_clone(
-        source_path: &Path,
-        maybe_version: Option<i64>,
-    ) -> Result<Result<(), DeltaTableError>, DeltaTableError> {
+    async fn test_shallow_clone(source_path: &Path, maybe_version: Option<i64>) -> DeltaResult<()> {
         let source_uri = Url::from_directory_path(std::fs::canonicalize(source_path)?).unwrap();
         let clone_path = tempfile::TempDir::new()?.path().to_owned();
         let clone_uri = Url::from_directory_path(clone_path).unwrap();
@@ -268,8 +290,8 @@ mod tests {
         let (_table, stream) = cloned_ops.load().await?;
         let cloned_data: Vec<RecordBatch> = collect_sendable_stream(stream).await?;
 
-        let pretty_cloned_data = format_batches(&*cloned_data)?.to_string();
         /*
+        let pretty_cloned_data = format_batches(&*cloned_data)?.to_string();
         println!();
         println!("Cloned data:");
         println!("{pretty_cloned_data}");
