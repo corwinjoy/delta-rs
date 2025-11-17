@@ -90,8 +90,13 @@ pub async fn shallow_clone(
         .config()
         .location
         .to_file_path()
-        .unwrap();
-    let source_root_path = src_log.config().location.to_file_path().unwrap();
+        .map_err(|_| DeltaTableError::InvalidTableLocation(
+            format!("Failed to convert target URL to file path: {}", target.as_ref())
+        ))?;
+    let source_root_path = src_log.config().location.to_file_path()
+        .map_err(|_| DeltaTableError::InvalidTableLocation(
+            format!("Failed to convert source URL to file path: {}", source.as_ref())
+        ))?;
 
     for view in file_views {
         let mut add = view.add_action();
