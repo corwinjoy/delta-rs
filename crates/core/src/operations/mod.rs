@@ -19,8 +19,8 @@ use url::Url;
 use uuid::Uuid;
 
 use self::{
-    add_column::AddColumnBuilder, add_feature::AddTableFeatureBuilder, clone::CloneBuilder, create::CreateBuilder,
-    filesystem_check::FileSystemCheckBuilder, restore::RestoreBuilder,
+    add_column::AddColumnBuilder, add_feature::AddTableFeatureBuilder, clone::CloneBuilder,
+    create::CreateBuilder, filesystem_check::FileSystemCheckBuilder, restore::RestoreBuilder,
     set_tbl_properties::SetTablePropertiesBuilder,
     update_field_metadata::UpdateFieldMetadataBuilder,
     update_table_metadata::UpdateTableMetadataBuilder, vacuum::VacuumBuilder,

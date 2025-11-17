@@ -104,11 +104,7 @@ impl std::future::IntoFuture for CloneBuilder {
 /// # }
 /// ```
 
-async fn shallow_clone(
-    source: Url,
-    target: Url,
-    version: Option<i64>,
-) -> DeltaResult<DeltaTable> {
+async fn shallow_clone(source: Url, target: Url, version: Option<i64>) -> DeltaResult<DeltaTable> {
     // Validate that source and target are both filesystem Urls. If not, return an error.
     // We need this because we use symlinks to create the target files.
     // We hope to replace this once delta-rs supports absolute paths.
@@ -263,6 +259,7 @@ mod tests {
     use arrow::array::RecordBatch;
     use datafusion::assert_batches_sorted_eq;
     use datafusion::common::test_util::format_batches;
+    use tracing::debug;
 
     #[tokio::test]
     async fn test_non_file_url_rejected() {
@@ -347,10 +344,8 @@ mod tests {
 
         src_files.sort();
         cloned_files.sort();
-        /*
-        println!("Source files: {:#?}", src_files);
-        println!("Cloned files: {:#?}", cloned_files);
-         */
+        debug!("Source files: {:#?}", src_files);
+        debug!("Cloned files: {:#?}", cloned_files);
         assert_eq!(
             src_files, cloned_files,
             "Cloned table should reference the same files as the source"
@@ -360,12 +355,10 @@ mod tests {
         let (_table, stream) = cloned_ops.load().await?;
         let cloned_data: Vec<RecordBatch> = collect_sendable_stream(stream).await?;
 
-        /*
         let pretty_cloned_data = format_batches(&*cloned_data)?.to_string();
-        println!();
-        println!("Cloned data:");
-        println!("{pretty_cloned_data}");
-        */
+        debug!("");
+        debug!("Cloned data:");
+        debug!("{pretty_cloned_data}");
 
         let mut src_ops = DeltaOps::try_from_uri(source_uri).await?;
         if let Some(version) = maybe_version {
@@ -379,11 +372,9 @@ mod tests {
 
         assert_batches_sorted_eq!(&expected_lines_vec, &cloned_data);
 
-        /*
-        println!();
-        println!("Source data:");
-        println!("{expected_lines}");
-        */
+        debug!("");
+        debug!("Source data:");
+        debug!("{expected_lines}");
         Ok(())
     }
 }
