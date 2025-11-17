@@ -232,9 +232,9 @@ impl DeltaOps {
 
     /// Shallow-clone a table from a source location into a target location via builder API
     ///
-    /// Construct a [`CloneBuilder`], then set `source`, `target`, and optionally `version`.
+    /// Construct a [`CloneBuilder`], then set `target`. The source is the active table of this `DeltaOps`.
     pub fn clone_table(self) -> CloneBuilder {
-        CloneBuilder::new()
+        CloneBuilder::new(self.0.log_store, self.0.state.map(|s| s.snapshot))
     }
 
     /// Load data from a DeltaTable

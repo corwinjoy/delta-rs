@@ -5,45 +5,36 @@ use std::path::Path;
 use url::Url;
 
 use crate::kernel::transaction::CommitBuilder;
-use crate::kernel::{Action, EagerSnapshot};
+use crate::kernel::{resolve_snapshot, Action, EagerSnapshot};
+use crate::logstore::LogStoreRef;
 use crate::operations::create::CreateBuilder;
 use crate::protocol::{DeltaOperation, SaveMode};
-use crate::table::builder::DeltaTableBuilder;
 use crate::{DeltaResult, DeltaTable, DeltaTableError};
 
 /// Builder for performing a shallow clone of a Delta table.
 ///
 /// Construct via `DeltaOps::clone_table()` and configure using the builder methods.
 pub struct CloneBuilder {
-    source: Option<Url>,
+    /// Source table log store
+    log_store: LogStoreRef,
+    /// Optional snapshot representing the active state/version of the source table
+    snapshot: Option<EagerSnapshot>,
+    /// Target table location
     target: Option<Url>,
-    version: Option<i64>,
 }
 
 impl CloneBuilder {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<EagerSnapshot>) -> Self {
         Self {
-            source: None,
+            log_store,
+            snapshot,
             target: None,
-            version: None,
         }
-    }
-
-    /// Set the source table location (must be a `file://` URL).
-    pub fn with_source(mut self, source: Url) -> Self {
-        self.source = Some(source);
-        self
     }
 
     /// Set the target table location (must be a `file://` URL).
     pub fn with_target(mut self, target: Url) -> Self {
         self.target = Some(target);
-        self
-    }
-
-    /// Set the version of the source table to clone. If not set, uses the latest.
-    pub fn with_version(mut self, version: i64) -> Self {
-        self.version = Some(version);
         self
     }
 }
@@ -54,14 +45,10 @@ impl std::future::IntoFuture for CloneBuilder {
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
-            let source = self
-                .source
-                .ok_or_else(|| DeltaTableError::Generic("CloneBuilder missing source".into()))?;
             let target = self
                 .target
                 .ok_or_else(|| DeltaTableError::Generic("CloneBuilder missing target".into()))?;
-            let version = self.version;
-            shallow_clone(source, target, version).await
+            shallow_clone(self.log_store, self.snapshot, target).await
         })
     }
 }
@@ -72,9 +59,9 @@ impl std::future::IntoFuture for CloneBuilder {
 /// without copying the actual data files.
 ///
 /// # Arguments
-/// * `source` - The URL of the source Delta table to clone. Must be a `file://` URL.
 /// * `target` - The URL where the cloned Delta table will be created. Must be a `file://` URL.
-/// * `version` - Optional version of the source table to clone. If `None`, uses the latest version.
+///
+/// The source table is the active table referenced by the `DeltaOps` that constructed this builder.
 ///
 /// # Returns
 /// Returns a [`DeltaResult<DeltaTable>`]. On success, contains the cloned [`DeltaTable`] instance.
@@ -83,7 +70,7 @@ impl std::future::IntoFuture for CloneBuilder {
 ///
 /// # Errors
 /// This function returns an error if:
-/// - Either `source` or `target` URL is not a `file://` URL.
+/// - `target` URL is not a `file://` URL.
 /// - The source table cannot be loaded.
 /// - The target table cannot be created.
 /// - File path conversion fails.
@@ -96,43 +83,42 @@ impl std::future::IntoFuture for CloneBuilder {
 /// # async fn shallow_clone_example() -> Result<(), deltalake_core::DeltaTableError> {
 /// let source = Url::parse("file:///path/to/source_table")?;
 /// let target = Url::parse("file:///path/to/target_table")?;
-/// let table = DeltaOps::new_in_memory()
+/// let ops = DeltaOps::try_from_uri(source).await?;
+/// let table = ops
 ///     .clone_table()
-///     .with_source(source)
 ///     .with_target(target)
 ///     .await?;
 /// # Ok(())
 /// # }
 /// ```
 
-async fn shallow_clone(source: Url, target: Url, version: Option<i64>) -> DeltaResult<DeltaTable> {
+async fn shallow_clone(
+    log_store: LogStoreRef,
+    snapshot: Option<EagerSnapshot>,
+    target: Url,
+) -> DeltaResult<DeltaTable> {
     // Validate that source and target are both filesystem Urls. If not, return an error.
     // We need this because we use symlinks to create the target files.
     // We hope to replace this once delta-rs supports absolute paths.
-    if source.scheme() != "file" || target.scheme() != "file" {
+    let src_url = log_store.config().location.clone();
+    if src_url.scheme() != "file" || target.scheme() != "file" {
         return Err(DeltaTableError::InvalidTableLocation(format!(
             "shallow_clone() requires file:// URLs for both source and target; got source='{}' (scheme='{}'), target='{}' (scheme='{}')",
-            source,
-            source.scheme(),
+            src_url,
+            src_url.scheme(),
             target,
             target.scheme()
         )));
     }
 
-    // 1) Load source table and snapshot
-    let mut src_table_bld = DeltaTableBuilder::from_uri(source.clone())?;
-    if let Some(v) = version {
-        src_table_bld = src_table_bld.with_version(v);
-    }
-    let src_table = src_table_bld.load().await?;
-    let src_state = src_table.snapshot()?;
-    let src_snapshot: &EagerSnapshot = src_state.snapshot();
-    let src_metadata = src_state.metadata().clone();
+    // 1) Resolve source snapshot from provided state or active version in DeltaOps
+    let src_snapshot: EagerSnapshot = resolve_snapshot(log_store.as_ref(), snapshot, true).await?;
+    let src_metadata = src_snapshot.metadata().clone();
     let src_schema = src_metadata.parse_schema()?;
     let partition_columns = src_metadata.partition_columns().to_vec();
     let configuration = src_metadata.configuration().clone();
-    let src_protocol = src_state.protocol().clone();
-    let src_log = src_table.log_store();
+    let src_protocol = src_snapshot.protocol().clone();
+    let src_log = log_store;
 
     // 2) Create a target table mirroring source metadata and protocol
     let mut create = CreateBuilder::new()
@@ -156,7 +142,7 @@ async fn shallow_clone(source: Url, target: Url, version: Option<i64>) -> DeltaR
         .with_actions([Action::Protocol(src_protocol.clone())])
         .await?;
 
-    // 3) Gather source files from snapshot
+    // 3) Gather source files from src_snapshot
     let file_views: Vec<_> = src_snapshot
         .file_views(&src_log, None)
         .try_collect()
@@ -181,7 +167,7 @@ async fn shallow_clone(source: Url, target: Url, version: Option<i64>) -> DeltaR
     let source_root_path = src_log.config().location.to_file_path().map_err(|_| {
         DeltaTableError::InvalidTableLocation(format!(
             "Failed to convert source URL to file path: {}",
-            source.as_ref()
+            src_url.as_ref()
         ))
     })?;
 
@@ -257,6 +243,7 @@ mod tests {
     use super::*;
     use crate::operations::collect_sendable_stream;
     use crate::DeltaOps;
+    use crate::DeltaTableBuilder;
     use arrow::array::RecordBatch;
     use datafusion::assert_batches_sorted_eq;
     use datafusion::common::test_util::format_batches;
@@ -264,13 +251,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_non_file_url_rejected() {
-        let source = Url::parse("s3://bucket/path").unwrap();
         let target = Url::parse("file:///tmp/target").unwrap();
-        let result = DeltaOps::new_in_memory()
-            .clone_table()
-            .with_source(source)
-            .with_target(target)
-            .await;
+        // Using an in-memory ops means the source is memory:// which is not file:// and should be rejected
+        let ops = DeltaOps::new_in_memory();
+        let result = ops.clone_table().with_target(target).await;
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -315,14 +299,11 @@ mod tests {
         let clone_path = tempfile::TempDir::new()?.path().to_owned();
         let clone_uri = Url::from_directory_path(clone_path).unwrap();
 
-        let builder = DeltaOps::new_in_memory()
-            .clone_table()
-            .with_source(source_uri.clone())
-            .with_target(clone_uri.clone());
-        let cloned_table = match maybe_version {
-            Some(v) => builder.with_version(v).await?,
-            None => builder.await?,
-        };
+        let mut ops = DeltaOps::try_from_uri(source_uri.clone()).await?;
+        if let Some(v) = maybe_version {
+            ops.0.load_version(v).await?;
+        }
+        let cloned_table = ops.clone_table().with_target(clone_uri.clone()).await?;
 
         let mut source_table = DeltaTableBuilder::from_uri(source_uri.clone())?
             .load()
