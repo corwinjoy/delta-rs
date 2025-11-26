@@ -125,7 +125,11 @@ fn use_abs_path_for_action(target_dir: &PathBuf, action: &mut Value) {
             if let Some(rel) = path_val.as_str() {
                 // Convert to absolute path under the copied table directory
                 let abs = target_dir.join(rel);
-                *path_val = serde_json::Value::String(abs.to_str().unwrap().to_string());
+                *path_val = serde_json::Value::String(
+                    abs.to_str()
+                        .expect("Path should be valid UTF-8")
+                        .to_string()
+                );
             }
         }
     }
