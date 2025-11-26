@@ -70,10 +70,10 @@ async fn read_table_with_full_paths_and_compare() {
 }
 
 fn clone_test_dir_with_abs_paths(src_dir: &PathBuf, target_dir: &PathBuf) {
-    // Setup: ensure the test table at `full_path_rel` exists and its _delta_log
+    // Setup: ensure the test table at `target_dir` exists and its _delta_log
     // contains fully-qualified (absolute) file paths for all add actions.
-    // 1) Replace any existing directory at `full_path_rel` with a fresh copy of
-    //    `expected_rel`.
+    // 1) Replace any existing directory at `target_dir` with a fresh copy of
+    //    `src_dir`.
     // 2) Rewrite all add actions in JSON log files to use absolute file paths.
     {
         // Re-create target directory by copying from the expected (relative-path) table.
