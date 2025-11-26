@@ -3,8 +3,12 @@ use deltalake_core::operations::collect_sendable_stream;
 use deltalake_core::DeltaOps;
 use url::Url;
 
+use deltalake_core::datafusion::assert_batches_sorted_eq;
+use deltalake_core::datafusion::common::test_util::format_batches;
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), deltalake::errors::DeltaTableError> {
+    // TODO: use a relative path here.
     let table_path = "/home/cjoy/src/delta-rs/crates/test/tests/data/delta-0.8.0-full-path";
     let table_url = Url::from_directory_path(table_path).unwrap();
     let table = deltalake::open_table(table_url).await?;
@@ -29,5 +33,18 @@ async fn main() -> Result<(), deltalake::errors::DeltaTableError> {
     let data: Vec<RecordBatch> = collect_sendable_stream(stream).await?;
 
     println!("{data:?}");
+
+    // TODO: use a relative path here.
+    let expected_table_path = "/home/cjoy/src/delta-rs/crates/test/tests/data/delta-0.8.0";
+    let expected_table_url = Url::from_directory_path(expected_table_path).unwrap();
+    let expected_table = deltalake::open_table(expected_table_url).await?;
+    let (_table, stream) = DeltaOps(expected_table).load().await?;
+    let expected_data: Vec<RecordBatch> = collect_sendable_stream(stream).await?;
+
+    println!("{expected_data:?}");
+
+    let expected_lines = format_batches(&*expected_data)?.to_string();
+    let expected_lines_vec: Vec<&str> = expected_lines.trim().lines().collect();
+    assert_batches_sorted_eq!(&expected_lines_vec, &data);
     Ok(())
 }
