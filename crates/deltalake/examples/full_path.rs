@@ -1,7 +1,7 @@
-use url::Url;
 use deltalake::arrow::array::RecordBatch;
-use deltalake_core::DeltaOps;
 use deltalake_core::operations::collect_sendable_stream;
+use deltalake_core::DeltaOps;
+use url::Url;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), deltalake::errors::DeltaTableError> {
