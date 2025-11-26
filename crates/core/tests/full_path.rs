@@ -21,8 +21,8 @@ async fn read_table_with_full_paths_and_compare() {
 
     // Use a fresh temporary directory as the target table location and clone the
     // expected table there while rewriting data file paths to absolute paths.
-    let _tmpdir = tempfile::tempdir().unwrap();
-    let full_path_abs: PathBuf = _tmpdir.path().to_path_buf();
+    let tmpdir = tempfile::tempdir().unwrap();
+    let full_path_abs: PathBuf = tmpdir.path().to_path_buf();
     clone_test_dir_with_abs_paths(&expected_abs, &full_path_abs);
 
     let table = deltalake_core::open_table(Url::from_directory_path(&full_path_abs).unwrap())
