@@ -66,10 +66,6 @@ name = "basic_operations"
 required-features = ["datafusion"]
 
 [[example]]
-name = "full_path"
-required-features = ["datafusion"]
-
-[[example]]
 name = "load_table"
 required-features = ["datafusion"]
 

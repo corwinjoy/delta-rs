@@ -2,9 +2,9 @@
 // and that reading them yields the same data as the corresponding table
 // with relative file paths.
 
+use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
-use serde_json::Value;
 use url::Url;
 
 #[cfg(feature = "datafusion")]
@@ -18,11 +18,11 @@ async fn read_table_with_full_paths_and_compare() {
 
     let expected_rel = Path::new("../test/tests/data/delta-0.8.0");
     let expected_abs = fs::canonicalize(expected_rel).unwrap();
-    
-    // Use relative paths and resolve them to absolute by canonicalizing.
-    let full_path_rel = Path::new("../test/tests/data/delta-0.8.0-full-path");
-    let full_path_abs: PathBuf = fs::canonicalize(full_path_rel).unwrap();
 
+    // Use a fresh temporary directory as the target table location and clone the
+    // expected table there while rewriting data file paths to absolute paths.
+    let _tmpdir = tempfile::tempdir().unwrap();
+    let full_path_abs: PathBuf = _tmpdir.path().to_path_buf();
     clone_test_dir_with_abs_paths(&expected_abs, &full_path_abs);
 
     let table = deltalake_core::open_table(Url::from_directory_path(&full_path_abs).unwrap())
@@ -35,16 +35,12 @@ async fn read_table_with_full_paths_and_compare() {
 
     let mut expected: Vec<String> = vec![
         full_path_abs
-            .join(
-                "part-00000-c9b90f86-73e6-46c8-93ba-ff6bfaf892a1-c000.snappy.parquet",
-            )
+            .join("part-00000-c9b90f86-73e6-46c8-93ba-ff6bfaf892a1-c000.snappy.parquet")
             .to_str()
             .unwrap()
             .to_string(),
         full_path_abs
-            .join(
-                "part-00000-04ec9591-0b73-459e-8d18-ba5711d6cbe1-c000.snappy.parquet",
-            )
+            .join("part-00000-04ec9591-0b73-459e-8d18-ba5711d6cbe1-c000.snappy.parquet")
             .to_str()
             .unwrap()
             .to_string(),
@@ -53,10 +49,12 @@ async fn read_table_with_full_paths_and_compare() {
     files.sort();
     expected.sort();
     assert_eq!(files, expected);
+    // println!("{:?}", files);
 
     // Load data from the full-path table.
     let (_table, stream) = DeltaOps(table).load().await.unwrap();
     let data: Vec<RecordBatch> = collect_sendable_stream(stream).await.unwrap();
+    // println!("{:?}", data);
 
     // Load data from the equivalent table with relative paths and compare.
     let expected_table =
@@ -64,8 +62,7 @@ async fn read_table_with_full_paths_and_compare() {
             .await
             .unwrap();
     let (_table, stream) = DeltaOps(expected_table).load().await.unwrap();
-    let expected_data: Vec<RecordBatch> =
-        collect_sendable_stream(stream).await.unwrap();
+    let expected_data: Vec<RecordBatch> = collect_sendable_stream(stream).await.unwrap();
 
     let expected_lines = format_batches(&*expected_data).unwrap().to_string();
     let expected_lines_vec: Vec<&str> = expected_lines.trim().lines().collect();
@@ -128,9 +125,7 @@ fn use_abs_path_for_action(target_dir: &PathBuf, action: &mut Value) {
             if let Some(rel) = path_val.as_str() {
                 // Convert to absolute path under the copied table directory
                 let abs = target_dir.join(rel);
-                *path_val = serde_json::Value::String(
-                    abs.to_str().unwrap().to_string(),
-                );
+                *path_val = serde_json::Value::String(abs.to_str().unwrap().to_string());
             }
         }
     }
