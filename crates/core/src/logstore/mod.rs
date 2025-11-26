@@ -534,6 +534,19 @@ pub(crate) fn object_store_path(table_root: &Url) -> DeltaResult<Path> {
 
 /// TODO
 pub fn to_uri(root: &Url, location: &Path) -> String {
+    // If the provided location already looks like a fully-qualified URI or an
+    // absolute filesystem path, return it as-is. This allows tables whose log
+    // entries contain full paths (e.g., "/abs/path/file.parquet" or
+    // "s3://bucket/key") to be supported without incorrectly joining them to
+    // the table root.
+    let loc = location.as_ref();
+    if loc.contains("://") {
+        return loc.to_string();
+    }
+    #[cfg(unix)]
+    if loc.starts_with('/') {
+        return loc.to_string();
+    }
     match root.scheme() {
         "file" => {
             #[cfg(windows)]

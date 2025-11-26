@@ -40,8 +40,16 @@ impl TryFrom<&Add> for ObjectMeta {
         )?;
 
         Ok(Self {
-            // TODO this won't work for absolute paths, since Paths are always relative to store.
-            location: Path::parse(value.path.as_str())?,
+            // Preserve absolute filesystem paths and fully qualified URIs as-is.
+            // Fall back to parsing relative paths via object_store::path::Path.
+            location: {
+                let p = value.path.as_str();
+                if p.contains("://") || p.starts_with('/') {
+                    Path::from(p)
+                } else {
+                    Path::parse(p)?
+                }
+            },
             last_modified,
             size: value.size as u64,
             e_tag: None,

@@ -119,10 +119,16 @@ impl LogicalFileView {
     // TODO assert consistent handling of the paths encoding when reading log data so this logic can be removed.
     pub(crate) fn object_store_path(&self) -> Path {
         let path = self.path();
-        // Try to preserve percent encoding if possible
-        match Path::parse(path.as_ref()) {
+        let raw = path.as_ref();
+        // Preserve full URIs and absolute filesystem paths as-is, since
+        // object_store::path::Path by default normalizes to relative paths.
+        if raw.contains("://") || raw.starts_with('/') {
+            return Path::from(raw);
+        }
+        // Try to preserve percent encoding if possible for relative paths
+        match Path::parse(raw) {
             Ok(path) => path,
-            Err(_) => Path::from(path.as_ref()),
+            Err(_) => Path::from(raw),
         }
     }
 

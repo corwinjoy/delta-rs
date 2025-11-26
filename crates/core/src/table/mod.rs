@@ -291,23 +291,52 @@ impl DeltaTable {
         &self,
         filters: &[PartitionFilter],
     ) -> Result<Vec<String>, DeltaTableError> {
-        let files = self.get_files_by_partitions(filters).await?;
-        Ok(files
-            .iter()
-            .map(|fname| self.log_store.to_uri(fname))
-            .collect())
+        let Some(state) = self.state.as_ref() else {
+            return Err(DeltaTableError::NotInitialized);
+        };
+        let mut out: Vec<String> = Vec::new();
+        let mut stream = state
+            .snapshot()
+            .file_views_by_partitions(&self.log_store, filters);
+        while let Some(item) = stream.next().await {
+            let add = item?;
+            let p = add.path();
+            let uri = if p.contains("://") || p.starts_with('/') {
+                p.into_owned()
+            } else {
+                let path = add.object_store_path();
+                self.log_store.to_uri(&path)
+            };
+            out.push(uri);
+        }
+        Ok(out)
     }
 
     /// Returns a URIs for all active files present in the current table version.
     pub fn get_file_uris(&self) -> DeltaResult<impl Iterator<Item = String> + '_> {
-        Ok(self
-            .state
-            .as_ref()
-            .ok_or(DeltaTableError::NotInitialized)?
-            .log_data()
-            .into_iter()
-            .map(|add| add.object_store_path())
-            .map(|path| self.log_store.to_uri(&path)))
+        let state = self.state.as_ref().ok_or(DeltaTableError::NotInitialized)?;
+        let root = self.log_store.config().location.clone();
+        #[allow(clippy::redundant_clone)]
+        Ok(state.log_data().into_iter().map(move |add| {
+            let p = add.path();
+            if p.contains("://") {
+                return p.into_owned();
+            }
+            if p.starts_with('/') {
+                return p.into_owned();
+            }
+            // Special handling for absolute file paths where the leading slash was
+            // lost when converting through object_store::path::Path elsewhere.
+            if root.scheme() == "file" {
+                let root_path = root.path(); // e.g. "/home/user/table"
+                let root_no_lead = root_path.trim_start_matches('/');
+                if p.starts_with(root_no_lead) {
+                    return format!("/{}", p);
+                }
+            }
+            let path = add.object_store_path();
+            self.log_store.to_uri(&path)
+        }))
     }
 
     /// Returns the currently loaded state snapshot.

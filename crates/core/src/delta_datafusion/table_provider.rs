@@ -574,7 +574,33 @@ impl<'a> DeltaScanBuilder<'a> {
         let table_partition_cols = &self.snapshot.metadata().partition_columns();
 
         for action in files.iter() {
-            let mut part = partitioned_file_from_action(action, table_partition_cols, &schema);
+            // Normalize path for reading: if the add path is a full URI or absolute path
+            // that lies under the table root, strip the table root prefix so the resulting
+            // path is relative to the table-scoped object store.
+            let mut adjusted = action.clone();
+            let root = self.log_store.config().location.clone();
+            let p = adjusted.path.as_str();
+            if p.contains("://") {
+                let root_str = root.as_str().trim_end_matches('/');
+                if p.starts_with(root_str) {
+                    let mut suf = &p[root_str.len()..];
+                    if suf.starts_with('/') {
+                        suf = &suf[1..];
+                    }
+                    adjusted.path = suf.to_string();
+                }
+            } else if root.scheme() == "file" {
+                let root_path = root.path();
+                if p.starts_with(root_path) {
+                    let mut suf = &p[root_path.len()..];
+                    if suf.starts_with('/') {
+                        suf = &suf[1..];
+                    }
+                    adjusted.path = suf.to_string();
+                }
+            }
+
+            let mut part = partitioned_file_from_action(&adjusted, table_partition_cols, &schema);
 
             if config.file_column_name.is_some() {
                 let partition_value = if config.wrap_partition_values {
