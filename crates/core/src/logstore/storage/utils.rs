@@ -125,16 +125,7 @@ impl TryFrom<&Add> for ObjectMeta {
             // - For relative paths (typical case), use Path::parse.
             location: {
                 let p = value.path.as_str();
-                if StdPath::new(p).is_absolute() {
-                    // Absolute filesystem path
-                    Path::parse(p)?
-                } else if Url::parse(p).is_ok() {
-                    // Fully qualified URI: do NOT re-encode percent signs
-                    // Treat as an already-escaped path string
-                    Path::parse(p)?
-                } else {
-                    Path::parse(p)?
-                }
+                Path::parse(p)?
             },
             last_modified,
             size: value.size as u64,
