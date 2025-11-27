@@ -602,11 +602,22 @@ impl<'a> DeltaScanBuilder<'a> {
                             // Absolute filesystem path: keep as-is
                         } else {
                             // Relative path: make it absolute under the table root directory
-                            let mut root_path = root.path().to_string();
-                            if !root_path.ends_with('/') {
-                                root_path.push('/');
+                            // Build absolute filesystem path under table root using proper path joining
+                            // to avoid issues with different separators, duplicate slashes, and empty roots.
+                            let root_fs_path = root
+                                .to_file_path()
+                                .unwrap_or_else(|_| StdPath::new(root.path()).to_path_buf());
+                            // Ensure we treat input as relative by stripping any leading separators
+                            // which could cause PathBuf::join to ignore the root on some platforms.
+                            let rel = p.trim_start_matches(['/', '\\']);
+                            let full_path = root_fs_path.join(rel);
+                            if let Some(s) = full_path.to_str() {
+                                adjusted.path = s.to_string();
+                            } else {
+                                // Fallback to original behavior if path can't be represented as UTF-8
+                                // (object_store and DataFusion expect UTF-8 paths).
+                                adjusted.path = full_path.to_string_lossy().into_owned();
                             }
-                            adjusted.path = format!("{}{}", root_path, p);
                         }
                     }
                 }
