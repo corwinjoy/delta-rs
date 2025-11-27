@@ -15,7 +15,6 @@ use delta_kernel::schema::DataType;
 use object_store::path::Path;
 use object_store::ObjectMeta;
 use percent_encoding::percent_decode_str;
-use std::path::Path as StdPath;
 use url::Url;
 
 use crate::kernel::scalars::ScalarExt;

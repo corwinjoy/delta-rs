@@ -18,7 +18,7 @@ pub(super) mod utils;
 // Re-export selected utilities for broader use across the crate without exposing the
 // private `utils` submodule path.
 pub use utils::{
-    is_absolute_uri_or_path, normalize_path_for_file_scheme, strip_table_root_from_full_uri,
+    normalize_path_for_file_scheme, strip_table_root_from_full_uri,
 };
 
 static DELTA_LOG_PATH: LazyLock<Path> = LazyLock::new(|| Path::from("_delta_log"));

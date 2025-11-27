@@ -11,7 +11,6 @@ use object_store::{path::Path, ObjectStore};
 use serde::de::{Error, SeqAccess, Visitor};
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::path::Path as StdPath;
 use url::Url;
 
 use self::builder::DeltaTableConfig;
