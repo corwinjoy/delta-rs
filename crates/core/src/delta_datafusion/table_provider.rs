@@ -591,11 +591,13 @@ impl<'a> DeltaScanBuilder<'a> {
                 }
             } else if root.scheme() == "file" {
                 let root_path = root.path();
-                if p.starts_with(root_path) {
-                    let mut suf = &p[root_path.len()..];
-                    if suf.starts_with('/') {
-                        suf = &suf[1..];
-                    }
+                let root_with_sep = if root_path.ends_with('/') {
+                    root_path.to_string()
+                } else {
+                    format!("{}/", root_path)
+                };
+                if p.starts_with(&root_with_sep) {
+                    let suf = &p[root_with_sep.len()..];
                     adjusted.path = suf.to_string();
                 }
             }
