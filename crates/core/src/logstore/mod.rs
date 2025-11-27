@@ -85,9 +85,7 @@ pub use self::factories::{
 };
 pub use self::storage::utils::commit_uri_from_version;
 pub use self::storage::utils::is_absolute_uri_or_path;
-pub use self::storage::{
-    normalize_path_for_file_scheme, strip_table_root_from_full_uri,
-};
+pub use self::storage::{normalize_path_for_file_scheme, strip_table_root_from_full_uri};
 pub use self::storage::{
     DefaultObjectStoreRegistry, DeltaIOStorageBackend, IORuntime, ObjectStoreRef,
     ObjectStoreRegistry, ObjectStoreRetryExt,

@@ -304,21 +304,8 @@ impl DeltaTable {
             let add = item?;
             let p_cow = add.path();
             let p = p_cow.as_ref();
-            // Try parsing as a URI first. If it parses, it's an absolute URI.
-            // If it fails with RelativeUrlWithoutBase (or any other error),
-            // treat it as a filesystem path and check if it's absolute.
-            let uri = match Url::parse(p) {
-                Ok(_) => p.to_string(),
-                Err(_) => {
-                    if crate::logstore::is_absolute_uri_or_path(p) {
-                        p.to_string()
-                    } else {
-                        let path = add.object_store_path();
-                        self.log_store.to_uri(&path)
-                    }
-                }
-            };
-            out.push(uri);
+            let obj_path = add.object_store_path();
+            out.push(self.resolve_add_path_to_uri(p, &obj_path));
         }
         Ok(out)
     }
@@ -336,27 +323,46 @@ impl DeltaTable {
             // Try parsing as a URI first. If it parses, it's an absolute URI.
             // If it fails with RelativeUrlWithoutBase (or any other error),
             // treat it as a filesystem path and check if it's absolute.
-            match Url::parse(p) {
-                Ok(_) => p.to_string(),
-                Err(_) => {
-                    if crate::logstore::is_absolute_uri_or_path(p) {
-                        p.to_string()
-                    } else {
-                        // Special handling for absolute file paths where the leading slash was
-                        // lost when converting through object_store::path::Path elsewhere.
-                        if root.scheme() == "file" {
-                            let root_path = root.path(); // e.g. "/home/user/table"
-                            let root_no_lead = root_path.trim_start_matches('/');
-                            if p.starts_with(root_no_lead) {
-                                return format!("/{}", p);
-                            }
-                        }
-                        let path = add.object_store_path();
-                        self.log_store.to_uri(&path)
-                    }
-                }
-            }
+            let obj_path = add.object_store_path();
+            // We still keep `root` cloned above to preserve the move semantics in iterator,
+            // but the resolution logic is centralized in `resolve_add_path_to_uri`.
+            let _ = &root; // keep root captured in the closure
+            self.resolve_add_path_to_uri(p, &obj_path)
         }))
+    }
+
+    /// Resolve an add action's `path` string to a fully-qualified URI string.
+    ///
+    /// Behavior:
+    /// - If `p` parses as a URI, return it verbatim.
+    /// - Else if `p` is an absolute filesystem path, return it verbatim.
+    /// - Else interpret it relative to the table root and return the store URI.
+    /// - Includes special handling for `file://` roots to restore a missing leading slash
+    ///   that can be lost when going through object_store::path::Path conversions.
+    fn resolve_add_path_to_uri(&self, p: &str, obj_path: &Path) -> String {
+        // Absolute URI case
+        if Url::parse(p).is_ok() {
+            return p.to_string();
+        }
+
+        // Absolute filesystem path case
+        if crate::logstore::is_absolute_uri_or_path(p) {
+            return p.to_string();
+        }
+
+        // Special handling for absolute file paths where the leading slash was lost
+        // when converting through object_store::path::Path elsewhere.
+        let root = &self.log_store.config().location;
+        if root.scheme() == "file" {
+            let root_path = root.path(); // e.g. "/home/user/table"
+            let root_no_lead = root_path.trim_start_matches('/');
+            if p.starts_with(root_no_lead) {
+                return format!("/{}", p);
+            }
+        }
+
+        // Fallback: construct a URI using the store from the object_store path
+        self.log_store.to_uri(obj_path)
     }
 
     /// Returns the currently loaded state snapshot.

@@ -84,10 +84,8 @@ pub fn create_partition_values<F: FileAction>(
             let normalized_path = {
                 let p = action.path();
                 if base_location.scheme() == "file" {
-                    let normalized = crate::logstore::normalize_path_for_file_scheme(
-                        base_location,
-                        p.as_str(),
-                    );
+                    let normalized =
+                        crate::logstore::normalize_path_for_file_scheme(base_location, p.as_str());
                     Path::parse(&normalized)?
                 } else {
                     // Non-file scheme: keep as provided (typically already relative)

@@ -56,10 +56,10 @@ use crate::delta_datafusion::{
     get_null_of_arrow_type, register_store, to_correct_scalar_value, DataFusionMixins as _,
     LogDataHandler,
 };
-use crate::logstore::{normalize_path_for_file_scheme, strip_table_root_from_full_uri};
 use crate::kernel::schema::cast::cast_record_batch;
 use crate::kernel::transaction::{CommitBuilder, PROTOCOL};
 use crate::kernel::{Action, Add, EagerSnapshot, Remove};
+use crate::logstore::{normalize_path_for_file_scheme, strip_table_root_from_full_uri};
 use crate::operations::write::writer::{DeltaWriter, WriterConfig};
 use crate::operations::write::WriterStatsConfig;
 use crate::protocol::{DeltaOperation, SaveMode};
