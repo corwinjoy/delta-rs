@@ -96,7 +96,7 @@ pub fn create_partition_values<F: FileAction>(
                                 let root_path = StdPath::new(base_location.path());
                                 let full_path = root_path.join(p.as_str());
                                 let full_str = full_path.to_str().ok_or_else(|| object_store::Error::Generic {
-                                    store: "local".to_string(),
+                                    store: "local",
                                     source: "Failed to convert path to string".into(),
                                 })?;
                                 Path::parse(full_str)?
