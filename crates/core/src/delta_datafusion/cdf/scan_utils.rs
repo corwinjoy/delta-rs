@@ -93,12 +93,13 @@ pub fn create_partition_values<F: FileAction>(
                                 Path::parse(p.as_str())?
                             } else {
                                 // Build absolute filesystem path under table root
-                                let mut root_path = base_location.path().to_string();
-                                if !root_path.ends_with('/') {
-                                    root_path.push('/');
-                                }
-                                let full = format!("{}{}", root_path, p);
-                                Path::parse(&full)?
+                                let root_path = StdPath::new(base_location.path());
+                                let full_path = root_path.join(p.as_str());
+                                let full_str = full_path.to_str().ok_or_else(|| object_store::Error::Generic {
+                                    store: "local".to_string(),
+                                    source: "Failed to convert path to string".into(),
+                                })?;
+                                Path::parse(full_str)?
                             }
                         }
                     }
