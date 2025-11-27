@@ -310,7 +310,7 @@ impl DeltaTable {
             let uri = match Url::parse(p) {
                 Ok(_) => p.to_string(),
                 Err(_) => {
-                    if StdPath::new(p).is_absolute() {
+                    if crate::logstore::is_absolute_uri_or_path(p) {
                         p.to_string()
                     } else {
                         let path = add.object_store_path();
@@ -339,7 +339,7 @@ impl DeltaTable {
             match Url::parse(p) {
                 Ok(_) => p.to_string(),
                 Err(_) => {
-                    if StdPath::new(p).is_absolute() {
+                    if crate::logstore::is_absolute_uri_or_path(p) {
                         p.to_string()
                     } else {
                         // Special handling for absolute file paths where the leading slash was

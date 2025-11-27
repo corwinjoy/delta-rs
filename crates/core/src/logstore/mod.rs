@@ -84,6 +84,7 @@ pub use self::factories::{
     LogStoreFactoryRegistry, ObjectStoreFactory, ObjectStoreFactoryRegistry,
 };
 pub use self::storage::utils::commit_uri_from_version;
+pub use self::storage::utils::is_absolute_uri_or_path;
 pub use self::storage::{
     DefaultObjectStoreRegistry, DeltaIOStorageBackend, IORuntime, ObjectStoreRef,
     ObjectStoreRegistry, ObjectStoreRetryExt,
@@ -539,7 +540,7 @@ pub fn to_uri(root: &Url, location: &Path) -> String {
     // If it fails with RelativeUrlWithoutBase (or any other error),
     // treat it as a filesystem path and check if it's absolute.
     let loc = location.as_ref();
-    if Url::parse(loc).is_ok() || StdPath::new(loc).is_absolute() {
+    if is_absolute_uri_or_path(loc) {
         return loc.to_string();
     }
     match root.scheme() {

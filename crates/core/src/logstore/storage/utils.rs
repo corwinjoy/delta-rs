@@ -22,6 +22,19 @@ pub fn commit_uri_from_version(version: i64) -> Path {
     super::DELTA_LOG_PATH.child(version.as_str())
 }
 
+/// Returns true if the provided string is either:
+/// - a fully-qualified URI (e.g., s3://bucket/path, file:///tmp/x, abfss://...), or
+/// - an absolute filesystem path on the current platform (e.g., /usr/bin, C:\\data\\file).
+///
+/// This helper consolidates common absolute path checks scattered throughout the codebase.
+pub fn is_absolute_uri_or_path(s: &str) -> bool {
+    if Url::parse(s).is_ok() {
+        true
+    } else {
+        StdPath::new(s).is_absolute()
+    }
+}
+
 impl TryFrom<Add> for ObjectMeta {
     type Error = DeltaTableError;
 
@@ -46,18 +59,10 @@ impl TryFrom<&Add> for ObjectMeta {
             // Fall back to parsing relative paths via object_store::path::Path.
             location: {
                 let p = value.path.as_str();
-                // Try parsing as a URI first. If it parses, it's an absolute URI.
-                // If it fails with RelativeUrlWithoutBase (or any other error),
-                // treat it as a filesystem path and check if it's absolute.
-                match Url::parse(p) {
-                    Ok(_) => Path::from(p),
-                    Err(_) => {
-                        if StdPath::new(p).is_absolute() {
-                            Path::from(p)
-                        } else {
-                            Path::parse(p)?
-                        }
-                    }
+                if is_absolute_uri_or_path(p) {
+                    Path::from(p)
+                } else {
+                    Path::parse(p)?
                 }
             },
             last_modified,

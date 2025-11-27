@@ -128,7 +128,7 @@ impl LogicalFileView {
         match Url::parse(raw) {
             Ok(_) => Path::from(raw),
             Err(_) => {
-                if StdPath::new(raw).is_absolute() {
+                if crate::logstore::is_absolute_uri_or_path(raw) {
                     Path::from(raw)
                 } else {
                     // Try to preserve percent encoding if possible for relative paths

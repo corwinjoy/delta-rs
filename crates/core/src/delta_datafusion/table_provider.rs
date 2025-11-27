@@ -596,7 +596,7 @@ impl<'a> DeltaScanBuilder<'a> {
                     }
                 }
                 Err(_) => {
-                    if StdPath::new(p).is_absolute() {
+                    if crate::logstore::is_absolute_uri_or_path(p) {
                         if root.scheme() == "file" {
                             let root_path = root.path();
                             let root_with_sep = if root_path.ends_with('/') {
