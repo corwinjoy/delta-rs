@@ -33,12 +33,14 @@ async fn compare_table_with_full_paths_to_original_table() {
     // Create a fresh temp directory and clone the table there, but rewrite
     // all add/remove paths in the log to point to ABSOLUTE paths under the
     // ORIGINAL table directory (expected_abs), not the cloned directory.
-    let tmpdir = tempfile::tempdir().unwrap();
-    let cloned_dir: PathBuf = tmpdir.path().to_path_buf();
-    clone_test_dir_with_abs_paths_from_src(&expected_abs, &cloned_dir);
+    // let tmpdir = tempfile::tempdir().unwrap();
+    // let cloned_dir: PathBuf = tmpdir.path().to_path_buf();
+    let cloned_rel = Path::new("../test/tests/data/delta-0.8.0-cloned");
+    let cloned_abs = fs::canonicalize(cloned_rel).unwrap();
+    clone_test_dir_with_abs_paths_from_src(&expected_abs, &cloned_abs);
 
     // Open the cloned table and compare URIs to original table dir and data to original.
-    assert_table_uris_and_data(&cloned_dir, &expected_abs, &expected_abs).await;
+    assert_table_uris_and_data(&cloned_abs, &expected_abs, &expected_abs).await;
 }
 
 // Helper to generate the expected file URIs (two known parquet parts) for a base directory
