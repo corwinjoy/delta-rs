@@ -56,6 +56,7 @@ use crate::delta_datafusion::{
     get_null_of_arrow_type, register_store, to_correct_scalar_value, DataFusionMixins as _,
     LogDataHandler,
 };
+use crate::logstore::{normalize_path_for_file_scheme, strip_table_root_from_full_uri};
 use crate::kernel::schema::cast::cast_record_batch;
 use crate::kernel::transaction::{CommitBuilder, PROTOCOL};
 use crate::kernel::{Action, Add, EagerSnapshot, Remove};
@@ -576,69 +577,22 @@ impl<'a> DeltaScanBuilder<'a> {
         let table_partition_cols = &self.snapshot.metadata().partition_columns();
 
         for action in files.iter() {
-            // Normalize path for reading depending on scheme:
-            // - For local file tables, preserve absolute filesystem paths and file:// URIs.
-            //   This allows reading files referenced with fully-qualified paths.
-            // - Otherwise, if the add path is a full URI under the table root, strip the root
-            //   so paths become relative to the table-scoped object store.
+            // Normalize path using shared utilities to avoid duplication.
             let mut adjusted = action.clone();
             let root = self.log_store.config().location.clone();
             let p = adjusted.path.as_str();
 
             if root.scheme() == "file" {
-                // For file scheme, keep absolute paths as-is; if it's a file:// URI, convert to
-                // an absolute filesystem path using the URL's path. For relative paths, keep
-                // them relative (they will be resolved against the DF-registered root store).
-                match Url::parse(p) {
-                    Ok(url) if url.scheme() == "file" => {
-                        adjusted.path = url.path().to_string();
-                    }
-                    Ok(_) => {
-                        // Non-file URI; leave as-is and let downstream handle, though unlikely.
-                    }
-                    Err(_) => {
-                        // Not a URI
-                        if crate::logstore::is_absolute_uri_or_path(p) {
-                            // Absolute filesystem path: keep as-is
-                        } else {
-                            // Relative path: make it absolute under the table root directory
-                            // Build absolute filesystem path under table root using proper path joining
-                            // to avoid issues with different separators, duplicate slashes, and empty roots.
-                            let root_fs_path = root
-                                .to_file_path()
-                                .unwrap_or_else(|_| StdPath::new(root.path()).to_path_buf());
-                            // Ensure we treat input as relative by stripping any leading separators
-                            // which could cause PathBuf::join to ignore the root on some platforms.
-                            let rel = p.trim_start_matches(['/', '\\']);
-                            let full_path = root_fs_path.join(rel);
-                            if let Some(s) = full_path.to_str() {
-                                adjusted.path = s.to_string();
-                            } else {
-                                // Fallback to original behavior if path can't be represented as UTF-8
-                                // (object_store and DataFusion expect UTF-8 paths).
-                                adjusted.path = full_path.to_string_lossy().into_owned();
-                            }
-                        }
-                    }
-                }
+                adjusted.path = normalize_path_for_file_scheme(&root, p);
             } else {
-                // Non-file scheme: strip root prefix from full URIs so DF paths are relative.
+                // For non-file schemes, strip root when full URI is given so paths are relative
+                // to the table-scoped object store.
                 match Url::parse(p) {
                     Ok(_) => {
-                        let root_str = root.as_str().trim_end_matches('/');
-                        let root_with_sep = format!("{}/", root_str);
-                        if p.starts_with(&root_with_sep) {
-                            let suf = &p[root_with_sep.len()..];
-                            adjusted.path = suf.to_string();
-                        } else if p == root_str {
-                            adjusted.path = "".to_string();
-                        }
+                        adjusted.path = strip_table_root_from_full_uri(&root, p);
                     }
                     Err(_) => {
-                        if crate::logstore::is_absolute_uri_or_path(p) {
-                            // Absolute filesystem paths for non-file scheme should not occur,
-                            // but if they do, keep them as-is.
-                        }
+                        // Not a URI; keep as-is (typically already relative to the store)
                     }
                 }
             }

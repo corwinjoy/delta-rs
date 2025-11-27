@@ -35,6 +35,67 @@ pub fn is_absolute_uri_or_path(s: &str) -> bool {
     }
 }
 
+/// Normalize a data file path for the local file scheme.
+///
+/// This consolidates common logic used in multiple places to handle paths
+/// when the table location uses the `file://` scheme:
+/// - If `input` is a `file://` URI, convert it to a platform filesystem path.
+/// - If `input` is a different fully-qualified URI or an absolute filesystem path,
+///   keep it as-is.
+/// - Otherwise, treat `input` as a relative path and join it under the filesystem
+///   path of `root` (the table location), returning the absolute filesystem path
+///   as a UTF-8 string (lossy if necessary).
+pub fn normalize_path_for_file_scheme(root: &Url, input: &str) -> String {
+    // Attempt to parse as URL first
+    match Url::parse(input) {
+        Ok(url) if url.scheme() == "file" => {
+            // Convert file URI to filesystem path
+            url.path().to_string()
+        }
+        Ok(_) => {
+            // Some other URI scheme; keep as-is
+            input.to_string()
+        }
+        Err(_) => {
+            // Not a URI — could be absolute filesystem path or relative
+            if is_absolute_uri_or_path(input) {
+                // Absolute filesystem path: keep as-is
+                input.to_string()
+            } else {
+                // Relative path: join under the table root directory
+                let root_fs_path = root
+                    .to_file_path()
+                    .unwrap_or_else(|_| StdPath::new(root.path()).to_path_buf());
+                // Ensure we treat input as relative by stripping any leading separators
+                let rel = input.trim_start_matches(['/', '\\']);
+                let full_path = root_fs_path.join(rel);
+                full_path
+                    .to_str()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| full_path.to_string_lossy().into_owned())
+            }
+        }
+    }
+}
+
+/// For non-`file` schemes, strip the table root prefix from a fully-qualified URI
+/// so that returned paths are relative to the table-scoped object store.
+///
+/// - If `input` begins with `root` followed by a `/`, returns the suffix after that `/`.
+/// - If `input` is exactly equal to `root` (ignoring trailing `/` on `root`), returns an empty string.
+/// - Otherwise, returns `input` unchanged.
+pub fn strip_table_root_from_full_uri(root: &Url, input: &str) -> String {
+    let root_str = root.as_str().trim_end_matches('/');
+    let root_with_sep = format!("{}/", root_str);
+    if input.starts_with(&root_with_sep) {
+        input[root_with_sep.len()..].to_string()
+    } else if input == root_str {
+        String::new()
+    } else {
+        input.to_string()
+    }
+}
+
 impl TryFrom<Add> for ObjectMeta {
     type Error = DeltaTableError;
 

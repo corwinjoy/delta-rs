@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::Path as StdPath;
 use std::sync::Arc;
 
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
@@ -85,26 +84,13 @@ pub fn create_partition_values<F: FileAction>(
             let normalized_path = {
                 let p = action.path();
                 if base_location.scheme() == "file" {
-                    match Url::parse(p.as_str()) {
-                        Ok(url) if url.scheme() == "file" => Path::parse(url.path())?,
-                        Ok(_) => Path::parse(p.as_str())?,
-                        Err(_) => {
-                            if StdPath::new(p.as_str()).is_absolute() {
-                                Path::parse(p.as_str())?
-                            } else {
-                                // Build absolute filesystem path under table root
-                                let root_path = StdPath::new(base_location.path());
-                                let full_path = root_path.join(p.as_str());
-                                let full_str = full_path.to_str().ok_or_else(|| object_store::Error::Generic {
-                                    store: "local",
-                                    source: "Failed to convert path to string".into(),
-                                })?;
-                                Path::parse(full_str)?
-                            }
-                        }
-                    }
+                    let normalized = crate::logstore::normalize_path_for_file_scheme(
+                        base_location,
+                        p.as_str(),
+                    );
+                    Path::parse(&normalized)?
                 } else {
-                    // Non-file scheme
+                    // Non-file scheme: keep as provided (typically already relative)
                     Path::parse(p.as_str())?
                 }
             };
