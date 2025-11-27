@@ -3,6 +3,8 @@
 use chrono::DateTime;
 use object_store::path::Path;
 use object_store::ObjectMeta;
+use std::path::Path as StdPath;
+use url::Url;
 
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::kernel::Add;
@@ -44,21 +46,18 @@ impl TryFrom<&Add> for ObjectMeta {
             // Fall back to parsing relative paths via object_store::path::Path.
             location: {
                 let p = value.path.as_str();
-                // Detect absolute URIs and filesystem paths across platforms.
-                // - Fully qualified URIs contain "://"
-                // - Unix absolute paths start with '/'
-                // - Windows absolute paths include:
-                //   * Drive-letter paths like "C:/..." or "C:\\..."
-                //   * UNC paths starting with "\\\\" or "//"
-                let is_windows_drive_path = p.len() >= 3
-                    && p.as_bytes()[1] == b':'
-                    && (p.as_bytes()[2] == b'/' || p.as_bytes()[2] == b'\\')
-                    && p.as_bytes()[0].is_ascii_alphabetic();
-                let is_unc_path = p.starts_with("\\\\") || p.starts_with("//");
-                if p.contains("://") || p.starts_with('/') || is_windows_drive_path || is_unc_path {
-                    Path::from(p)
-                } else {
-                    Path::parse(p)?
+                // Try parsing as a URI first. If it parses, it's an absolute URI.
+                // If it fails with RelativeUrlWithoutBase (or any other error),
+                // treat it as a filesystem path and check if it's absolute.
+                match Url::parse(p) {
+                    Ok(_) => Path::from(p),
+                    Err(_) => {
+                        if StdPath::new(p).is_absolute() {
+                            Path::from(p)
+                        } else {
+                            Path::parse(p)?
+                        }
+                    }
                 }
             },
             last_modified,

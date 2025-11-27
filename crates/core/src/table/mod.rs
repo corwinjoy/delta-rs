@@ -11,6 +11,8 @@ use object_store::{path::Path, ObjectStore};
 use serde::de::{Error, SeqAccess, Visitor};
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::path::Path as StdPath;
+use url::Url;
 
 use self::builder::DeltaTableConfig;
 use self::state::DeltaTableState;
@@ -300,23 +302,21 @@ impl DeltaTable {
             .file_views_by_partitions(&self.log_store, filters);
         while let Some(item) = stream.next().await {
             let add = item?;
-            let p = add.path();
-            // Support absolute URIs and filesystem paths across platforms.
-            // - Fully qualified URIs contain "://"
-            // - Unix absolute paths start with '/'
-            // - Windows absolute paths include:
-            //   * Drive-letter paths like "C:/..." or "C:\\..."
-            //   * UNC paths starting with "\\\\" or "//"
-            let is_windows_drive_path = p.len() >= 3
-                && p.as_bytes()[1] == b':'
-                && (p.as_bytes()[2] == b'/' || p.as_bytes()[2] == b'\\')
-                && p.as_bytes()[0].is_ascii_alphabetic();
-            let is_unc_path = p.starts_with("\\\\") || p.starts_with("//");
-            let uri = if p.contains("://") || p.starts_with('/') || is_windows_drive_path || is_unc_path {
-                p.into_owned()
-            } else {
-                let path = add.object_store_path();
-                self.log_store.to_uri(&path)
+            let p_cow = add.path();
+            let p = p_cow.as_ref();
+            // Try parsing as a URI first. If it parses, it's an absolute URI.
+            // If it fails with RelativeUrlWithoutBase (or any other error),
+            // treat it as a filesystem path and check if it's absolute.
+            let uri = match Url::parse(p) {
+                Ok(_) => p.to_string(),
+                Err(_) => {
+                    if StdPath::new(p).is_absolute() {
+                        p.to_string()
+                    } else {
+                        let path = add.object_store_path();
+                        self.log_store.to_uri(&path)
+                    }
+                }
             };
             out.push(uri);
         }
@@ -331,33 +331,31 @@ impl DeltaTable {
         // as it is moved into the closure for the iterator, which may outlive the current scope.
         #[allow(clippy::redundant_clone)]
         Ok(state.log_data().into_iter().map(move |add| {
-            let p = add.path();
-            // Support absolute URIs and filesystem paths across platforms.
-            // - Fully qualified URIs contain "://"
-            // - Unix absolute paths start with '/'
-            // - Windows absolute paths include drive-letter and UNC paths.
-            let is_windows_drive_path = p.len() >= 3
-                && p.as_bytes()[1] == b':'
-                && (p.as_bytes()[2] == b'/' || p.as_bytes()[2] == b'\\')
-                && p.as_bytes()[0].is_ascii_alphabetic();
-            let is_unc_path = p.starts_with("\\\\") || p.starts_with("//");
-            if p.contains("://") || is_windows_drive_path || is_unc_path {
-                return p.into_owned();
-            }
-            if p.starts_with('/') {
-                return p.into_owned();
-            }
-            // Special handling for absolute file paths where the leading slash was
-            // lost when converting through object_store::path::Path elsewhere.
-            if root.scheme() == "file" {
-                let root_path = root.path(); // e.g. "/home/user/table"
-                let root_no_lead = root_path.trim_start_matches('/');
-                if p.starts_with(root_no_lead) {
-                    return format!("/{}", p);
+            let p_cow = add.path();
+            let p = p_cow.as_ref();
+            // Try parsing as a URI first. If it parses, it's an absolute URI.
+            // If it fails with RelativeUrlWithoutBase (or any other error),
+            // treat it as a filesystem path and check if it's absolute.
+            match Url::parse(p) {
+                Ok(_) => p.to_string(),
+                Err(_) => {
+                    if StdPath::new(p).is_absolute() {
+                        p.to_string()
+                    } else {
+                        // Special handling for absolute file paths where the leading slash was
+                        // lost when converting through object_store::path::Path elsewhere.
+                        if root.scheme() == "file" {
+                            let root_path = root.path(); // e.g. "/home/user/table"
+                            let root_no_lead = root_path.trim_start_matches('/');
+                            if p.starts_with(root_no_lead) {
+                                return format!("/{}", p);
+                            }
+                        }
+                        let path = add.object_store_path();
+                        self.log_store.to_uri(&path)
+                    }
                 }
             }
-            let path = add.object_store_path();
-            self.log_store.to_uri(&path)
         }))
     }
 

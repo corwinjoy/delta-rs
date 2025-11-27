@@ -15,6 +15,8 @@ use delta_kernel::schema::DataType;
 use object_store::path::Path;
 use object_store::ObjectMeta;
 use percent_encoding::percent_decode_str;
+use std::path::Path as StdPath;
+use url::Url;
 
 use crate::kernel::scalars::ScalarExt;
 use crate::kernel::{Add, DeletionVectorDescriptor, Remove};
@@ -120,15 +122,22 @@ impl LogicalFileView {
     pub(crate) fn object_store_path(&self) -> Path {
         let path = self.path();
         let raw = path.as_ref();
-        // Preserve full URIs and absolute filesystem paths as-is, since
-        // object_store::path::Path by default normalizes to relative paths.
-        if raw.contains("://") || raw.starts_with('/') {
-            return Path::from(raw);
-        }
-        // Try to preserve percent encoding if possible for relative paths
-        match Path::parse(raw) {
-            Ok(path) => path,
-            Err(_) => Path::from(raw),
+        // Try parsing as a URI first. If it parses, it's an absolute URI.
+        // If it fails with RelativeUrlWithoutBase (or any other error),
+        // treat it as a filesystem path and check if it's absolute.
+        match Url::parse(raw) {
+            Ok(_) => Path::from(raw),
+            Err(_) => {
+                if StdPath::new(raw).is_absolute() {
+                    Path::from(raw)
+                } else {
+                    // Try to preserve percent encoding if possible for relative paths
+                    match Path::parse(raw) {
+                        Ok(path) => path,
+                        Err(_) => Path::from(raw),
+                    }
+                }
+            }
         }
     }
 

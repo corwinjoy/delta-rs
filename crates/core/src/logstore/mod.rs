@@ -72,6 +72,7 @@ use tokio::runtime::RuntimeFlavor;
 use tracing::*;
 use url::Url;
 use uuid::Uuid;
+use std::path::Path as StdPath;
 
 use crate::kernel::transaction::TransactionError;
 use crate::kernel::{spawn_blocking_with_span, Action};
@@ -534,17 +535,11 @@ pub(crate) fn object_store_path(table_root: &Url) -> DeltaResult<Path> {
 
 /// TODO
 pub fn to_uri(root: &Url, location: &Path) -> String {
-    // If the provided location already looks like a fully-qualified URI or an
-    // absolute filesystem path, return it as-is. This allows tables whose log
-    // entries contain full paths (e.g., "/abs/path/file.parquet" or
-    // "s3://bucket/key") to be supported without incorrectly joining them to
-    // the table root.
+    // Try parsing as a URI first. If it parses, it's an absolute URI.
+    // If it fails with RelativeUrlWithoutBase (or any other error),
+    // treat it as a filesystem path and check if it's absolute.
     let loc = location.as_ref();
-    if loc.contains("://") {
-        return loc.to_string();
-    }
-    #[cfg(unix)]
-    if loc.starts_with('/') {
+    if Url::parse(loc).is_ok() || StdPath::new(loc).is_absolute() {
         return loc.to_string();
     }
     match root.scheme() {

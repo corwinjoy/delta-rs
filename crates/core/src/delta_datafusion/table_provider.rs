@@ -48,6 +48,8 @@ use futures::StreamExt as _;
 use itertools::Itertools;
 use object_store::ObjectMeta;
 use serde::{Deserialize, Serialize};
+use std::path::Path as StdPath;
+use url::Url;
 
 use crate::delta_datafusion::schema_adapter::DeltaSchemaAdapterFactory;
 use crate::delta_datafusion::{
@@ -580,26 +582,36 @@ impl<'a> DeltaScanBuilder<'a> {
             let mut adjusted = action.clone();
             let root = self.log_store.config().location.clone();
             let p = adjusted.path.as_str();
-            if p.contains("://") {
-                let root_str = root.as_str().trim_end_matches('/');
-                let root_with_sep = format!("{}/", root_str);
-                if p.starts_with(&root_with_sep) {
-                    let suf = &p[root_with_sep.len()..];
-                    adjusted.path = suf.to_string();
-                } else if p == root_str {
-                    // Exact match - file is at root level
-                    adjusted.path = "".to_string();
+            match Url::parse(p) {
+                // Fully qualified URI: compare against root URI string
+                Ok(_) => {
+                    let root_str = root.as_str().trim_end_matches('/');
+                    let root_with_sep = format!("{}/", root_str);
+                    if p.starts_with(&root_with_sep) {
+                        let suf = &p[root_with_sep.len()..];
+                        adjusted.path = suf.to_string();
+                    } else if p == root_str {
+                        // Exact match - file is at root level
+                        adjusted.path = "".to_string();
+                    }
                 }
-            } else if root.scheme() == "file" {
-                let root_path = root.path();
-                let root_with_sep = if root_path.ends_with('/') {
-                    root_path.to_string()
-                } else {
-                    format!("{}/", root_path)
-                };
-                if p.starts_with(&root_with_sep) {
-                    let suf = &p[root_with_sep.len()..];
-                    adjusted.path = suf.to_string();
+                Err(_) => {
+                    if StdPath::new(p).is_absolute() {
+                        if root.scheme() == "file" {
+                            let root_path = root.path();
+                            let root_with_sep = if root_path.ends_with('/') {
+                                root_path.to_string()
+                            } else {
+                                format!("{}/", root_path)
+                            };
+                            if p.starts_with(&root_with_sep) {
+                                let suf = &p[root_with_sep.len()..];
+                                adjusted.path = suf.to_string();
+                            } else if p == root_path {
+                                adjusted.path = "".to_string();
+                            }
+                        }
+                    }
                 }
             }
 
