@@ -55,10 +55,10 @@ fn expected_file_uris(dir: &Path) -> Vec<String> {
     v
 }
 
-// Helper that opens `table_dir`, checks its file URIs match those under `expected_uris_dir`,
+// Helper that opens `target_table_dir`, checks its file URIs match those under `expected_uris_dir`,
 // then loads data and compares against data loaded from `expected_table_dir`.
 async fn assert_table_uris_and_data(
-    cloned_dir: &Path,
+    target_table_dir: &Path,
     expected_uris_dir: &Path,
     expected_table_dir: &Path,
 ) {
@@ -69,7 +69,7 @@ async fn assert_table_uris_and_data(
     use deltalake_core::DeltaOps;
 
     // Open target table and verify file URIs
-    let table = deltalake_core::open_table(Url::from_directory_path(cloned_dir).unwrap())
+    let table = deltalake_core::open_table(Url::from_directory_path(target_table_dir).unwrap())
         .await
         .unwrap();
     let mut files: Vec<String> = table.get_file_uris().unwrap().collect();
