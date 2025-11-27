@@ -301,7 +301,18 @@ impl DeltaTable {
         while let Some(item) = stream.next().await {
             let add = item?;
             let p = add.path();
-            let uri = if p.contains("://") || p.starts_with('/') {
+            // Support absolute URIs and filesystem paths across platforms.
+            // - Fully qualified URIs contain "://"
+            // - Unix absolute paths start with '/'
+            // - Windows absolute paths include:
+            //   * Drive-letter paths like "C:/..." or "C:\\..."
+            //   * UNC paths starting with "\\\\" or "//"
+            let is_windows_drive_path = p.len() >= 3
+                && p.as_bytes()[1] == b':'
+                && (p.as_bytes()[2] == b'/' || p.as_bytes()[2] == b'\\')
+                && p.as_bytes()[0].is_ascii_alphabetic();
+            let is_unc_path = p.starts_with("\\\\") || p.starts_with("//");
+            let uri = if p.contains("://") || p.starts_with('/') || is_windows_drive_path || is_unc_path {
                 p.into_owned()
             } else {
                 let path = add.object_store_path();
@@ -321,7 +332,16 @@ impl DeltaTable {
         #[allow(clippy::redundant_clone)]
         Ok(state.log_data().into_iter().map(move |add| {
             let p = add.path();
-            if p.contains("://") {
+            // Support absolute URIs and filesystem paths across platforms.
+            // - Fully qualified URIs contain "://"
+            // - Unix absolute paths start with '/'
+            // - Windows absolute paths include drive-letter and UNC paths.
+            let is_windows_drive_path = p.len() >= 3
+                && p.as_bytes()[1] == b':'
+                && (p.as_bytes()[2] == b'/' || p.as_bytes()[2] == b'\\')
+                && p.as_bytes()[0].is_ascii_alphabetic();
+            let is_unc_path = p.starts_with("\\\\") || p.starts_with("//");
+            if p.contains("://") || is_windows_drive_path || is_unc_path {
                 return p.into_owned();
             }
             if p.starts_with('/') {
