@@ -314,6 +314,25 @@ pub(crate) fn register_store(store: LogStoreRef, env: &RuntimeEnv) {
     let scheme = store.config().location.scheme();
     if scheme == "file" {
         env.register_object_store(url, store.root_object_store(None));
+        /*
+        // SECURITY: Registering the root object store for the file scheme allows access to any file
+        // on the filesystem.
+        // One idea.
+        // To prevent unintended file access, require explicit opt-in via
+        // the DELTA_ALLOW_ABSOLUTE_FILE_PATHS environment variable.
+        let scheme = store.config().location.scheme();
+        if scheme == "file" {
+            let allow_absolute = std::env::var("DELTA_ALLOW_ABSOLUTE_FILE_PATHS")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            if allow_absolute {
+                env.register_object_store(url, store.root_object_store(None));
+            } else {
+                // Restrict to table directory only
+                env.register_object_store(url, store.object_store(None));
+            }
+
+         */
     } else {
         env.register_object_store(url, store.object_store(None));
     }
