@@ -33,14 +33,12 @@ async fn compare_table_with_full_paths_to_original_table() {
     // Create a fresh temp directory and clone the table there, but rewrite
     // all add/remove paths in the log to point to ABSOLUTE paths under the
     // ORIGINAL table directory (expected_abs), not the cloned directory.
-    // let tmpdir = tempfile::tempdir().unwrap();
-    // let cloned_dir: PathBuf = tmpdir.path().to_path_buf();
-    let cloned_rel = Path::new("../test/tests/data/delta-0.8.0-cloned");
-    let cloned_abs = fs::canonicalize(cloned_rel).unwrap();
-    clone_test_dir_with_abs_paths_from_src(&expected_abs, &cloned_abs);
+    let tmpdir = tempfile::tempdir().unwrap();
+    let cloned_dir: PathBuf = tmpdir.path().to_path_buf();
+    clone_test_dir_with_abs_paths_from_src(&expected_abs, &cloned_dir);
 
     // Open the cloned table and compare URIs to original table dir and data to original.
-    assert_table_uris_and_data(&cloned_abs, &expected_abs, &expected_abs).await;
+    assert_table_uris_and_data(&cloned_dir, &expected_abs, &expected_abs).await;
 }
 
 // Helper to generate the expected file URIs (two known parquet parts) for a base directory
@@ -100,52 +98,39 @@ async fn assert_table_uris_and_data(
     assert_batches_sorted_eq!(&expected_lines_vec, &data);
 }
 
-fn clone_test_dir_with_abs_paths(src_dir: &Path, target_dir: &Path) {
-    // Setup: ensure the test table at `target_dir` exists and its _delta_log
-    // contains fully-qualified (absolute) file paths for all add actions.
-    // 1) Replace any existing directory at `target_dir` with a fresh copy of
-    //    `src_dir`.
-    // 2) Rewrite all add actions in JSON log files to use absolute file paths.
-    {
-        // Re-create target directory by copying from the expected (relative-path) table.
-        if target_dir.exists() {
-            fs::remove_dir_all(&target_dir).unwrap();
-        }
-        fs::create_dir_all(&target_dir).unwrap();
-
-        // Copy contents of expected table into target directory.
-        use fs_extra::dir::{copy as copy_dir, CopyOptions};
-        let mut opts = CopyOptions::new();
-        opts.overwrite = true;
-        opts.copy_inside = true;
-        opts.content_only = true; // copy contents of source into dest root
-        copy_dir(&src_dir, &target_dir, &opts).unwrap();
-
-        // Now, rewrite _delta_log entries so that add/remove.path values are absolute
-        // under the copied table directory (target_dir).
-        let log_dir = target_dir.join("_delta_log");
-        rewrite_log_paths(&log_dir, target_dir);
-    }
-}
-
-fn clone_test_dir_with_abs_paths_from_src(src_dir: &Path, target_dir: &Path) {
-    // Similar to clone_test_dir_with_abs_paths, but rewrite add/remove paths to
-    // be absolute under src_dir (the original table), not target_dir.
+fn clone_test_dir_with_abs_paths_common(
+    src_dir: &Path,
+    target_dir: &Path,
+    rewrite_base_dir: &Path,
+) {
+    // Re-create target directory by copying from the expected (relative-path) table.
     if target_dir.exists() {
         fs::remove_dir_all(&target_dir).unwrap();
     }
     fs::create_dir_all(&target_dir).unwrap();
 
+    // Copy contents of expected table into target directory.
     use fs_extra::dir::{copy as copy_dir, CopyOptions};
     let mut opts = CopyOptions::new();
     opts.overwrite = true;
     opts.copy_inside = true;
-    opts.content_only = true;
+    opts.content_only = true; // copy contents of source into dest root
     copy_dir(&src_dir, &target_dir, &opts).unwrap();
 
+    // Now, rewrite _delta_log entries so that add/remove.path values are absolute
+    // under the specified base directory (rewrite_base_dir).
     let log_dir = target_dir.join("_delta_log");
-    // Rewrite to absolute paths under the ORIGINAL table directory (src_dir).
-    rewrite_log_paths(&log_dir, src_dir);
+    rewrite_log_paths(&log_dir, rewrite_base_dir);
+}
+
+fn clone_test_dir_with_abs_paths(src_dir: &Path, target_dir: &Path) {
+    // Rewrite add/remove paths to be absolute under the copied table directory (target_dir).
+    clone_test_dir_with_abs_paths_common(src_dir, target_dir, target_dir);
+}
+
+fn clone_test_dir_with_abs_paths_from_src(src_dir: &Path, target_dir: &Path) {
+    // Rewrite add/remove paths to be absolute under the ORIGINAL table directory (src_dir).
+    clone_test_dir_with_abs_paths_common(src_dir, target_dir, src_dir);
 }
 
 fn absify_action_path(base_dir: &Path, action: &mut Value) {

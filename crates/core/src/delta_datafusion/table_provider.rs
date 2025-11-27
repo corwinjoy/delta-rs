@@ -576,40 +576,57 @@ impl<'a> DeltaScanBuilder<'a> {
         let table_partition_cols = &self.snapshot.metadata().partition_columns();
 
         for action in files.iter() {
-            // Normalize path for reading: if the add path is a full URI or absolute path
-            // that lies under the table root, strip the table root prefix so the resulting
-            // path is relative to the table-scoped object store.
+            // Normalize path for reading depending on scheme:
+            // - For local file tables, preserve absolute filesystem paths and file:// URIs.
+            //   This allows reading files referenced with fully-qualified paths.
+            // - Otherwise, if the add path is a full URI under the table root, strip the root
+            //   so paths become relative to the table-scoped object store.
             let mut adjusted = action.clone();
             let root = self.log_store.config().location.clone();
             let p = adjusted.path.as_str();
-            match Url::parse(p) {
-                // Fully qualified URI: compare against root URI string
-                Ok(_) => {
-                    let root_str = root.as_str().trim_end_matches('/');
-                    let root_with_sep = format!("{}/", root_str);
-                    if p.starts_with(&root_with_sep) {
-                        let suf = &p[root_with_sep.len()..];
-                        adjusted.path = suf.to_string();
-                    } else if p == root_str {
-                        // Exact match - file is at root level
-                        adjusted.path = "".to_string();
+
+            if root.scheme() == "file" {
+                // For file scheme, keep absolute paths as-is; if it's a file:// URI, convert to
+                // an absolute filesystem path using the URL's path. For relative paths, keep
+                // them relative (they will be resolved against the DF-registered root store).
+                match Url::parse(p) {
+                    Ok(url) if url.scheme() == "file" => {
+                        adjusted.path = url.path().to_string();
+                    }
+                    Ok(_) => {
+                        // Non-file URI; leave as-is and let downstream handle, though unlikely.
+                    }
+                    Err(_) => {
+                        // Not a URI
+                        if crate::logstore::is_absolute_uri_or_path(p) {
+                            // Absolute filesystem path: keep as-is
+                        } else {
+                            // Relative path: make it absolute under the table root directory
+                            let mut root_path = root.path().to_string();
+                            if !root_path.ends_with('/') {
+                                root_path.push('/');
+                            }
+                            adjusted.path = format!("{}{}", root_path, p);
+                        }
                     }
                 }
-                Err(_) => {
-                    if crate::logstore::is_absolute_uri_or_path(p) {
-                        if root.scheme() == "file" {
-                            let root_path = root.path();
-                            let root_with_sep = if root_path.ends_with('/') {
-                                root_path.to_string()
-                            } else {
-                                format!("{}/", root_path)
-                            };
-                            if p.starts_with(&root_with_sep) {
-                                let suf = &p[root_with_sep.len()..];
-                                adjusted.path = suf.to_string();
-                            } else if p == root_path {
-                                adjusted.path = "".to_string();
-                            }
+            } else {
+                // Non-file scheme: strip root prefix from full URIs so DF paths are relative.
+                match Url::parse(p) {
+                    Ok(_) => {
+                        let root_str = root.as_str().trim_end_matches('/');
+                        let root_with_sep = format!("{}/", root_str);
+                        if p.starts_with(&root_with_sep) {
+                            let suf = &p[root_with_sep.len()..];
+                            adjusted.path = suf.to_string();
+                        } else if p == root_str {
+                            adjusted.path = "".to_string();
+                        }
+                    }
+                    Err(_) => {
+                        if crate::logstore::is_absolute_uri_or_path(p) {
+                            // Absolute filesystem paths for non-file scheme should not occur,
+                            // but if they do, keep them as-is.
                         }
                     }
                 }
