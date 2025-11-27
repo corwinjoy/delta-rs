@@ -311,8 +311,8 @@ pub(crate) fn register_store(store: LogStoreRef, env: &RuntimeEnv) {
     // fully-qualified file paths). Register the root object store so that all
     // locations are resolved from the filesystem root rather than the table
     // directory. For non-file schemes keep the table-scoped object store.
-    let schem = store.config().location.scheme();
-    if schem == "file" {
+    let scheme = store.config().location.scheme();
+    if scheme == "file" {
         env.register_object_store(url, store.root_object_store(None));
     } else {
         env.register_object_store(url, store.object_store(None));
