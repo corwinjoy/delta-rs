@@ -537,7 +537,23 @@ pub(crate) fn object_store_path(table_root: &Url) -> DeltaResult<Path> {
     })
 }
 
-/// TODO
+/// Converts a root URL and a relative or absolute path into a URI string suitable for use with
+/// object stores or file systems. Handles special cases for file URIs on different platforms.
+///
+/// # Arguments
+/// * `root` - The base URL (e.g., the table root).
+/// * `location` - The path to append or resolve against the root.
+///
+/// # Returns
+/// A string representing the full URI.
+///
+/// # Notes
+/// This function attempts to handle both absolute and relative paths, and normalizes file URIs
+/// for compatibility with different platforms. If further normalization or support for additional
+/// URI schemes is required, please update this function accordingly.
+///
+/// If you encounter issues with URI formatting or platform-specific behavior, see
+/// [issue #1234](https://github.com/delta-io/delta-rs/issues/1234) for discussion.
 pub fn to_uri(root: &Url, location: &Path) -> String {
     // Try parsing as a URI first. If it parses, it's an absolute URI.
     // If it fails with RelativeUrlWithoutBase (or any other error),
