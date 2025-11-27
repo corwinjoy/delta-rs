@@ -582,12 +582,13 @@ impl<'a> DeltaScanBuilder<'a> {
             let p = adjusted.path.as_str();
             if p.contains("://") {
                 let root_str = root.as_str().trim_end_matches('/');
-                if p.starts_with(root_str) {
-                    let mut suf = &p[root_str.len()..];
-                    if suf.starts_with('/') {
-                        suf = &suf[1..];
-                    }
+                let root_with_sep = format!("{}/", root_str);
+                if p.starts_with(&root_with_sep) {
+                    let suf = &p[root_with_sep.len()..];
                     adjusted.path = suf.to_string();
+                } else if p == root_str {
+                    // Exact match - file is at root level
+                    adjusted.path = "".to_string();
                 }
             } else if root.scheme() == "file" {
                 let root_path = root.path();
