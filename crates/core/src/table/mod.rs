@@ -316,6 +316,8 @@ impl DeltaTable {
     pub fn get_file_uris(&self) -> DeltaResult<impl Iterator<Item = String> + '_> {
         let state = self.state.as_ref().ok_or(DeltaTableError::NotInitialized)?;
         let root = self.log_store.config().location.clone();
+        // The clone is necessary here because the closure needs to own `root` (a `Url`),
+        // as it is moved into the closure for the iterator, which may outlive the current scope.
         #[allow(clippy::redundant_clone)]
         Ok(state.log_data().into_iter().map(move |add| {
             let p = add.path();
