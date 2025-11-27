@@ -44,7 +44,18 @@ impl TryFrom<&Add> for ObjectMeta {
             // Fall back to parsing relative paths via object_store::path::Path.
             location: {
                 let p = value.path.as_str();
-                if p.contains("://") || p.starts_with('/') {
+                // Detect absolute URIs and filesystem paths across platforms.
+                // - Fully qualified URIs contain "://"
+                // - Unix absolute paths start with '/'
+                // - Windows absolute paths include:
+                //   * Drive-letter paths like "C:/..." or "C:\\..."
+                //   * UNC paths starting with "\\\\" or "//"
+                let is_windows_drive_path = p.len() >= 3
+                    && p.as_bytes()[1] == b':'
+                    && (p.as_bytes()[2] == b'/' || p.as_bytes()[2] == b'\\')
+                    && p.as_bytes()[0].is_ascii_alphabetic();
+                let is_unc_path = p.starts_with("\\\\") || p.starts_with("//");
+                if p.contains("://") || p.starts_with('/') || is_windows_drive_path || is_unc_path {
                     Path::from(p)
                 } else {
                     Path::parse(p)?
