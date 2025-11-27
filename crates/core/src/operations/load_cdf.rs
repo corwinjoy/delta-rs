@@ -387,19 +387,26 @@ impl CdfLoadBuilder {
         add_remove_partition_cols.extend_from_slice(&this_partition_values);
 
         // Set up the partition to physical file mapping, this is a mostly unmodified version of what is done in load
-        let cdc_file_groups =
-            create_partition_values(schema.clone(), cdc, &partition_values, None)?;
+        let cdc_file_groups = create_partition_values(
+            schema.clone(),
+            cdc,
+            &partition_values,
+            None,
+            &self.log_store.config().location,
+        )?;
         let add_file_groups = create_partition_values(
             schema.clone(),
             add,
             &partition_values,
             Self::get_add_action_type(),
+            &self.log_store.config().location,
         )?;
         let remove_file_groups = create_partition_values(
             schema.clone(),
             remove,
             &partition_values,
             Self::get_remove_action_type(),
+            &self.log_store.config().location,
         )?;
 
         // Create the parquet scans for each associated type of file.

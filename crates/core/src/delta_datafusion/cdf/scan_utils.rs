@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path as StdPath;
 use std::sync::Arc;
 
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
@@ -8,6 +9,7 @@ use datafusion::datasource::listing::PartitionedFile;
 use object_store::path::Path;
 use object_store::ObjectMeta;
 use serde_json::Value;
+use url::Url;
 
 use crate::delta_datafusion::cdf::CHANGE_TYPE_COL;
 use crate::delta_datafusion::cdf::{CdcDataSpec, FileAction};
@@ -57,6 +59,8 @@ pub fn create_partition_values<F: FileAction>(
     specs: Vec<CdcDataSpec<F>>,
     table_partition_cols: &[String],
     action_type: Option<ScalarValue>,
+    // Base location (table root) used to normalize file paths for local file scheme
+    base_location: &Url,
 ) -> DeltaResult<HashMap<Vec<ScalarValue>, Vec<PartitionedFile>>> {
     let mut file_groups: HashMap<Vec<ScalarValue>, Vec<PartitionedFile>> = HashMap::new();
 
@@ -72,9 +76,41 @@ pub fn create_partition_values<F: FileAction>(
             let mut new_part_values = spec_partition_values.clone();
             new_part_values.extend(partition_values);
 
+            // Normalize the action path similar to table scan behavior.
+            // For file scheme:
+            //  - keep absolute filesystem paths as-is
+            //  - convert file:// URIs to filesystem paths
+            //  - prefix table root directory for relative paths
+            // For other schemes, keep the path as provided (relative to object store root).
+            let normalized_path = {
+                let p = action.path();
+                if base_location.scheme() == "file" {
+                    match Url::parse(p.as_str()) {
+                        Ok(url) if url.scheme() == "file" => Path::parse(url.path())?,
+                        Ok(_) => Path::parse(p.as_str())?,
+                        Err(_) => {
+                            if StdPath::new(p.as_str()).is_absolute() {
+                                Path::parse(p.as_str())?
+                            } else {
+                                // Build absolute filesystem path under table root
+                                let mut root_path = base_location.path().to_string();
+                                if !root_path.ends_with('/') {
+                                    root_path.push('/');
+                                }
+                                let full = format!("{}{}", root_path, p);
+                                Path::parse(&full)?
+                            }
+                        }
+                    }
+                } else {
+                    // Non-file scheme
+                    Path::parse(p.as_str())?
+                }
+            };
+
             let part = PartitionedFile {
                 object_meta: ObjectMeta {
-                    location: Path::parse(action.path().as_str())?,
+                    location: normalized_path,
                     size: action.size()? as u64,
                     e_tag: None,
                     last_modified: chrono::Utc.timestamp_nanos(0),

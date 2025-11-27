@@ -55,12 +55,22 @@ impl TryFrom<&Add> for ObjectMeta {
         )?;
 
         Ok(Self {
-            // Preserve absolute filesystem paths and fully qualified URIs as-is.
-            // Fall back to parsing relative paths via object_store::path::Path.
+            // Preserve paths carefully to avoid double percent-encoding:
+            // - For absolute filesystem paths (e.g., "/tmp/x"), use Path::parse to
+            //   preserve any existing percent-escapes in partition directories.
+            // - For fully-qualified URIs (e.g., file:///tmp/x), we expect earlier
+            //   normalization to have converted them into filesystem paths for the
+            //   file scheme; other schemes should normally use relative paths.
+            // - For relative paths (typical case), use Path::parse.
             location: {
                 let p = value.path.as_str();
-                if is_absolute_uri_or_path(p) {
-                    Path::from(p)
+                if StdPath::new(p).is_absolute() {
+                    // Absolute filesystem path
+                    Path::parse(p)?
+                } else if Url::parse(p).is_ok() {
+                    // Fully qualified URI: do NOT re-encode percent signs
+                    // Treat as an already-escaped path string
+                    Path::parse(p)?
                 } else {
                     Path::parse(p)?
                 }

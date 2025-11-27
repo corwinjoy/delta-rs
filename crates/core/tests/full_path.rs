@@ -7,7 +7,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use url::Url;
 
-#[cfg(feature = "datafusion")]
 #[tokio::test]
 async fn compare_table_with_full_paths() {
     let expected_rel = Path::new("../test/tests/data/delta-0.8.0");
@@ -23,7 +22,6 @@ async fn compare_table_with_full_paths() {
     assert_table_uris_and_data(&cloned_dir, &tmpdir.path(), &expected_abs).await;
 }
 
-#[cfg(feature = "datafusion")]
 #[tokio::test]
 async fn compare_table_with_full_paths_to_original_table() {
     // Path to the original test table (with relative paths in _delta_log)
@@ -42,7 +40,6 @@ async fn compare_table_with_full_paths_to_original_table() {
 }
 
 // Helper to generate the expected file URIs (two known parquet parts) for a base directory
-#[cfg(feature = "datafusion")]
 fn expected_file_uris(dir: &Path) -> Vec<String> {
     let mut v = vec![
         dir.join("part-00000-c9b90f86-73e6-46c8-93ba-ff6bfaf892a1-c000.snappy.parquet")
@@ -60,7 +57,6 @@ fn expected_file_uris(dir: &Path) -> Vec<String> {
 
 // Helper that opens `table_dir`, checks its file URIs match those under `expected_uris_dir`,
 // then loads data and compares against data loaded from `expected_table_dir`.
-#[cfg(feature = "datafusion")]
 async fn assert_table_uris_and_data(
     cloned_dir: &Path,
     expected_uris_dir: &Path,
