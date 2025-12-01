@@ -151,7 +151,7 @@ required-features = ["datafusion"]
 
 [[test]]
 name = "full_path"
-required-features = ["datafusion"]
+required-features = ["datafusion", "cloud"]
 
 [[test]]
 name = "integration"

@@ -47,22 +47,153 @@ async fn compare_table_with_full_paths_to_original_table() {
 // AWS_SECRET_ACCESS_KEY: weloverust
 // AWS_ENDPOINT_URL: http://localhost:4566
 // AWS_ALLOW_HTTP: "1"
+//
+// alias awslocal="AWS_ACCESS_KEY_ID=deltalake AWS_SECRET_ACCESS_KEY=weloverust AWS_DEFAULT_REGION='us-east-1' aws --endpoint-url=http://${LOCALSTACK_HOST:-localhost}:4566"
 // Run the test against localstack docker container: docker compose up -d
 // The associated docker-compose.yml file is in the root of the project.
 
+#[cfg(feature = "cloud")]
 #[tokio::test]
 async fn compare_table_with_full_paths_to_original_table_s3() {
-    // Path to the original test table (with relative paths in _delta_log)
+    use std::process::Command;
+
+    // Ensure S3 handlers are registered and environment is prepared for localstack
+    // deltalake_aws::register_handlers(None);
+    std::env::set_var("AWS_DEFAULT_REGION", "us-east-1");
+    std::env::set_var("AWS_ACCESS_KEY_ID", "deltalake");
+    std::env::set_var("AWS_SECRET_ACCESS_KEY", "weloverust");
+    std::env::set_var("AWS_ENDPOINT_URL", "http://localhost:4566");
+    std::env::set_var("AWS_ALLOW_HTTP", "1");
+
+    // Path to the original local test table (with relative paths in _delta_log)
     let expected_rel = Path::new("../test/tests/data/delta-0.8.0");
     let expected_abs = fs::canonicalize(expected_rel).unwrap();
 
-    // TODO: Copy the original table to S3 and use that as the source table.
-    // Call this table `original_table_s3`.
+    // Create unique bucket and prefixes (avoid extra deps; use time-based suffix)
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let suffix = format!("{}", millis);
+    let bucket = format!("test-delta-core-{}", suffix);
+    let original_prefix = "original";
+    let cloned_prefix = "cloned";
+    let bucket_uri = format!("s3://{}", bucket);
+    let original_uri = format!("{}/{}", bucket_uri, original_prefix);
+    let cloned_uri = format!("{}/{}", bucket_uri, cloned_prefix);
 
-    // TODO: Clone the table original_table_s3 to a new bucket called `cloned_table_s3`.
-    // In this cloned table, rewrite all add/remove paths in the log to point to ABSOLUTE paths
-    // under the ORIGINAL table directory (expected_abs), not the cloned directory.
+    // Helper to run a command and assert success
+    let mut run = |program: &str, args: &[&str]| {
+        // let awslocal = "aws --endpoint-url=http://${LOCALSTACK_HOST:-localhost}:4566";
+        let status = Command::new(program)
+            .args(args)
+            .status()
+            .expect("failed to run command");
+        assert!(status.success(), "command failed: {} {:?}", program, args);
+    };
 
+    // Create bucket
+    run("aws", &["--endpoint-url=http://localhost:4566", "s3", "mb", &bucket_uri]);
+
+    // Ensure cleanup at the end
+    struct Cleanup(String);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = Command::new("aws")
+                .args(["s3", "rb", &self.0, "--force"]) // remove bucket and contents
+                .status();
+        }
+    }
+    let _cleanup = Cleanup(bucket_uri.clone());
+
+    // 1) Copy the original local table directory to s3://bucket/original
+    run(
+        "aws",
+        &[
+            "--endpoint-url=http://localhost:4566",
+            "s3",
+            "cp",
+            expected_abs.to_str().unwrap(),
+            &original_uri,
+            "--recursive",
+        ],
+    );
+
+    // 2) Clone original -> cloned in S3
+    run(
+        "aws",
+        &[
+            "--endpoint-url=http://localhost:4566",
+            "s3",
+            "cp",
+            &original_uri,
+            &cloned_uri,
+            "--recursive",
+        ],
+    );
+
+    // 3) Download cloned _delta_log locally, rewrite paths to ABS paths under expected_abs, upload back
+    let tmpdir = tempfile::tempdir().unwrap();
+    let local_log_dir = tmpdir.path().join("_delta_log");
+    fs::create_dir_all(&local_log_dir).unwrap();
+
+    run(
+        "aws",
+        &[
+            "--endpoint-url=http://localhost:4566",
+            "s3",
+            "cp",
+            &format!("{}/_delta_log", &cloned_uri),
+            local_log_dir.to_str().unwrap(),
+            "--recursive",
+        ],
+    );
+
+    // Rewrite JSON actions inside downloaded log files
+    rewrite_log_paths(&local_log_dir, &expected_abs);
+
+    // Upload rewritten log back to S3 cloned table
+    run(
+        "aws",
+        &[
+            "--endpoint-url=http://localhost:4566",
+            "s3",
+            "cp",
+            local_log_dir.to_str().unwrap(),
+            &format!("{}/_delta_log", &cloned_uri),
+            "--recursive",
+        ],
+    );
+
+    // 4) Open the cloned S3 table and verify URIs and data against the local original table
+    use deltalake_core::arrow::array::RecordBatch;
+    use deltalake_core::datafusion::assert_batches_sorted_eq;
+    use deltalake_core::datafusion::common::test_util::format_batches;
+    use deltalake_core::operations::collect_sendable_stream;
+
+    let table_url = url::Url::parse(&cloned_uri).unwrap();
+    let table = deltalake_core::open_table(table_url).await.unwrap();
+
+    // Verify file URIs
+    let mut files: Vec<String> = table.get_file_uris().unwrap().collect();
+    files.sort();
+    let expected_uris = expected_file_uris(&expected_abs);
+    assert_eq!(files, expected_uris);
+
+    // Load data from cloned S3 table
+    let (_tbl, stream) = deltalake_core::DeltaOps(table).load().await.unwrap();
+    let data: Vec<RecordBatch> = collect_sendable_stream(stream).await.unwrap();
+
+    // Load expected local table and compare
+    let expected_table =
+        deltalake_core::open_table(Url::from_directory_path(&expected_abs).unwrap())
+            .await
+            .unwrap();
+    let (_t, expected_stream) = deltalake_core::DeltaOps(expected_table).load().await.unwrap();
+    let expected_batches: Vec<RecordBatch> = collect_sendable_stream(expected_stream).await.unwrap();
+    let expected_lines = format_batches(&*expected_batches).unwrap().to_string();
+    let expected_lines_vec: Vec<&str> = expected_lines.trim().lines().collect();
+    assert_batches_sorted_eq!(&expected_lines_vec, &data);
 }
 
 // Helper to generate the expected file URIs (two known parquet parts) for a base directory
