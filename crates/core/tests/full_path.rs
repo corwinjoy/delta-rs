@@ -1,3 +1,4 @@
+
 // Verifies that tables with fully-qualified file paths behave as expected
 // and that reading them yields the same data as the corresponding table
 // with relative file paths.
@@ -38,32 +39,27 @@ async fn compare_table_with_full_paths_to_original_table() {
     assert_table_uris_and_data(&cloned_dir, &expected_abs, &expected_abs).await;
 }
 
-// TODO: Add test for S3 table with fully-qualified file paths.
-// Requires cargo features: s3
-// Enviroment variables:
-// AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_ENDPOINT_URL
-// AWS_DEFAULT_REGION: "us-east-1"
-// AWS_ACCESS_KEY_ID: deltalake
-// AWS_SECRET_ACCESS_KEY: weloverust
-// AWS_ENDPOINT_URL: http://localhost:4566
-// AWS_ALLOW_HTTP: "1"
 //
-// alias awslocal="AWS_ACCESS_KEY_ID=deltalake AWS_SECRET_ACCESS_KEY=weloverust AWS_DEFAULT_REGION='us-east-1' aws --endpoint-url=http://${LOCALSTACK_HOST:-localhost}:4566"
-// Run the test against localstack docker container: docker compose up -d
-// The associated docker-compose.yml file is in the root of the project.
+// S3 variant using Localstack: requires cargo feature `cloud` (see Cargo.toml test features)
+// Environment variables used (configured here for Localstack):
+//   AWS_ACCESS_KEY_ID=deltalake
+//   AWS_SECRET_ACCESS_KEY=weloverust
+//   AWS_DEFAULT_REGION=us-east-1
+//   AWS_ENDPOINT_URL=http://localhost:4566
+//   AWS_ALLOW_HTTP=true
+// To run: start Localstack via `docker compose up -d` in repo root.
 
 #[cfg(feature = "cloud")]
 #[tokio::test]
 async fn compare_table_with_full_paths_to_original_table_s3() {
     use std::process::Command;
 
-    // Ensure S3 handlers are registered and environment is prepared for localstack
-    // deltalake_aws::register_handlers(None);
+    // Ensure environment is prepared for localstack
     std::env::set_var("AWS_DEFAULT_REGION", "us-east-1");
     std::env::set_var("AWS_ACCESS_KEY_ID", "deltalake");
     std::env::set_var("AWS_SECRET_ACCESS_KEY", "weloverust");
     std::env::set_var("AWS_ENDPOINT_URL", "http://localhost:4566");
-    std::env::set_var("AWS_ALLOW_HTTP", "1");
+    std::env::set_var("AWS_ALLOW_HTTP", "true");
 
     // Path to the original local test table (with relative paths in _delta_log)
     let expected_rel = Path::new("../test/tests/data/delta-0.8.0");
@@ -84,7 +80,6 @@ async fn compare_table_with_full_paths_to_original_table_s3() {
 
     // Helper to run a command and assert success
     let mut run = |program: &str, args: &[&str]| {
-        // let awslocal = "aws --endpoint-url=http://${LOCALSTACK_HOST:-localhost}:4566";
         let status = Command::new(program)
             .args(args)
             .status()
@@ -93,14 +88,23 @@ async fn compare_table_with_full_paths_to_original_table_s3() {
     };
 
     // Create bucket
-    run("aws", &["--endpoint-url=http://localhost:4566", "s3", "mb", &bucket_uri]);
+    run(
+        "aws",
+        &["--endpoint-url=http://localhost:4566", "s3", "mb", &bucket_uri],
+    );
 
     // Ensure cleanup at the end
     struct Cleanup(String);
     impl Drop for Cleanup {
         fn drop(&mut self) {
             let _ = Command::new("aws")
-                .args(["s3", "rb", &self.0, "--force"]) // remove bucket and contents
+                .args([
+                    "--endpoint-url=http://localhost:4566",
+                    "s3",
+                    "rb",
+                    &self.0,
+                    "--force",
+                ])
                 .status();
         }
     }
