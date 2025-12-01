@@ -54,6 +54,12 @@ async fn compare_table_with_full_paths_to_original_table() {
 async fn compare_table_with_full_paths_to_original_table_s3() {
     use std::process::Command;
 
+    // Register S3 handlers for deltalake-core tests. In normal usage the `deltalake`
+    // meta-crate auto-registers these via a ctor, but core tests run without it.
+    // This ensures that `s3://` URLs are recognized instead of yielding
+    // InvalidTableLocation errors.
+    deltalake_aws::register_handlers(None);
+
     // Ensure environment is prepared for localstack
     std::env::set_var("AWS_DEFAULT_REGION", "us-east-1");
     std::env::set_var("AWS_ACCESS_KEY_ID", "deltalake");
@@ -153,8 +159,9 @@ async fn compare_table_with_full_paths_to_original_table_s3() {
         ],
     );
 
-    // Rewrite JSON actions inside downloaded log files
-    rewrite_log_paths(&local_log_dir, &expected_abs);
+    // Rewrite JSON actions inside downloaded log files. For S3 table location,
+    // rewrite to fully-qualified s3:// URIs pointing at the cloned prefix.
+    rewrite_log_paths_with_prefix(&local_log_dir, &cloned_uri);
 
     // Upload rewritten log back to S3 cloned table
     run(
@@ -181,7 +188,9 @@ async fn compare_table_with_full_paths_to_original_table_s3() {
     // Verify file URIs
     let mut files: Vec<String> = table.get_file_uris().unwrap().collect();
     files.sort();
-    let expected_uris = expected_file_uris(&expected_abs);
+    // For S3 table, we expect fully-qualified s3:// URIs
+    let mut expected_uris: Vec<String> = expected_file_uris_from_prefix(&cloned_uri);
+    expected_uris.sort();
     assert_eq!(files, expected_uris);
 
     // Load data from cloned S3 table
@@ -276,7 +285,8 @@ fn clone_test_dir_with_abs_paths_common(
     // Now, rewrite _delta_log entries so that add/remove.path values are absolute
     // under the specified base directory (rewrite_base_dir).
     let log_dir = target_dir.join("_delta_log");
-    rewrite_log_paths(&log_dir, rewrite_base_dir);
+    // Local filesystem table: keep absolute native paths (no scheme)
+    rewrite_log_paths(&log_dir, rewrite_base_dir, false);
 }
 
 fn clone_test_dir_with_abs_paths(src_dir: &Path, target_dir: &Path) {
@@ -289,22 +299,29 @@ fn clone_test_dir_with_abs_paths_from_src(src_dir: &Path, target_dir: &Path) {
     clone_test_dir_with_abs_paths_common(src_dir, target_dir, src_dir);
 }
 
-fn absify_action_path(base_dir: &Path, action: &mut Value) {
+fn absify_action_path(base_dir: &Path, action: &mut Value, as_file_uri: bool) {
     if let Some(obj) = action.as_object_mut() {
         if let Some(path_val) = obj.get_mut("path") {
             if let Some(rel) = path_val.as_str() {
                 let abs = base_dir.join(rel);
-                *path_val = serde_json::Value::String(
+                // Canonicalize to eliminate any relative segments before forming URI/str
+                let abs = fs::canonicalize(abs).unwrap_or_else(|_| base_dir.join(rel));
+                let new_val = if as_file_uri {
+                    Url::from_file_path(&abs)
+                        .expect("Absolute path should convert to file URI")
+                        .to_string()
+                } else {
                     abs.to_str()
                         .expect("Path should be valid UTF-8")
-                        .to_string(),
-                );
+                        .to_string()
+                };
+                *path_val = serde_json::Value::String(new_val);
             }
         }
     }
 }
 
-fn rewrite_log_paths(log_dir: &Path, base_dir: &Path) {
+fn rewrite_log_paths(log_dir: &Path, base_dir: &Path, as_file_uri: bool) {
     for entry in fs::read_dir(&log_dir).unwrap() {
         let entry = entry.unwrap();
         let path = entry.path();
@@ -319,14 +336,75 @@ fn rewrite_log_paths(log_dir: &Path, base_dir: &Path) {
             }
             let mut v: serde_json::Value = serde_json::from_str(line).unwrap();
             if let Some(add) = v.get_mut("add") {
-                absify_action_path(base_dir, add);
+                absify_action_path(base_dir, add, as_file_uri);
             }
             if let Some(remove) = v.get_mut("remove") {
-                absify_action_path(base_dir, remove);
+                absify_action_path(base_dir, remove, as_file_uri);
             }
             rewritten_lines.push(serde_json::to_string(&v).unwrap());
         }
         let new_contents = rewritten_lines.join("\n");
         fs::write(&path, new_contents).unwrap();
     }
+}
+
+// Rewrite add/remove.path values to fully-qualified URIs under the given prefix
+// Example: prefix_uri = "s3://bucket/cloned" and path "part-00000.parquet" ->
+//          "s3://bucket/cloned/part-00000.parquet"
+fn rewrite_log_paths_with_prefix(log_dir: &Path, prefix_uri: &str) {
+    let prefix = prefix_uri.trim_end_matches('/');
+    for entry in fs::read_dir(&log_dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let original = fs::read_to_string(&path).unwrap();
+        let mut rewritten_lines: Vec<String> = Vec::new();
+        for line in original.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let mut v: serde_json::Value = serde_json::from_str(line).unwrap();
+            let mut rewrite = |action: &mut Value| {
+                if let Some(obj) = action.as_object_mut() {
+                    if let Some(path_val) = obj.get_mut("path") {
+                        if let Some(rel) = path_val.as_str() {
+                            let rel = rel.trim_start_matches('/');
+                            let full = format!("{}/{}", prefix, rel);
+                            *path_val = serde_json::Value::String(full);
+                        }
+                    }
+                }
+            };
+            if let Some(add) = v.get_mut("add") {
+                rewrite(add);
+            }
+            if let Some(remove) = v.get_mut("remove") {
+                rewrite(remove);
+            }
+            rewritten_lines.push(serde_json::to_string(&v).unwrap());
+        }
+        let new_contents = rewritten_lines.join("\n");
+        fs::write(&path, new_contents).unwrap();
+    }
+}
+
+// Build expected fully-qualified s3:// URIs for the two known parquet files
+fn expected_file_uris_from_prefix(prefix_uri: &str) -> Vec<String> {
+    let prefix = prefix_uri.trim_end_matches('/');
+    let mut v = vec![
+        format!(
+            "{}/{}",
+            prefix,
+            "part-00000-c9b90f86-73e6-46c8-93ba-ff6bfaf892a1-c000.snappy.parquet"
+        ),
+        format!(
+            "{}/{}",
+            prefix,
+            "part-00000-04ec9591-0b73-459e-8d18-ba5711d6cbe1-c000.snappy.parquet"
+        ),
+    ];
+    v.sort();
+    v
 }
