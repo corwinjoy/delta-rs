@@ -573,6 +573,10 @@ impl<'a> DeltaScanBuilder<'a> {
         // and partitions are somewhat evenly distributed, probably not the worst choice ...
         // However we may want to do some additional balancing in case we are far off from the above.
         let mut file_groups: HashMap<Vec<ScalarValue>, Vec<PartitionedFile>> = HashMap::new();
+        // If we encounter any absolute URIs outside the table root but within the same
+        // bucket/account, we will need to scan against a root-scoped object store rather
+        // than the table-prefixed one.
+        let mut need_bucket_root_store = false;
 
         let table_partition_cols = &self.snapshot.metadata().partition_columns();
 
@@ -614,11 +618,24 @@ impl<'a> DeltaScanBuilder<'a> {
                     }
                 }
             } else {
-                // For non-file schemes, strip table root when full URI is given so paths are
-                // relative to the table-scoped object store.
+                // For non-file schemes, if the path is an absolute URI under the table root,
+                // strip the table root so it becomes table-relative. Otherwise, if it points
+                // to the same bucket but a different prefix, relativize to the bucket root so
+                // the registered store (bucket-scoped) can resolve it. If neither applies,
+                // keep as-is.
                 match Url::parse(p) {
                     Ok(_) => {
-                        adjusted.path = crate::logstore::strip_table_root_from_full_uri(&root, p);
+                        let stripped = crate::logstore::strip_table_root_from_full_uri(&root, p);
+                        if stripped == p {
+                            let bucket_rel =
+                                crate::logstore::relativize_uri_to_bucket_root(&root, p);
+                            if bucket_rel != p {
+                                need_bucket_root_store = true;
+                            }
+                            adjusted.path = bucket_rel;
+                        } else {
+                            adjusted.path = stripped;
+                        }
                     }
                     Err(_) => {
                         // Not a URI; keep as-is (typically already relative to the store)
@@ -771,7 +788,22 @@ impl<'a> DeltaScanBuilder<'a> {
                 .register_object_store(url.as_ref(), self.log_store.root_object_store(None));
             (url, ())
         } else {
-            (self.log_store.object_store_url(), ())
+            if need_bucket_root_store {
+                // Build a root-scoped store identifier unique per (scheme, host)
+                let loc = &self.log_store.config().location;
+                let host = loc.host_str().unwrap_or("-");
+                let url = ObjectStoreUrl::parse(format!(
+                    "delta-rs://root-{}-{}",
+                    loc.scheme(), host
+                ))
+                .unwrap();
+                self.session
+                    .runtime_env()
+                    .register_object_store(url.as_ref(), self.log_store.root_object_store(None));
+                (url, ())
+            } else {
+                (self.log_store.object_store_url(), ())
+            }
         };
 
         let file_scan_config =
