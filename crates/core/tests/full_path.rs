@@ -160,8 +160,8 @@ async fn compare_table_with_full_paths_to_original_table_s3() {
     );
 
     // Rewrite JSON actions inside downloaded log files. For S3 table location,
-    // rewrite to fully-qualified s3:// URIs pointing at the cloned prefix.
-    rewrite_log_paths_with_prefix(&local_log_dir, &cloned_uri);
+    // rewrite to fully-qualified s3:// URIs pointing at the original S3 bucket.
+    rewrite_log_paths_with_prefix(&local_log_dir, &original_uri);
 
     // Upload rewritten log back to S3 cloned table
     run(
@@ -189,7 +189,7 @@ async fn compare_table_with_full_paths_to_original_table_s3() {
     let mut files: Vec<String> = table.get_file_uris().unwrap().collect();
     files.sort();
     // For S3 table, we expect fully-qualified s3:// URIs
-    let mut expected_uris: Vec<String> = expected_file_uris_from_prefix(&cloned_uri);
+    let mut expected_uris: Vec<String> = expected_file_uris_from_prefix(&original_uri);
     expected_uris.sort();
     assert_eq!(files, expected_uris);
 
