@@ -38,6 +38,33 @@ async fn compare_table_with_full_paths_to_original_table() {
     assert_table_uris_and_data(&cloned_dir, &expected_abs, &expected_abs).await;
 }
 
+// TODO: Add test for S3 table with fully-qualified file paths.
+// Requires cargo features: s3
+// Enviroment variables:
+// AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_ENDPOINT_URL
+// AWS_DEFAULT_REGION: "us-east-1"
+// AWS_ACCESS_KEY_ID: deltalake
+// AWS_SECRET_ACCESS_KEY: weloverust
+// AWS_ENDPOINT_URL: http://localhost:4566
+// AWS_ALLOW_HTTP: "1"
+// Run the test against localstack docker container: docker compose up -d
+// The associated docker-compose.yml file is in the root of the project.
+
+#[tokio::test]
+async fn compare_table_with_full_paths_to_original_table_s3() {
+    // Path to the original test table (with relative paths in _delta_log)
+    let expected_rel = Path::new("../test/tests/data/delta-0.8.0");
+    let expected_abs = fs::canonicalize(expected_rel).unwrap();
+
+    // TODO: Copy the original table to S3 and use that as the source table.
+    // Call this table `original_table_s3`.
+
+    // TODO: Clone the table original_table_s3 to a new bucket called `cloned_table_s3`.
+    // In this cloned table, rewrite all add/remove paths in the log to point to ABSOLUTE paths
+    // under the ORIGINAL table directory (expected_abs), not the cloned directory.
+
+}
+
 // Helper to generate the expected file URIs (two known parquet parts) for a base directory
 fn expected_file_uris(dir: &Path) -> Vec<String> {
     let mut v = vec![
