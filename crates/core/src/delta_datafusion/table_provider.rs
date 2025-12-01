@@ -680,19 +680,21 @@ impl<'a> DeltaScanBuilder<'a> {
             } else {
                 ObjectMeta {
                     last_modified,
-                    ..adjusted.try_into().unwrap()
+                    ..adjusted.clone().try_into().unwrap()
                 }
             };
 
-            let mut part = PartitionedFile {
-                object_meta,
-                partition_values: vec![],
-                range: None,
-                extensions: None,
-                statistics: None,
-                metadata_size_hint: None,
-            };
+            // Build PartitionedFile from action to ensure partition values align with schema
+            // and DataFusion expectations
+            let mut part = partitioned_file_from_action(
+                &adjusted,
+                table_partition_cols,
+                &schema,
+            );
+            // Overwrite object_meta with the one computed above to preserve normalized path
+            part.object_meta = object_meta;
 
+            // Optionally append the virtual file column as an extra partition value
             if config.file_column_name.is_some() {
                 let partition_value = if config.wrap_partition_values {
                     wrap_partition_value_in_dict(ScalarValue::Utf8(Some(action.path.clone())))

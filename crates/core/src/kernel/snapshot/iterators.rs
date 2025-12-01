@@ -103,6 +103,10 @@ impl LogicalFileView {
     }
 
     /// Returns the file path with URL decoding applied.
+    ///
+    /// Note: This is intended for display only. For building object store paths,
+    /// use `object_store_path()` which preserves the original percent-encoding
+    /// stored in the log.
     pub fn path(&self) -> Cow<'_, str> {
         let raw = get_string_value(
             self.files
@@ -115,15 +119,20 @@ impl LogicalFileView {
 
     /// An object store [`Path`] to the file.
     ///
-    /// this tries to parse the file string and if that fails, it will return the string as is.
-    // TODO assert consistent handling of the paths encoding when reading log data so this logic can be removed.
+    /// Preserve the original percent-encoding from the log. Using `Path::parse`
+    /// may re-encode `%` into `%25`, causing double-encoding like `%252F`.
+    /// Therefore, construct the path with `Path::from` which treats the input
+    /// as already-encoded and avoids altering it.
     pub(crate) fn object_store_path(&self) -> Path {
-        let path = self.path();
-        // Try to preserve percent encoding if possible
-        match Path::parse(path.as_ref()) {
-            Ok(path) => path,
-            Err(_) => Path::from(path.as_ref()),
-        }
+        // Use the raw path string as stored in the log (without decoding)
+        let raw = get_string_value(
+            self.files
+                .column(*FIELD_INDICES.get(FIELD_NAME_PATH).unwrap()),
+            self.index,
+        )
+        .unwrap();
+        // Construct directly to preserve existing encoding
+        Path::from(raw)
     }
 
     /// Returns the file size in bytes.
