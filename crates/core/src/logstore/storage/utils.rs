@@ -188,13 +188,21 @@ pub fn relativize_uri_to_bucket_root(root: &Url, input: &str) -> String {
 /// Returns `None` if the URL doesn't look like an object-store style URL.
 fn bucket_key_from_url(url: &Url) -> Option<String> {
     let path = url.path().trim_start_matches('/');
-    if url.scheme() == "s3" {
-        // For s3:// URLs, the host is the bucket and the path is the key
+    let scheme = url.scheme();
+
+    // For s3://, gs://, abfs://, abfss://, az:// URLs, the host is the bucket/container
+    // and the path is the key
+    if scheme == "s3"
+        || scheme == "gs"
+        || scheme == "abfs"
+        || scheme == "abfss"
+        || scheme == "az"
+    {
         return Some(path.to_string());
     }
 
     // HTTP(S) S3-compatible: support both virtual-hosted-style and path-style
-    if url.scheme() == "http" || url.scheme() == "https" {
+    if scheme == "http" || scheme == "https" {
         let host = url.host_str().unwrap_or("");
         // virtual-hosted-style: bucket.s3.amazonaws.com or bucket.localstack
         // In this style, entire path is the key
@@ -213,12 +221,21 @@ fn bucket_key_from_url(url: &Url) -> Option<String> {
     None
 }
 
-/// Extract bucket name from s3 or s3-compatible http(s) URL.
+/// Extract bucket/container name from cloud storage URLs.
+/// Supports s3://, gs://, abfs://, abfss://, az://, and s3-compatible http(s) URLs.
 fn extract_bucket_name(url: &Url) -> Option<String> {
-    if url.scheme() == "s3" {
+    let scheme = url.scheme();
+
+    // For s3://, gs://, abfs://, abfss://, az:// URLs, the host is the bucket/container
+    if scheme == "s3"
+        || scheme == "gs"
+        || scheme == "abfs"
+        || scheme == "abfss"
+        || scheme == "az"
+    {
         return url.host_str().map(|s| s.to_string());
     }
-    if url.scheme() == "http" || url.scheme() == "https" {
+    if scheme == "http" || scheme == "https" {
         let host = url.host_str().unwrap_or("");
         if let Some(bucket) = bucket_from_virtual_hosted_style(host) {
             return Some(bucket.to_string());

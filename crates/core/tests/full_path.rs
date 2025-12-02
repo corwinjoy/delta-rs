@@ -47,6 +47,7 @@ async fn compare_table_with_full_paths_to_original_table() {
 //   AWS_ENDPOINT_URL=http://localhost:4566
 //   AWS_ALLOW_HTTP=true
 // To run: start Localstack via `docker compose up -d` in repo root.
+// S3 Test requires aws cli to be installed.
 
 #[cfg(feature = "cloud")]
 #[tokio::test]
@@ -174,6 +175,508 @@ async fn compare_table_with_full_paths_to_original_table_s3() {
     assert_eq!(files, expected_uris);
 
     // Load data from cloned S3 table
+    let (_tbl, stream) = deltalake_core::DeltaOps(table).load().await.unwrap();
+    let data: Vec<RecordBatch> = collect_sendable_stream(stream).await.unwrap();
+
+    // Load expected local table and compare
+    let expected_table =
+        deltalake_core::open_table(Url::from_directory_path(&expected_abs).unwrap())
+            .await
+            .unwrap();
+    let (_t, expected_stream) = deltalake_core::DeltaOps(expected_table)
+        .load()
+        .await
+        .unwrap();
+    let expected_batches: Vec<RecordBatch> =
+        collect_sendable_stream(expected_stream).await.unwrap();
+    let expected_lines = format_batches(&*expected_batches).unwrap().to_string();
+    let expected_lines_vec: Vec<&str> = expected_lines.trim().lines().collect();
+    assert_batches_sorted_eq!(&expected_lines_vec, &data);
+}
+
+
+// Azure Test requires azure CLI (`az`) to be installed.
+// The azurite emulator is in docker: start `docker compose up -d` in repo root.
+#[cfg(feature = "cloud")]
+#[tokio::test]
+async fn compare_table_with_full_paths_to_original_table_azure() {
+    use std::process::Command;
+
+    // Skip test if `az` CLI is not available
+    if Command::new("az").arg("--version").output().is_err() {
+        eprintln!("Skipping test: `az` CLI not found");
+        return;
+    }
+
+    // Register Azure handlers for deltalake-core tests. In normal usage the `deltalake`
+    // meta-crate auto-registers these via a ctor, but core tests run without it.
+    // This ensures that `abfs://` URLs are recognized instead of yielding
+    // InvalidTableLocation errors.
+    deltalake_azure::register_handlers(None);
+
+    // Ensure environment is prepared for Azurite emulator
+    std::env::set_var("AZURE_STORAGE_USE_EMULATOR", "1");
+    std::env::set_var("AZURE_STORAGE_ACCOUNT_NAME", "devstoreaccount1");
+    std::env::set_var("AZURE_STORAGE_ACCOUNT_KEY", "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==");
+    std::env::set_var(
+        "AZURE_STORAGE_CONNECTION_STRING",
+        "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://localhost:10000/devstoreaccount1;"
+    );
+
+    // Path to the original local test table (with relative paths in _delta_log)
+    let expected_rel = Path::new("../test/tests/data/delta-0.8.0");
+    let expected_abs = fs::canonicalize(expected_rel).unwrap();
+
+    // Create unique container and prefixes (avoid extra deps; use time-based suffix)
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let suffix = format!("{}", millis);
+    let container = format!("test-delta-core-{}", suffix);
+    let original_prefix = "original";
+    let cloned_prefix = "cloned";
+    let container_uri = format!("abfs://{}", container);
+    let original_uri = format!("{}/{}", container_uri, original_prefix);
+    let cloned_uri = format!("{}/{}", container_uri, cloned_prefix);
+
+    // Helper to run a command and assert success
+    let run = |program: &str, args: &[&str]| {
+        let status = Command::new(program)
+            .args(args)
+            .status()
+            .expect("failed to run command");
+        assert!(status.success(), "command failed: {} {:?}", program, args);
+    };
+
+    // Create container
+    run("az", &["storage", "container", "create", "-n", &container]);
+
+    // Ensure cleanup at the end
+    struct Cleanup(String);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = Command::new("az")
+                .args(["storage", "container", "delete", "-n", &self.0])
+                .status();
+        }
+    }
+    let _cleanup = Cleanup(container.clone());
+
+    // 1) Copy the original local table directory to abfs://container/original
+    run(
+        "az",
+        &[
+            "storage",
+            "blob",
+            "upload-batch",
+            "-s",
+            expected_abs.to_str().unwrap(),
+            "-d",
+            &format!("{}/{}", container, original_prefix),
+        ],
+    );
+
+    // 2) Clone original -> cloned in Azure
+    // Azure doesn't have a direct copy like S3, so we download and re-upload
+    let tmpdir_clone = tempfile::tempdir().unwrap();
+    let local_clone_dir = tmpdir_clone.path().join("clone");
+    fs::create_dir_all(&local_clone_dir).unwrap();
+
+    run(
+        "az",
+        &[
+            "storage",
+            "blob",
+            "download-batch",
+            "-s",
+            &container,
+            "-d",
+            local_clone_dir.to_str().unwrap(),
+            "--pattern",
+            &format!("{}/*", original_prefix),
+        ],
+    );
+
+    // Move files from original/ subdirectory to root of local_clone_dir for upload
+    let original_subdir = local_clone_dir.join(original_prefix);
+    if original_subdir.exists() {
+        for entry in fs::read_dir(&original_subdir).unwrap() {
+            let entry = entry.unwrap();
+            let dest = local_clone_dir.join(entry.file_name());
+            fs::rename(entry.path(), dest).unwrap();
+        }
+        fs::remove_dir(&original_subdir).ok();
+    }
+
+    run(
+        "az",
+        &[
+            "storage",
+            "blob",
+            "upload-batch",
+            "-s",
+            local_clone_dir.to_str().unwrap(),
+            "-d",
+            &format!("{}/{}", container, cloned_prefix),
+        ],
+    );
+
+    // 3) Download cloned _delta_log locally, rewrite paths to ABS paths, upload back
+    let tmpdir = tempfile::tempdir().unwrap();
+    let local_log_dir = tmpdir.path().join("_delta_log");
+    fs::create_dir_all(&local_log_dir).unwrap();
+
+    run(
+        "az",
+        &[
+            "storage",
+            "blob",
+            "download-batch",
+            "-s",
+            &container,
+            "-d",
+            tmpdir.path().to_str().unwrap(),
+            "--pattern",
+            &format!("{}/_delta_log/*", cloned_prefix),
+        ],
+    );
+
+    // The download creates cloned/_delta_log structure, move files to local_log_dir
+    let downloaded_log_dir = tmpdir.path().join(cloned_prefix).join("_delta_log");
+    if downloaded_log_dir.exists() {
+        for entry in fs::read_dir(&downloaded_log_dir).unwrap() {
+            let entry = entry.unwrap();
+            let dest = local_log_dir.join(entry.file_name());
+            fs::rename(entry.path(), dest).unwrap();
+        }
+    }
+
+    // Rewrite JSON actions inside downloaded log files. For Azure table location,
+    // rewrite to fully-qualified abfs:// URIs pointing at the original Azure container.
+    rewrite_log_paths_with_prefix(&local_log_dir, &original_uri);
+
+    // Delete existing log files in cloned location and upload rewritten log
+    run(
+        "az",
+        &[
+            "storage",
+            "blob",
+            "delete-batch",
+            "-s",
+            &container,
+            "--pattern",
+            &format!("{}/_delta_log/*", cloned_prefix),
+        ],
+    );
+
+    run(
+        "az",
+        &[
+            "storage",
+            "blob",
+            "upload-batch",
+            "-s",
+            local_log_dir.to_str().unwrap(),
+            "-d",
+            &format!("{}/{}/_delta_log", container, cloned_prefix),
+        ],
+    );
+
+    // 4) Open the cloned Azure table and verify URIs and data against the local original table
+    use deltalake_core::arrow::array::RecordBatch;
+    use deltalake_core::datafusion::assert_batches_sorted_eq;
+    use deltalake_core::datafusion::common::test_util::format_batches;
+    use deltalake_core::operations::collect_sendable_stream;
+
+    let table_url = url::Url::parse(&cloned_uri).unwrap();
+    let table = deltalake_core::open_table(table_url).await.unwrap();
+
+    // Verify file URIs
+    let mut files: Vec<String> = table.get_file_uris().unwrap().collect();
+    files.sort();
+    // For Azure table, we expect fully-qualified abfs:// URIs
+    let mut expected_uris: Vec<String> = expected_file_uris_from_prefix(&original_uri);
+    expected_uris.sort();
+    assert_eq!(files, expected_uris);
+
+    // Load data from cloned Azure table
+    let (_tbl, stream) = deltalake_core::DeltaOps(table).load().await.unwrap();
+    let data: Vec<RecordBatch> = collect_sendable_stream(stream).await.unwrap();
+
+    // Load expected local table and compare
+    let expected_table =
+        deltalake_core::open_table(Url::from_directory_path(&expected_abs).unwrap())
+            .await
+            .unwrap();
+    let (_t, expected_stream) = deltalake_core::DeltaOps(expected_table)
+        .load()
+        .await
+        .unwrap();
+    let expected_batches: Vec<RecordBatch> =
+        collect_sendable_stream(expected_stream).await.unwrap();
+    let expected_lines = format_batches(&*expected_batches).unwrap().to_string();
+    let expected_lines_vec: Vec<&str> = expected_lines.trim().lines().collect();
+    assert_batches_sorted_eq!(&expected_lines_vec, &data);
+}
+
+#[cfg(feature = "cloud")]
+#[tokio::test]
+async fn compare_table_with_full_paths_to_original_table_gcp() {
+    use std::process::Command;
+
+    // Register GCP handlers for deltalake-core tests. In normal usage the `deltalake`
+    // meta-crate auto-registers these via a ctor, but core tests run without it.
+    // This ensures that `gs://` URLs are recognized instead of yielding
+    // InvalidTableLocation errors.
+    deltalake_gcp::register_handlers(None);
+
+    // Ensure environment is prepared for GCS emulator (fake-gcs-server)
+    let gcs_base_url =
+        std::env::var("GOOGLE_BASE_URL").unwrap_or_else(|_| "http://localhost:4443".to_string());
+    let gcs_endpoint_url = std::env::var("GOOGLE_ENDPOINT_URL")
+        .unwrap_or_else(|_| "http://localhost:4443/storage/v1/b".to_string());
+
+    // Create a temporary directory for the fake service account JSON
+    let tmpdir_creds = tempfile::tempdir().unwrap();
+    let token = serde_json::json!({
+        "gcs_base_url": gcs_base_url,
+        "disable_oauth": true,
+        "client_email": "",
+        "private_key": "",
+        "private_key_id": ""
+    });
+    let account_path = tmpdir_creds.path().join("gcs.json");
+    fs::write(&account_path, serde_json::to_vec(&token).unwrap()).unwrap();
+    std::env::set_var("GOOGLE_SERVICE_ACCOUNT", account_path.to_str().unwrap());
+
+    // Path to the original local test table (with relative paths in _delta_log)
+    let expected_rel = Path::new("../test/tests/data/delta-0.8.0");
+    let expected_abs = fs::canonicalize(expected_rel).unwrap();
+
+    // Create unique bucket and prefixes (avoid extra deps; use time-based suffix)
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let suffix = format!("{}", millis);
+    let bucket = format!("test-delta-core-{}", suffix);
+    let original_prefix = "original";
+    let cloned_prefix = "cloned";
+    let bucket_uri = format!("gs://{}", bucket);
+    let original_uri = format!("{}/{}", bucket_uri, original_prefix);
+    let cloned_uri = format!("{}/{}", bucket_uri, cloned_prefix);
+
+    // Helper to run a command and assert success
+    let run = |program: &str, args: &[&str]| {
+        let status = Command::new(program)
+            .args(args)
+            .status()
+            .expect("failed to run command");
+        assert!(status.success(), "command failed: {} {:?}", program, args);
+    };
+
+    // Create bucket using curl to GCS emulator API
+    let create_bucket_payload = serde_json::json!({ "name": bucket });
+    run(
+        "curl",
+        &[
+            "--insecure",
+            "-X",
+            "POST",
+            "--data-binary",
+            &serde_json::to_string(&create_bucket_payload).unwrap(),
+            "-H",
+            "Content-Type: application/json",
+            &gcs_endpoint_url,
+        ],
+    );
+
+    // Ensure cleanup at the end
+    struct Cleanup {
+        bucket: String,
+        endpoint: String,
+    }
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let delete_payload = serde_json::json!({ "name": self.bucket });
+            let _ = Command::new("curl")
+                .args([
+                    "--insecure",
+                    "-X",
+                    "DELETE",
+                    "--data-binary",
+                    &serde_json::to_string(&delete_payload).unwrap(),
+                    "-H",
+                    "Content-Type: application/json",
+                    &self.endpoint,
+                ])
+                .status();
+        }
+    }
+    let _cleanup = Cleanup {
+        bucket: bucket.clone(),
+        endpoint: gcs_endpoint_url.clone(),
+    };
+
+    // For GCS emulator, we use the object_store API to upload files since gsutil
+    // may not be available. We'll use deltalake's built-in storage capabilities.
+    use deltalake_core::table::builder::DeltaTableBuilder;
+    use futures::StreamExt;
+
+    // Helper to copy local directory to GCS
+    async fn copy_local_to_gcs(local_dir: &Path, gcs_uri: &str) {
+        let gcs_url = deltalake_core::table::builder::parse_table_uri(gcs_uri).unwrap();
+        let gcs_store = DeltaTableBuilder::from_uri(gcs_url)
+            .unwrap()
+            .with_allow_http(true)
+            .build_storage()
+            .unwrap();
+        let store = gcs_store.object_store(None);
+
+        fn visit_dirs(dir: &Path, base: &Path, files: &mut Vec<(PathBuf, String)>) {
+            if dir.is_dir() {
+                for entry in fs::read_dir(dir).unwrap() {
+                    let entry = entry.unwrap();
+                    let path = entry.path();
+                    if path.is_dir() {
+                        visit_dirs(&path, base, files);
+                    } else {
+                        let rel = path.strip_prefix(base).unwrap();
+                        files.push((path.clone(), rel.to_str().unwrap().to_string()));
+                    }
+                }
+            }
+        }
+
+        let mut files = Vec::new();
+        visit_dirs(local_dir, local_dir, &mut files);
+
+        for (local_path, rel_path) in files {
+            let bytes = fs::read(&local_path).unwrap();
+            let object_path = object_store::path::Path::from(rel_path);
+            store.put(&object_path, bytes.into()).await.unwrap();
+        }
+    }
+
+    // Helper to copy GCS prefix to another GCS prefix
+    async fn copy_gcs_to_gcs(from_uri: &str, to_uri: &str) {
+        let from_url = deltalake_core::table::builder::parse_table_uri(from_uri).unwrap();
+        let from_store = DeltaTableBuilder::from_uri(from_url)
+            .unwrap()
+            .with_allow_http(true)
+            .build_storage()
+            .unwrap();
+        let from_obj_store = from_store.object_store(None);
+
+        let to_url = deltalake_core::table::builder::parse_table_uri(to_uri).unwrap();
+        let to_store = DeltaTableBuilder::from_uri(to_url)
+            .unwrap()
+            .with_allow_http(true)
+            .build_storage()
+            .unwrap();
+        let to_obj_store = to_store.object_store(None);
+
+        let mut stream = from_obj_store.list(None);
+        while let Some(meta) = stream.next().await {
+            if let Ok(meta) = meta {
+                let bytes = from_obj_store.get(&meta.location).await.unwrap().bytes().await.unwrap();
+                to_obj_store.put(&meta.location, bytes.into()).await.unwrap();
+            }
+        }
+    }
+
+    // Helper to download GCS files to local
+    async fn download_gcs_to_local(gcs_uri: &str, local_dir: &Path, pattern: &str) {
+        let gcs_url = deltalake_core::table::builder::parse_table_uri(gcs_uri).unwrap();
+        let gcs_store = DeltaTableBuilder::from_uri(gcs_url)
+            .unwrap()
+            .with_allow_http(true)
+            .build_storage()
+            .unwrap();
+        let store = gcs_store.object_store(None);
+
+        let prefix = object_store::path::Path::from(pattern);
+        let mut stream = store.list(Some(&prefix));
+        while let Some(meta) = stream.next().await {
+            if let Ok(meta) = meta {
+                let bytes = store.get(&meta.location).await.unwrap().bytes().await.unwrap();
+                let local_path = local_dir.join(meta.location.as_ref());
+                if let Some(parent) = local_path.parent() {
+                    fs::create_dir_all(parent).ok();
+                }
+                fs::write(&local_path, &bytes).unwrap();
+            }
+        }
+    }
+
+    // Helper to upload local files to GCS with a prefix
+    async fn upload_local_to_gcs_with_prefix(local_dir: &Path, gcs_uri: &str, prefix: &str) {
+        let gcs_url = deltalake_core::table::builder::parse_table_uri(gcs_uri).unwrap();
+        let gcs_store = DeltaTableBuilder::from_uri(gcs_url)
+            .unwrap()
+            .with_allow_http(true)
+            .build_storage()
+            .unwrap();
+        let store = gcs_store.object_store(None);
+
+        for entry in fs::read_dir(local_dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.is_file() {
+                let bytes = fs::read(&path).unwrap();
+                let filename = path.file_name().unwrap().to_str().unwrap();
+                let object_path = object_store::path::Path::from(format!("{}/{}", prefix, filename));
+                store.put(&object_path, bytes.into()).await.unwrap();
+            }
+        }
+    }
+
+    // 1) Copy the original local table directory to gs://bucket/original
+    copy_local_to_gcs(&expected_abs, &original_uri).await;
+
+    // 2) Clone original -> cloned in GCS
+    copy_gcs_to_gcs(&original_uri, &cloned_uri).await;
+
+    // 3) Download cloned _delta_log locally, rewrite paths to ABS paths, upload back
+    let tmpdir = tempfile::tempdir().unwrap();
+    let local_log_dir = tmpdir.path().join("_delta_log");
+    fs::create_dir_all(&local_log_dir).unwrap();
+
+    download_gcs_to_local(&cloned_uri, tmpdir.path(), "_delta_log").await;
+
+    // Rewrite JSON actions inside downloaded log files. For GCS table location,
+    // rewrite to fully-qualified gs:// URIs pointing at the original GCS bucket.
+    rewrite_log_paths_with_prefix(&local_log_dir, &original_uri);
+
+    // Upload rewritten log back to GCS cloned table
+    upload_local_to_gcs_with_prefix(&local_log_dir, &cloned_uri, "_delta_log").await;
+
+    // 4) Open the cloned GCS table and verify URIs and data against the local original table
+    use deltalake_core::arrow::array::RecordBatch;
+    use deltalake_core::datafusion::assert_batches_sorted_eq;
+    use deltalake_core::datafusion::common::test_util::format_batches;
+    use deltalake_core::operations::collect_sendable_stream;
+
+    let table_url = url::Url::parse(&cloned_uri).unwrap();
+    let table = deltalake_core::open_table_with_storage_options(
+        table_url,
+        [("allow_http".to_string(), "true".to_string())]
+            .into_iter()
+            .collect(),
+    )
+    .await
+    .unwrap();
+
+    // Verify file URIs
+    let mut files: Vec<String> = table.get_file_uris().unwrap().collect();
+    files.sort();
+    // For GCS table, we expect fully-qualified gs:// URIs
+    let mut expected_uris: Vec<String> = expected_file_uris_from_prefix(&original_uri);
+    expected_uris.sort();
+    assert_eq!(files, expected_uris);
+
+    // Load data from cloned GCS table
     let (_tbl, stream) = deltalake_core::DeltaOps(table).load().await.unwrap();
     let data: Vec<RecordBatch> = collect_sendable_stream(stream).await.unwrap();
 

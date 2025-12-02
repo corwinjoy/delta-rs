@@ -93,6 +93,8 @@ ctor = "0"
 datatest-stable = "0.3"
 deltalake-test = { path = "../test" }
 deltalake-aws = { path = "../aws" }
+deltalake-azure = { path = "../azure" }
+deltalake-gcp = { path = "../gcp" }
 dotenvy = "0"
 fs_extra = "1.2.0"
 pretty_assertions = "1.2.1"
