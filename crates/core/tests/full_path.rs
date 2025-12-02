@@ -339,7 +339,7 @@ fn rewrite_log_paths(log_dir: &Path, base_dir: &Path, as_file_uri: bool) {
             rewritten_lines.push(serde_json::to_string(&v).unwrap());
         }
         let new_contents = rewritten_lines.join("\n");
-        fs::write(&path, new_contents).unwrap();
+        fs::write(&path, format!("{}\n", new_contents)).unwrap();
     }
 }
 
@@ -381,7 +381,7 @@ fn rewrite_log_paths_with_prefix(log_dir: &Path, prefix_uri: &str) {
             rewritten_lines.push(serde_json::to_string(&v).unwrap());
         }
         let new_contents = rewritten_lines.join("\n");
-        fs::write(&path, new_contents).unwrap();
+        fs::write(&path, format!("{}\n", new_contents)).unwrap();
     }
 }
 

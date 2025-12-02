@@ -134,8 +134,7 @@ pub fn relativize_uri_to_bucket_root(root: &Url, input: &str) -> String {
 fn bucket_key_from_url(url: &Url) -> Option<String> {
     let path = url.path().trim_start_matches('/');
     if url.scheme() == "s3" {
-        // s3://bucket/key...
-        // First path segment is the key directly; bucket is in host
+        // For s3:// URLs, the host is the bucket and the path is the key
         return Some(path.to_string());
     }
 
@@ -184,10 +183,17 @@ fn extract_bucket_name(url: &Url) -> Option<String> {
 }
 
 fn looks_like_virtual_hosted_style(host: &str) -> bool {
-    // If host starts with "bucket." and contains known s3 or custom domains, treat as virtual-hosted-style.
-    // This is a heuristic: anything with a dot is acceptable, since we only need key extraction
-    // (host does not participate in the resulting key, and bucket is validated separately).
-    host.contains('.')
+    // Check for known S3 virtual-hosted-style host suffixes.
+    // This includes AWS S3, S3 website endpoints, and common localstack patterns.
+    const S3_SUFFIXES: &[&str] = &[
+        ".s3.amazonaws.com",
+        ".s3.amazonaws.com.cn",
+        ".s3-website.",
+        ".amazonaws.com",
+        ".localstack.cloud",
+        ".localhost.localstack.cloud",
+    ];
+    S3_SUFFIXES.iter().any(|suffix| host.contains(suffix))
 }
 
 fn bucket_from_virtual_hosted_style(host: &str) -> Option<&str> {

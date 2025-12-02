@@ -622,7 +622,7 @@ impl<'a> DeltaScanBuilder<'a> {
             let ts_ns = (adjusted.modification_time % 1000) * 1_000_000;
             let last_modified = Utc.from_utc_datetime(
                 &DateTime::from_timestamp(ts_secs, ts_ns as u32)
-                    .unwrap()
+                    .expect("Invalid timestamp in PartitionedFile: modification_time is out of range")
                     .naive_utc(),
             );
 
@@ -1259,7 +1259,7 @@ fn partitioned_file_from_action(
     let ts_ns = (action.modification_time % 1000) * 1_000_000;
     let last_modified = Utc.from_utc_datetime(
         &DateTime::from_timestamp(ts_secs, ts_ns as u32)
-            .unwrap()
+            .expect("Invalid timestamp in PartitionedFile: modification_time is out of range")
             .naive_utc(),
     );
     PartitionedFile {
