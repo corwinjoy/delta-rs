@@ -51,7 +51,7 @@ async fn compare_table_with_full_paths_to_original_table() {
 //   AWS_ENDPOINT_URL=http://localhost:4566
 //   AWS_ALLOW_HTTP=true
 // To run: start Localstack via `docker compose up -d` in repo root.
-// S3 Test requires aws cli to be installed.
+// S3 Test requires the AWS CLI (`aws` command) to be installed and available in PATH.
 
 #[cfg(feature = "cloud")]
 #[tokio::test]
