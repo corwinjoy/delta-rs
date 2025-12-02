@@ -14,11 +14,11 @@ use datafusion::common::pruning::PruningStatistics;
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion::common::{Column, DFSchema, Result, Statistics, ToDFSchema};
 use datafusion::config::{ConfigOptions, TableParquetOptions};
+use datafusion::datasource::object_store::ObjectStoreUrl;
 use datafusion::datasource::physical_plan::{
     wrap_partition_type_in_dict, wrap_partition_value_in_dict, FileGroup, FileSource,
 };
 use datafusion::datasource::physical_plan::{FileScanConfigBuilder, ParquetSource};
-use datafusion::datasource::object_store::ObjectStoreUrl;
 use datafusion::datasource::sink::{DataSink, DataSinkExec};
 use datafusion::datasource::TableType;
 use datafusion::error::DataFusionError;
@@ -622,7 +622,9 @@ impl<'a> DeltaScanBuilder<'a> {
             let ts_ns = (adjusted.modification_time % 1000) * 1_000_000;
             let last_modified = Utc.from_utc_datetime(
                 &DateTime::from_timestamp(ts_secs, ts_ns as u32)
-                    .expect("Invalid timestamp in PartitionedFile: modification_time is out of range")
+                    .expect(
+                        "Invalid timestamp in PartitionedFile: modification_time is out of range",
+                    )
                     .naive_utc(),
             );
 
@@ -660,11 +662,7 @@ impl<'a> DeltaScanBuilder<'a> {
 
             // Build PartitionedFile from action to ensure partition values align with schema
             // and DataFusion expectations
-            let mut part = partitioned_file_from_action(
-                &adjusted,
-                table_partition_cols,
-                &schema,
-            );
+            let mut part = partitioned_file_from_action(&adjusted, table_partition_cols, &schema);
             // Overwrite object_meta with the one computed above to preserve normalized path
             part.object_meta = object_meta;
 
@@ -768,11 +766,9 @@ impl<'a> DeltaScanBuilder<'a> {
                 // Build a root-scoped store identifier unique per (scheme, host)
                 let loc = &self.log_store.config().location;
                 let host = loc.host_str().unwrap_or("-");
-                let url = ObjectStoreUrl::parse(format!(
-                    "delta-rs://root-{}-{}",
-                    loc.scheme(), host
-                ))
-                .unwrap();
+                let url =
+                    ObjectStoreUrl::parse(format!("delta-rs://root-{}-{}", loc.scheme(), host))
+                        .unwrap();
                 self.session
                     .runtime_env()
                     .register_object_store(url.as_ref(), self.log_store.root_object_store(None));
@@ -782,24 +778,23 @@ impl<'a> DeltaScanBuilder<'a> {
             }
         };
 
-        let file_scan_config =
-            FileScanConfigBuilder::new(scan_store_url, file_schema, file_source)
-                .with_file_groups(
-                    // If all files were filtered out, we still need to emit at least one partition to
-                    // pass datafusion sanity checks.
-                    //
-                    // See https://github.com/apache/datafusion/issues/11322
-                    if file_groups.is_empty() {
-                        vec![FileGroup::from(vec![])]
-                    } else {
-                        file_groups.into_values().map(FileGroup::from).collect()
-                    },
-                )
-                .with_statistics(stats)
-                .with_projection(self.projection.cloned())
-                .with_limit(self.limit)
-                .with_table_partition_cols(table_partition_cols)
-                .build();
+        let file_scan_config = FileScanConfigBuilder::new(scan_store_url, file_schema, file_source)
+            .with_file_groups(
+                // If all files were filtered out, we still need to emit at least one partition to
+                // pass datafusion sanity checks.
+                //
+                // See https://github.com/apache/datafusion/issues/11322
+                if file_groups.is_empty() {
+                    vec![FileGroup::from(vec![])]
+                } else {
+                    file_groups.into_values().map(FileGroup::from).collect()
+                },
+            )
+            .with_statistics(stats)
+            .with_projection(self.projection.cloned())
+            .with_limit(self.limit)
+            .with_table_partition_cols(table_partition_cols)
+            .build();
 
         let metrics = ExecutionPlanMetricsSet::new();
         MetricBuilder::new(&metrics)

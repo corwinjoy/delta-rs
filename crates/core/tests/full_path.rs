@@ -1,4 +1,3 @@
-
 // Verifies that tables with fully-qualified file paths behave as expected
 // and that reading them yields the same data as the corresponding table
 // with relative file paths.
@@ -94,22 +93,14 @@ async fn compare_table_with_full_paths_to_original_table_s3() {
     };
 
     // Create bucket
-    run(
-        "aws",
-        &["s3", "mb", &bucket_uri],
-    );
+    run("aws", &["s3", "mb", &bucket_uri]);
 
     // Ensure cleanup at the end
     struct Cleanup(String);
     impl Drop for Cleanup {
         fn drop(&mut self) {
             let _ = Command::new("aws")
-                .args([
-                    "s3",
-                    "rb",
-                    &self.0,
-                    "--force",
-                ])
+                .args(["s3", "rb", &self.0, "--force"])
                 .status();
         }
     }
@@ -130,13 +121,7 @@ async fn compare_table_with_full_paths_to_original_table_s3() {
     // 2) Clone original -> cloned in S3
     run(
         "aws",
-        &[
-            "s3",
-            "cp",
-            &original_uri,
-            &cloned_uri,
-            "--recursive",
-        ],
+        &["s3", "cp", &original_uri, &cloned_uri, "--recursive"],
     );
 
     // 3) Download cloned _delta_log locally, rewrite paths to ABS paths under expected_abs, upload back
@@ -197,8 +182,12 @@ async fn compare_table_with_full_paths_to_original_table_s3() {
         deltalake_core::open_table(Url::from_directory_path(&expected_abs).unwrap())
             .await
             .unwrap();
-    let (_t, expected_stream) = deltalake_core::DeltaOps(expected_table).load().await.unwrap();
-    let expected_batches: Vec<RecordBatch> = collect_sendable_stream(expected_stream).await.unwrap();
+    let (_t, expected_stream) = deltalake_core::DeltaOps(expected_table)
+        .load()
+        .await
+        .unwrap();
+    let expected_batches: Vec<RecordBatch> =
+        collect_sendable_stream(expected_stream).await.unwrap();
     let expected_lines = format_batches(&*expected_batches).unwrap().to_string();
     let expected_lines_vec: Vec<&str> = expected_lines.trim().lines().collect();
     assert_batches_sorted_eq!(&expected_lines_vec, &data);
@@ -391,13 +380,11 @@ fn expected_file_uris_from_prefix(prefix_uri: &str) -> Vec<String> {
     let mut v = vec![
         format!(
             "{}/{}",
-            prefix,
-            "part-00000-c9b90f86-73e6-46c8-93ba-ff6bfaf892a1-c000.snappy.parquet"
+            prefix, "part-00000-c9b90f86-73e6-46c8-93ba-ff6bfaf892a1-c000.snappy.parquet"
         ),
         format!(
             "{}/{}",
-            prefix,
-            "part-00000-04ec9591-0b73-459e-8d18-ba5711d6cbe1-c000.snappy.parquet"
+            prefix, "part-00000-04ec9591-0b73-459e-8d18-ba5711d6cbe1-c000.snappy.parquet"
         ),
     ];
     v.sort();

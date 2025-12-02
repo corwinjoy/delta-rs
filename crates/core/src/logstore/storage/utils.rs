@@ -198,7 +198,9 @@ fn looks_like_virtual_hosted_style(host: &str) -> bool {
 
 fn bucket_from_virtual_hosted_style(host: &str) -> Option<&str> {
     // bucket is up to first '.'
-    host.split_once('.').map(|(b, _)| b).filter(|b| !b.is_empty())
+    host.split_once('.')
+        .map(|(b, _)| b)
+        .filter(|b| !b.is_empty())
 }
 
 impl TryFrom<Add> for ObjectMeta {
