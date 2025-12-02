@@ -5,6 +5,7 @@ use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 use url::Url;
+use std::collections::HashMap;
 
 #[tokio::test]
 async fn compare_table_with_full_paths() {
@@ -72,11 +73,7 @@ async fn compare_table_with_full_paths_to_original_table_s3() {
     let expected_abs = fs::canonicalize(expected_rel).unwrap();
 
     // Create unique bucket and prefixes (avoid extra deps; use time-based suffix)
-    let millis = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
-    let suffix = format!("{}", millis);
+    let suffix = unique_suffix();
     let bucket = format!("test-delta-core-{}", suffix);
     let original_prefix = "original";
     let cloned_prefix = "cloned";
@@ -85,13 +82,7 @@ async fn compare_table_with_full_paths_to_original_table_s3() {
     let cloned_uri = format!("{}/{}", bucket_uri, cloned_prefix);
 
     // Helper to run a command and assert success
-    let run = |program: &str, args: &[&str]| {
-        let status = Command::new(program)
-            .args(args)
-            .status()
-            .expect("failed to run command");
-        assert!(status.success(), "command failed: {} {:?}", program, args);
-    };
+    let run = |program: &str, args: &[&str]| run_cmd(program, args);
 
     // Create bucket
     run("aws", &["s3", "mb", &bucket_uri]);
@@ -158,40 +149,7 @@ async fn compare_table_with_full_paths_to_original_table_s3() {
     );
 
     // 4) Open the cloned S3 table and verify URIs and data against the local original table
-    use deltalake_core::arrow::array::RecordBatch;
-    use deltalake_core::datafusion::assert_batches_sorted_eq;
-    use deltalake_core::datafusion::common::test_util::format_batches;
-    use deltalake_core::operations::collect_sendable_stream;
-
-    let table_url = url::Url::parse(&cloned_uri).unwrap();
-    let table = deltalake_core::open_table(table_url).await.unwrap();
-
-    // Verify file URIs
-    let mut files: Vec<String> = table.get_file_uris().unwrap().collect();
-    files.sort();
-    // For S3 table, we expect fully-qualified s3:// URIs
-    let mut expected_uris: Vec<String> = expected_file_uris_from_prefix(&original_uri);
-    expected_uris.sort();
-    assert_eq!(files, expected_uris);
-
-    // Load data from cloned S3 table
-    let (_tbl, stream) = deltalake_core::DeltaOps(table).load().await.unwrap();
-    let data: Vec<RecordBatch> = collect_sendable_stream(stream).await.unwrap();
-
-    // Load expected local table and compare
-    let expected_table =
-        deltalake_core::open_table(Url::from_directory_path(&expected_abs).unwrap())
-            .await
-            .unwrap();
-    let (_t, expected_stream) = deltalake_core::DeltaOps(expected_table)
-        .load()
-        .await
-        .unwrap();
-    let expected_batches: Vec<RecordBatch> =
-        collect_sendable_stream(expected_stream).await.unwrap();
-    let expected_lines = format_batches(&*expected_batches).unwrap().to_string();
-    let expected_lines_vec: Vec<&str> = expected_lines.trim().lines().collect();
-    assert_batches_sorted_eq!(&expected_lines_vec, &data);
+    assert_table_uris_and_data_cloud(&cloned_uri, &original_uri, &expected_abs, None).await;
 }
 
 
@@ -228,11 +186,7 @@ async fn compare_table_with_full_paths_to_original_table_azure() {
     let expected_abs = fs::canonicalize(expected_rel).unwrap();
 
     // Create unique container and prefixes (avoid extra deps; use time-based suffix)
-    let millis = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
-    let suffix = format!("{}", millis);
+    let suffix = unique_suffix();
     let container = format!("test-delta-core-{}", suffix);
     let original_prefix = "original";
     let cloned_prefix = "cloned";
@@ -241,13 +195,7 @@ async fn compare_table_with_full_paths_to_original_table_azure() {
     let cloned_uri = format!("{}/{}", container_uri, cloned_prefix);
 
     // Helper to run a command and assert success
-    let run = |program: &str, args: &[&str]| {
-        let status = Command::new(program)
-            .args(args)
-            .status()
-            .expect("failed to run command");
-        assert!(status.success(), "command failed: {} {:?}", program, args);
-    };
+    let run = |program: &str, args: &[&str]| run_cmd(program, args);
 
     // Create container
     run("az", &["storage", "container", "create", "-n", &container]);
@@ -384,40 +332,7 @@ async fn compare_table_with_full_paths_to_original_table_azure() {
     );
 
     // 4) Open the cloned Azure table and verify URIs and data against the local original table
-    use deltalake_core::arrow::array::RecordBatch;
-    use deltalake_core::datafusion::assert_batches_sorted_eq;
-    use deltalake_core::datafusion::common::test_util::format_batches;
-    use deltalake_core::operations::collect_sendable_stream;
-
-    let table_url = url::Url::parse(&cloned_uri).unwrap();
-    let table = deltalake_core::open_table(table_url).await.unwrap();
-
-    // Verify file URIs
-    let mut files: Vec<String> = table.get_file_uris().unwrap().collect();
-    files.sort();
-    // For Azure table, we expect fully-qualified abfs:// URIs
-    let mut expected_uris: Vec<String> = expected_file_uris_from_prefix(&original_uri);
-    expected_uris.sort();
-    assert_eq!(files, expected_uris);
-
-    // Load data from cloned Azure table
-    let (_tbl, stream) = deltalake_core::DeltaOps(table).load().await.unwrap();
-    let data: Vec<RecordBatch> = collect_sendable_stream(stream).await.unwrap();
-
-    // Load expected local table and compare
-    let expected_table =
-        deltalake_core::open_table(Url::from_directory_path(&expected_abs).unwrap())
-            .await
-            .unwrap();
-    let (_t, expected_stream) = deltalake_core::DeltaOps(expected_table)
-        .load()
-        .await
-        .unwrap();
-    let expected_batches: Vec<RecordBatch> =
-        collect_sendable_stream(expected_stream).await.unwrap();
-    let expected_lines = format_batches(&*expected_batches).unwrap().to_string();
-    let expected_lines_vec: Vec<&str> = expected_lines.trim().lines().collect();
-    assert_batches_sorted_eq!(&expected_lines_vec, &data);
+    assert_table_uris_and_data_cloud(&cloned_uri, &original_uri, &expected_abs, None).await;
 }
 
 #[cfg(feature = "cloud")]
@@ -455,11 +370,7 @@ async fn compare_table_with_full_paths_to_original_table_gcp() {
     let expected_abs = fs::canonicalize(expected_rel).unwrap();
 
     // Create unique bucket and prefixes (avoid extra deps; use time-based suffix)
-    let millis = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
-    let suffix = format!("{}", millis);
+    let suffix = unique_suffix();
     let bucket = format!("test-delta-core-{}", suffix);
     let original_prefix = "original";
     let cloned_prefix = "cloned";
@@ -468,13 +379,7 @@ async fn compare_table_with_full_paths_to_original_table_gcp() {
     let cloned_uri = format!("{}/{}", bucket_uri, cloned_prefix);
 
     // Helper to run a command and assert success
-    let run = |program: &str, args: &[&str]| {
-        let status = Command::new(program)
-            .args(args)
-            .status()
-            .expect("failed to run command");
-        assert!(status.success(), "command failed: {} {:?}", program, args);
-    };
+    let run = |program: &str, args: &[&str]| run_cmd(program, args);
 
     // Create bucket using curl to GCS emulator API
     let create_bucket_payload = serde_json::json!({ "name": bucket });
@@ -653,47 +558,9 @@ async fn compare_table_with_full_paths_to_original_table_gcp() {
     upload_local_to_gcs_with_prefix(&local_log_dir, &cloned_uri, "_delta_log").await;
 
     // 4) Open the cloned GCS table and verify URIs and data against the local original table
-    use deltalake_core::arrow::array::RecordBatch;
-    use deltalake_core::datafusion::assert_batches_sorted_eq;
-    use deltalake_core::datafusion::common::test_util::format_batches;
-    use deltalake_core::operations::collect_sendable_stream;
-
-    let table_url = url::Url::parse(&cloned_uri).unwrap();
-    let table = deltalake_core::open_table_with_storage_options(
-        table_url,
-        [("allow_http".to_string(), "true".to_string())]
-            .into_iter()
-            .collect(),
-    )
-    .await
-    .unwrap();
-
-    // Verify file URIs
-    let mut files: Vec<String> = table.get_file_uris().unwrap().collect();
-    files.sort();
-    // For GCS table, we expect fully-qualified gs:// URIs
-    let mut expected_uris: Vec<String> = expected_file_uris_from_prefix(&original_uri);
-    expected_uris.sort();
-    assert_eq!(files, expected_uris);
-
-    // Load data from cloned GCS table
-    let (_tbl, stream) = deltalake_core::DeltaOps(table).load().await.unwrap();
-    let data: Vec<RecordBatch> = collect_sendable_stream(stream).await.unwrap();
-
-    // Load expected local table and compare
-    let expected_table =
-        deltalake_core::open_table(Url::from_directory_path(&expected_abs).unwrap())
-            .await
-            .unwrap();
-    let (_t, expected_stream) = deltalake_core::DeltaOps(expected_table)
-        .load()
-        .await
-        .unwrap();
-    let expected_batches: Vec<RecordBatch> =
-        collect_sendable_stream(expected_stream).await.unwrap();
-    let expected_lines = format_batches(&*expected_batches).unwrap().to_string();
-    let expected_lines_vec: Vec<&str> = expected_lines.trim().lines().collect();
-    assert_batches_sorted_eq!(&expected_lines_vec, &data);
+    let mut opts: HashMap<String, String> = HashMap::new();
+    opts.insert("allow_http".to_string(), "true".to_string());
+    assert_table_uris_and_data_cloud(&cloned_uri, &original_uri, &expected_abs, Some(opts)).await;
 }
 
 // Helper to generate the expected file URIs (two known parquet parts) for a base directory
@@ -739,6 +606,52 @@ async fn assert_table_uris_and_data(
     let data: Vec<RecordBatch> = collect_sendable_stream(stream).await.unwrap();
 
     // Load data from expected table and compare
+    let expected_table =
+        deltalake_core::open_table(Url::from_directory_path(expected_table_dir).unwrap())
+            .await
+            .unwrap();
+    let (_table, stream) = DeltaOps(expected_table).load().await.unwrap();
+    let expected_data: Vec<RecordBatch> = collect_sendable_stream(stream).await.unwrap();
+    let expected_lines = format_batches(&*expected_data).unwrap().to_string();
+    let expected_lines_vec: Vec<&str> = expected_lines.trim().lines().collect();
+    assert_batches_sorted_eq!(&expected_lines_vec, &data);
+}
+
+// Helper to open a cloud table by URI, verify its data file URIs match those under
+// `expected_prefix_uri`, and compare loaded data against a reference local table directory.
+async fn assert_table_uris_and_data_cloud(
+    table_uri: &str,
+    expected_prefix_uri: &str,
+    expected_table_dir: &Path,
+    storage_options: Option<HashMap<String, String>>,
+) {
+    use deltalake_core::arrow::array::RecordBatch;
+    use deltalake_core::datafusion::assert_batches_sorted_eq;
+    use deltalake_core::datafusion::common::test_util::format_batches;
+    use deltalake_core::operations::collect_sendable_stream;
+    use deltalake_core::DeltaOps;
+
+    let table_url = url::Url::parse(table_uri).unwrap();
+    let table = if let Some(opts) = storage_options {
+        deltalake_core::open_table_with_storage_options(table_url, opts)
+            .await
+            .unwrap()
+    } else {
+        deltalake_core::open_table(table_url).await.unwrap()
+    };
+
+    // Verify file URIs
+    let mut files: Vec<String> = table.get_file_uris().unwrap().collect();
+    files.sort();
+    let mut expected_uris: Vec<String> = expected_file_uris_from_prefix(expected_prefix_uri);
+    expected_uris.sort();
+    assert_eq!(files, expected_uris);
+
+    // Load data from target table
+    let (_table, stream) = DeltaOps(table).load().await.unwrap();
+    let data: Vec<RecordBatch> = collect_sendable_stream(stream).await.unwrap();
+
+    // Load data from expected local table and compare
     let expected_table =
         deltalake_core::open_table(Url::from_directory_path(expected_table_dir).unwrap())
             .await
@@ -892,4 +805,23 @@ fn expected_file_uris_from_prefix(prefix_uri: &str) -> Vec<String> {
     ];
     v.sort();
     v
+}
+
+// Small utility to create a time-based unique suffix for cloud buckets/containers
+fn unique_suffix() -> String {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    format!("{}", millis)
+}
+
+// Small utility to run an external command and assert success, with a helpful message
+fn run_cmd(program: &str, args: &[&str]) {
+    use std::process::Command;
+    let status = Command::new(program)
+        .args(args)
+        .status()
+        .expect("failed to run command");
+    assert!(status.success(), "command failed: {} {:?}", program, args);
 }
