@@ -398,6 +398,8 @@ async fn compare_table_with_full_paths_to_original_table_gcp() {
     );
 
     // Ensure cleanup at the end
+    // Not needed.
+    /*
     struct Cleanup {
         bucket: String,
         endpoint: String,
@@ -423,6 +425,8 @@ async fn compare_table_with_full_paths_to_original_table_gcp() {
         bucket: bucket.clone(),
         endpoint: gcs_endpoint_url.clone(),
     };
+    */
+
 
     // For GCS emulator, we use the object_store API to upload files since gsutil
     // may not be available. We'll use deltalake's built-in storage capabilities.
@@ -563,27 +567,25 @@ async fn compare_table_with_full_paths_to_original_table_gcp() {
     assert_table_uris_and_data_cloud(&cloned_uri, &original_uri, &expected_abs, Some(opts)).await;
 }
 
+// Known parquet file names used by the test table (delta-0.8.0)
+const TEST_PARQUET_FILES: &[&str] = &[
+    "part-00000-c9b90f86-73e6-46c8-93ba-ff6bfaf892a1-c000.snappy.parquet",
+    "part-00000-04ec9591-0b73-459e-8d18-ba5711d6cbe1-c000.snappy.parquet",
+];
+
 // Helper to generate the expected file URIs (two known parquet parts) for a base directory
 fn expected_file_uris(dir: &Path) -> Vec<String> {
-    let mut v = vec![
-        dir.join("part-00000-c9b90f86-73e6-46c8-93ba-ff6bfaf892a1-c000.snappy.parquet")
-            .to_str()
-            .unwrap()
-            .to_string(),
-        dir.join("part-00000-04ec9591-0b73-459e-8d18-ba5711d6cbe1-c000.snappy.parquet")
-            .to_str()
-            .unwrap()
-            .to_string(),
-    ];
+    let mut v: Vec<String> = TEST_PARQUET_FILES
+        .iter()
+        .map(|f| dir.join(f).to_str().unwrap().to_string())
+        .collect();
     v.sort();
     v
 }
 
-// Helper that opens `target_table_dir`, checks its file URIs match those under `expected_uris_dir`,
-// then loads data and compares against data loaded from `expected_table_dir`.
-async fn assert_table_uris_and_data(
-    target_table_dir: &Path,
-    expected_uris_dir: &Path,
+// Common helper to load data from a table and compare against an expected local table.
+async fn assert_data_matches_expected(
+    table: deltalake_core::DeltaTable,
     expected_table_dir: &Path,
 ) {
     use deltalake_core::arrow::array::RecordBatch;
@@ -592,20 +594,11 @@ async fn assert_table_uris_and_data(
     use deltalake_core::operations::collect_sendable_stream;
     use deltalake_core::DeltaOps;
 
-    // Open target table and verify file URIs
-    let table = deltalake_core::open_table(Url::from_directory_path(target_table_dir).unwrap())
-        .await
-        .unwrap();
-    let mut files: Vec<String> = table.get_file_uris().unwrap().collect();
-    files.sort();
-    let expected_uris = expected_file_uris(expected_uris_dir);
-    assert_eq!(files, expected_uris);
-
     // Load data from target table
     let (_table, stream) = DeltaOps(table).load().await.unwrap();
     let data: Vec<RecordBatch> = collect_sendable_stream(stream).await.unwrap();
 
-    // Load data from expected table and compare
+    // Load data from expected local table and compare
     let expected_table =
         deltalake_core::open_table(Url::from_directory_path(expected_table_dir).unwrap())
             .await
@@ -617,6 +610,26 @@ async fn assert_table_uris_and_data(
     assert_batches_sorted_eq!(&expected_lines_vec, &data);
 }
 
+// Helper that opens `target_table_dir`, checks its file URIs match those under `expected_uris_dir`,
+// then loads data and compares against data loaded from `expected_table_dir`.
+async fn assert_table_uris_and_data(
+    target_table_dir: &Path,
+    expected_uris_dir: &Path,
+    expected_table_dir: &Path,
+) {
+    // Open target table and verify file URIs
+    let table = deltalake_core::open_table(Url::from_directory_path(target_table_dir).unwrap())
+        .await
+        .unwrap();
+    let mut files: Vec<String> = table.get_file_uris().unwrap().collect();
+    files.sort();
+    let expected_uris = expected_file_uris(expected_uris_dir);
+    assert_eq!(files, expected_uris);
+
+    // Load and compare data
+    assert_data_matches_expected(table, expected_table_dir).await;
+}
+
 // Helper to open a cloud table by URI, verify its data file URIs match those under
 // `expected_prefix_uri`, and compare loaded data against a reference local table directory.
 async fn assert_table_uris_and_data_cloud(
@@ -625,12 +638,6 @@ async fn assert_table_uris_and_data_cloud(
     expected_table_dir: &Path,
     storage_options: Option<HashMap<String, String>>,
 ) {
-    use deltalake_core::arrow::array::RecordBatch;
-    use deltalake_core::datafusion::assert_batches_sorted_eq;
-    use deltalake_core::datafusion::common::test_util::format_batches;
-    use deltalake_core::operations::collect_sendable_stream;
-    use deltalake_core::DeltaOps;
-
     let table_url = url::Url::parse(table_uri).unwrap();
     let table = if let Some(opts) = storage_options {
         deltalake_core::open_table_with_storage_options(table_url, opts)
@@ -647,20 +654,8 @@ async fn assert_table_uris_and_data_cloud(
     expected_uris.sort();
     assert_eq!(files, expected_uris);
 
-    // Load data from target table
-    let (_table, stream) = DeltaOps(table).load().await.unwrap();
-    let data: Vec<RecordBatch> = collect_sendable_stream(stream).await.unwrap();
-
-    // Load data from expected local table and compare
-    let expected_table =
-        deltalake_core::open_table(Url::from_directory_path(expected_table_dir).unwrap())
-            .await
-            .unwrap();
-    let (_table, stream) = DeltaOps(expected_table).load().await.unwrap();
-    let expected_data: Vec<RecordBatch> = collect_sendable_stream(stream).await.unwrap();
-    let expected_lines = format_batches(&*expected_data).unwrap().to_string();
-    let expected_lines_vec: Vec<&str> = expected_lines.trim().lines().collect();
-    assert_batches_sorted_eq!(&expected_lines_vec, &data);
+    // Load and compare data
+    assert_data_matches_expected(table, expected_table_dir).await;
 }
 
 fn clone_test_dir_with_abs_paths_common(
@@ -721,8 +716,12 @@ fn absify_action_path(base_dir: &Path, action: &mut Value, as_file_uri: bool) {
     }
 }
 
-fn rewrite_log_paths(log_dir: &Path, base_dir: &Path, as_file_uri: bool) {
-    for entry in fs::read_dir(&log_dir).unwrap() {
+// Common helper to iterate over JSON log files and rewrite add/remove paths using a provided closure.
+fn rewrite_log_paths_common<F>(log_dir: &Path, mut rewrite_action: F)
+where
+    F: FnMut(&mut Value),
+{
+    for entry in fs::read_dir(log_dir).unwrap() {
         let entry = entry.unwrap();
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
@@ -736,16 +735,22 @@ fn rewrite_log_paths(log_dir: &Path, base_dir: &Path, as_file_uri: bool) {
             }
             let mut v: serde_json::Value = serde_json::from_str(line).unwrap();
             if let Some(add) = v.get_mut("add") {
-                absify_action_path(base_dir, add, as_file_uri);
+                rewrite_action(add);
             }
             if let Some(remove) = v.get_mut("remove") {
-                absify_action_path(base_dir, remove, as_file_uri);
+                rewrite_action(remove);
             }
             rewritten_lines.push(serde_json::to_string(&v).unwrap());
         }
         let new_contents = rewritten_lines.join("\n");
         fs::write(&path, format!("{}\n", new_contents)).unwrap();
     }
+}
+
+fn rewrite_log_paths(log_dir: &Path, base_dir: &Path, as_file_uri: bool) {
+    rewrite_log_paths_common(log_dir, |action| {
+        absify_action_path(base_dir, action, as_file_uri);
+    });
 }
 
 // Rewrite add/remove.path values to fully-qualified URIs under the given prefix
@@ -753,56 +758,26 @@ fn rewrite_log_paths(log_dir: &Path, base_dir: &Path, as_file_uri: bool) {
 //          "s3://bucket/cloned/part-00000.parquet"
 fn rewrite_log_paths_with_prefix(log_dir: &Path, prefix_uri: &str) {
     let prefix = prefix_uri.trim_end_matches('/');
-    for entry in fs::read_dir(&log_dir).unwrap() {
-        let entry = entry.unwrap();
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-        let original = fs::read_to_string(&path).unwrap();
-        let mut rewritten_lines: Vec<String> = Vec::new();
-        for line in original.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let mut v: serde_json::Value = serde_json::from_str(line).unwrap();
-            let rewrite = |action: &mut Value| {
-                if let Some(obj) = action.as_object_mut() {
-                    if let Some(path_val) = obj.get_mut("path") {
-                        if let Some(rel) = path_val.as_str() {
-                            let rel = rel.trim_start_matches('/');
-                            let full = format!("{}/{}", prefix, rel);
-                            *path_val = serde_json::Value::String(full);
-                        }
-                    }
+    rewrite_log_paths_common(log_dir, |action| {
+        if let Some(obj) = action.as_object_mut() {
+            if let Some(path_val) = obj.get_mut("path") {
+                if let Some(rel) = path_val.as_str() {
+                    let rel = rel.trim_start_matches('/');
+                    let full = format!("{}/{}", prefix, rel);
+                    *path_val = serde_json::Value::String(full);
                 }
-            };
-            if let Some(add) = v.get_mut("add") {
-                rewrite(add);
             }
-            if let Some(remove) = v.get_mut("remove") {
-                rewrite(remove);
-            }
-            rewritten_lines.push(serde_json::to_string(&v).unwrap());
         }
-        let new_contents = rewritten_lines.join("\n");
-        fs::write(&path, format!("{}\n", new_contents)).unwrap();
-    }
+    });
 }
 
-// Build expected fully-qualified s3:// URIs for the two known parquet files
+// Build expected fully-qualified URIs for the two known parquet files under a prefix
 fn expected_file_uris_from_prefix(prefix_uri: &str) -> Vec<String> {
     let prefix = prefix_uri.trim_end_matches('/');
-    let mut v = vec![
-        format!(
-            "{}/{}",
-            prefix, "part-00000-c9b90f86-73e6-46c8-93ba-ff6bfaf892a1-c000.snappy.parquet"
-        ),
-        format!(
-            "{}/{}",
-            prefix, "part-00000-04ec9591-0b73-459e-8d18-ba5711d6cbe1-c000.snappy.parquet"
-        ),
-    ];
+    let mut v: Vec<String> = TEST_PARQUET_FILES
+        .iter()
+        .map(|f| format!("{}/{}", prefix, f))
+        .collect();
     v.sort();
     v
 }
