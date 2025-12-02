@@ -616,7 +616,7 @@ impl<'a> DeltaScanBuilder<'a> {
                     location: action_with_normalized_path.path.clone().into(),
                     last_modified,
                     size: action_with_normalized_path.size as u64,
-                    e_tag: action_with_normalized_path.tags.as_ref().and_then(|tags| tags.get("etag").cloned()),
+                    e_tag: action_with_normalized_path.tags.as_ref().and_then(|tags| tags.get("etag")).cloned().flatten(),
                     version: None,
                 }
             };
