@@ -1125,7 +1125,8 @@ pub(crate) mod serde_path {
         .add(b'{')
         .add(b'^')
         .add(b'}')
-        .add(b'%')
+        // NOTE: '%' is NOT included here to avoid double-encoding.
+        // Paths already contain valid percent-encoded characters from partition values.
         .add(b'`')
         .add(b']')
         .add(b'"')

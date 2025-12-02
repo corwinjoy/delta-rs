@@ -14,6 +14,7 @@ use datafusion::common::pruning::PruningStatistics;
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion::common::{Column, DFSchema, Result, Statistics, ToDFSchema};
 use datafusion::config::{ConfigOptions, TableParquetOptions};
+use datafusion::datasource::object_store::ObjectStoreUrl;
 use datafusion::datasource::physical_plan::{
     wrap_partition_type_in_dict, wrap_partition_value_in_dict, FileGroup, FileSource,
 };
@@ -570,12 +571,60 @@ impl<'a> DeltaScanBuilder<'a> {
         // and partitions are somewhat evenly distributed, probably not the worst choice ...
         // However we may want to do some additional balancing in case we are far off from the above.
         let mut file_groups: HashMap<Vec<ScalarValue>, Vec<PartitionedFile>> = HashMap::new();
+        // If we encounter any absolute URIs outside the table root but within the same
+        // bucket/account, we will need to scan against a root-scoped object store rather
+        // than the table-prefixed one.
+        let mut need_bucket_root_store = false;
 
         let table_partition_cols = &self.snapshot.metadata().partition_columns();
 
-        for action in files.iter() {
-            let mut part = partitioned_file_from_action(action, table_partition_cols, &schema);
+        let root = self.log_store.config().location.clone();
 
+        for action in files.iter() {
+            // Normalize path using shared utility to support full path URIs
+            let mut action_with_normalized_path = action.clone();
+            let (normalized_path, needs_bucket_root) =
+                crate::logstore::normalize_add_path_for_scan(&root, action_with_normalized_path.path.as_str());
+            action_with_normalized_path.path = normalized_path;
+            need_bucket_root_store |= needs_bucket_root;
+
+            // Build PartitionedFile with ObjectMeta that matches the selected store
+            let ts_secs = action_with_normalized_path.modification_time / 1000;
+            let ts_ns = (action_with_normalized_path.modification_time % 1000) * 1_000_000;
+            let last_modified = Utc.from_utc_datetime(
+                &DateTime::from_timestamp(ts_secs, ts_ns as u32)
+                    .expect(
+                        "Invalid timestamp in PartitionedFile: modification_time is out of range",
+                    )
+                    .naive_utc(),
+            );
+
+            let object_meta = if root.scheme() == "file" {
+                // Use a root-scoped filesystem store; provide absolute path without leading '/'
+                ObjectMeta {
+                    location: crate::logstore::object_store_path_for_file_root(
+                        &root,
+                        action_with_normalized_path.path.as_str(),
+                    ),
+                    last_modified,
+                    size: action_with_normalized_path.size as u64,
+                    e_tag: None,
+                    version: None,
+                }
+            } else {
+                ObjectMeta {
+                    last_modified,
+                    ..action_with_normalized_path.clone().try_into().unwrap()
+                }
+            };
+
+            // Build PartitionedFile from action to ensure partition values align with schema
+            // and DataFusion expectations
+            let mut part = partitioned_file_from_action(&action_with_normalized_path, table_partition_cols, &schema);
+            // Overwrite object_meta with the one computed above to preserve normalized path
+            part.object_meta = object_meta;
+
+            // Optionally append the virtual file column as an extra partition value
             if config.file_column_name.is_some() {
                 let partition_value = if config.wrap_partition_values {
                     wrap_partition_value_in_dict(ScalarValue::Utf8(Some(action.path.clone())))
@@ -662,24 +711,63 @@ impl<'a> DeltaScanBuilder<'a> {
         let file_source =
             file_source.with_schema_adapter_factory(Arc::new(DeltaSchemaAdapterFactory {}))?;
 
-        let file_scan_config =
-            FileScanConfigBuilder::new(self.log_store.object_store_url(), file_schema, file_source)
-                .with_file_groups(
-                    // If all files were filtered out, we still need to emit at least one partition to
-                    // pass datafusion sanity checks.
-                    //
-                    // See https://github.com/apache/datafusion/issues/11322
-                    if file_groups.is_empty() {
-                        vec![FileGroup::from(vec![])]
-                    } else {
-                        file_groups.into_values().map(FileGroup::from).collect()
-                    },
-                )
-                .with_statistics(stats)
-                .with_projection(self.projection.cloned())
-                .with_limit(self.limit)
-                .with_table_partition_cols(table_partition_cols)
-                .build();
+        // SECURITY WARNING:
+        // Registering a root object store for the file scheme allows reading ANY file on the filesystem,
+        // not just files within the table directory. This is a potential security risk if tables
+        // contain malicious absolute paths. This feature is OPT-IN and must be explicitly enabled
+        // via the DELTA_RS_ALLOW_UNRESTRICTED_FILE_ACCESS environment variable.
+        let allow_unrestricted_file_access = std::env::var("DELTA_RS_ALLOW_UNRESTRICTED_FILE_ACCESS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        // If using local filesystem, register a root-scoped store and scan against that
+        let scan_store_url = if self.log_store.config().location.scheme() == "file" {
+            if allow_unrestricted_file_access {
+                let url = ObjectStoreUrl::parse("delta-rs://file-root").unwrap();
+                // Ensure a root store is registered for the session runtime
+                self.session
+                    .runtime_env()
+                    .register_object_store(url.as_ref(), self.log_store.root_object_store(None));
+                url
+            } else {
+                // By default, do NOT register a root object store for the file scheme.
+                // Only files within the table directory will be accessible.
+                self.log_store.object_store_url()
+            }
+        } else {
+            if need_bucket_root_store {
+                // Build a root-scoped store identifier unique per (scheme, host)
+                let loc = &self.log_store.config().location;
+                let host = loc.host_str().unwrap_or("-");
+                let url =
+                    ObjectStoreUrl::parse(format!("delta-rs://root-{}-{}", loc.scheme(), host))
+                        .unwrap();
+                self.session
+                    .runtime_env()
+                    .register_object_store(url.as_ref(), self.log_store.root_object_store(None));
+                url
+            } else {
+                self.log_store.object_store_url()
+            }
+        };
+
+        let file_scan_config = FileScanConfigBuilder::new(scan_store_url, file_schema, file_source)
+            .with_file_groups(
+                // If all files were filtered out, we still need to emit at least one partition to
+                // pass datafusion sanity checks.
+                //
+                // See https://github.com/apache/datafusion/issues/11322
+                if file_groups.is_empty() {
+                    vec![FileGroup::from(vec![])]
+                } else {
+                    file_groups.into_values().map(FileGroup::from).collect()
+                },
+            )
+            .with_statistics(stats)
+            .with_projection(self.projection.cloned())
+            .with_limit(self.limit)
+            .with_table_partition_cols(table_partition_cols)
+            .build();
 
         let metrics = ExecutionPlanMetricsSet::new();
         MetricBuilder::new(&metrics)
@@ -1139,7 +1227,7 @@ fn partitioned_file_from_action(
     let ts_ns = (action.modification_time % 1000) * 1_000_000;
     let last_modified = Utc.from_utc_datetime(
         &DateTime::from_timestamp(ts_secs, ts_ns as u32)
-            .unwrap()
+            .expect("Invalid timestamp in PartitionedFile: modification_time is out of range")
             .naive_utc(),
     );
     PartitionedFile {
