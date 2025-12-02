@@ -60,6 +60,31 @@ pub fn normalize_path_for_file_scheme(root: &Url, input: &str) -> String {
     }
 }
 
+/// For file scheme tables, attempt to relativize an absolute filesystem path
+/// to the table root. If the path is under the table root, return the relative
+/// portion; otherwise return the original path unchanged.
+pub fn relativize_path_for_file_scheme(root: &Url, input: &str) -> String {
+    let input_path = StdPath::new(input);
+    if !input_path.is_absolute() {
+        // Already relative, return as-is
+        return input.to_string();
+    }
+
+    match root.to_file_path() {
+        Ok(root_fs) => {
+            if let Ok(rel) = input_path.strip_prefix(&root_fs) {
+                rel.to_str()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| rel.to_string_lossy().into_owned())
+            } else {
+                // Not under table root, return as-is
+                input.to_string()
+            }
+        }
+        Err(_) => input.to_string(),
+    }
+}
+
 /// For non-file schemes, if `input` is a fully-qualified URI beginning with `root`,
 /// strip the table root prefix so the result is relative to the table root.
 pub fn strip_table_root_from_full_uri(root: &Url, input: &str) -> String {

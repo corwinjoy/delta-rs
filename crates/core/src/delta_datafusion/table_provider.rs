@@ -589,34 +589,8 @@ impl<'a> DeltaScanBuilder<'a> {
             if root.scheme() == "file" {
                 // For local filesystem tables, DataFusion reads via the table's registered object
                 // store which may be prefixed. We prefer relative paths under the table dir when
-                // possible. If the log contains an absolute path, keep it as-is only for URI
-                // reporting; when constructing DataFusion files, attempt to relativize to table
-                // root if under it, otherwise leave as-is and hope the underlying store can
-                // resolve it (best-effort and consistent with existing behavior).
-                match root.to_file_path() {
-                    Ok(root_fs) => {
-                        let input_fs = StdPath::new(p);
-                        if input_fs.is_absolute() {
-                            if let Ok(rel) = input_fs.strip_prefix(&root_fs) {
-                                adjusted.path = rel
-                                    .to_str()
-                                    .map(|s| s.to_string())
-                                    .unwrap_or_else(|| rel.to_string_lossy().into_owned());
-                            } else {
-                                // Leave absolute path to be handled downstream
-                                adjusted.path = input_fs
-                                    .to_str()
-                                    .map(|s| s.to_string())
-                                    .unwrap_or_else(|| input_fs.to_string_lossy().into_owned());
-                            }
-                        } else {
-                            // relative path remains as-is
-                        }
-                    }
-                    Err(_) => {
-                        // Fallback: treat as relative or keep raw
-                    }
-                }
+                // possible. Use the shared utility function to relativize absolute paths.
+                adjusted.path = crate::logstore::relativize_path_for_file_scheme(&root, p);
             } else {
                 // For non-file schemes, if the path is an absolute URI under the table root,
                 // strip the table root so it becomes table-relative. Otherwise, if it points

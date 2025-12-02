@@ -85,7 +85,8 @@ pub use self::factories::{
 pub use self::storage::utils::commit_uri_from_version;
 pub use self::storage::utils::is_absolute_uri_or_path;
 pub use self::storage::utils::{
-    normalize_path_for_file_scheme, relativize_uri_to_bucket_root, strip_table_root_from_full_uri,
+    normalize_path_for_file_scheme, relativize_path_for_file_scheme, relativize_uri_to_bucket_root,
+    strip_table_root_from_full_uri,
 };
 pub use self::storage::{
     DefaultObjectStoreRegistry, DeltaIOStorageBackend, IORuntime, ObjectStoreRef,
@@ -540,36 +541,7 @@ pub(crate) fn object_store_path(table_root: &Url) -> DeltaResult<Path> {
 /// If the location already appears to be an absolute URI or absolute path,
 /// return it unchanged.
 pub fn to_uri(root: &Url, location: &Path) -> String {
-    let loc = location.as_ref();
-    if crate::logstore::is_absolute_uri_or_path(loc) {
-        return loc.to_string();
-    }
-    match root.scheme() {
-        "file" => {
-            #[cfg(windows)]
-            let uri = format!(
-                "{}/{}",
-                root.as_ref().trim_end_matches('/'),
-                location.as_ref()
-            )
-            .replace("file:///", "");
-            #[cfg(unix)]
-            let uri = format!(
-                "{}/{}",
-                root.as_ref().trim_end_matches('/'),
-                location.as_ref()
-            )
-            .replace("file://", "");
-            uri
-        }
-        _ => {
-            if location.as_ref().is_empty() || location.as_ref() == "/" {
-                root.as_ref().to_string()
-            } else {
-                format!("{}/{}", root.as_ref(), location.as_ref())
-            }
-        }
-    }
+    to_uri_from_str(root, location.as_ref())
 }
 
 /// Build a full URI string from a root URL and a raw string location.
