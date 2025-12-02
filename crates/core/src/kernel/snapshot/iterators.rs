@@ -119,9 +119,10 @@ impl LogicalFileView {
 
     /// An object store [`Path`] to the file.
     ///
-    /// Delta log stores paths with double percent-encoding (e.g., `%252F` for a literal `%2F`).
-    /// Decoding once converts from log-encoding to single percent-encoded form that object_store
-    /// expects, then we use `Path::parse` which treats the input as already percent-encoded.
+    /// Delta log stores paths with double percent-encoding (e.g., `%2520` in the log represents
+    /// a literal `%20` in the filesystem path). Decoding once converts from log-encoding to
+    /// single percent-encoded form that object_store expects, then we use `Path::parse` which
+    /// treats the input as already percent-encoded.
     pub(crate) fn object_store_path(&self) -> Path {
         let raw = get_string_value(
             self.files

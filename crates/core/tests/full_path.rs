@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 #[tokio::test]
 async fn compare_table_with_full_paths() {
+    std::env::set_var("DELTA_RS_ALLOW_UNRESTRICTED_FILE_ACCESS", "1");
     let expected_rel = Path::new("../test/tests/data/delta-0.8.0");
     let expected_abs = fs::canonicalize(expected_rel).unwrap();
 
@@ -24,6 +25,8 @@ async fn compare_table_with_full_paths() {
 
 #[tokio::test]
 async fn compare_table_with_full_paths_to_original_table() {
+    std::env::set_var("DELTA_RS_ALLOW_UNRESTRICTED_FILE_ACCESS", "1");
+
     // Path to the original test table (with relative paths in _delta_log)
     let expected_rel = Path::new("../test/tests/data/delta-0.8.0");
     let expected_abs = fs::canonicalize(expected_rel).unwrap();
@@ -116,7 +119,7 @@ async fn compare_table_with_full_paths_to_original_table_s3() {
         &["s3", "cp", &original_uri, &cloned_uri, "--recursive"],
     );
 
-    // 3) Download cloned _delta_log locally, rewrite paths to ABS paths under expected_abs, upload back
+    // 3) Download cloned _delta_log locally, rewrite paths to absolute paths under expected_abs, upload back
     let tmpdir = tempfile::tempdir().unwrap();
     let local_log_dir = tmpdir.path().join("_delta_log");
     fs::create_dir_all(&local_log_dir).unwrap();
@@ -270,7 +273,7 @@ async fn compare_table_with_full_paths_to_original_table_azure() {
         ],
     );
 
-    // 3) Download cloned _delta_log locally, rewrite paths to ABS paths, upload back
+    // 3) Download cloned _delta_log locally, rewrite paths to absolute paths, upload back
     let tmpdir = tempfile::tempdir().unwrap();
     let local_log_dir = tmpdir.path().join("_delta_log");
     fs::create_dir_all(&local_log_dir).unwrap();
@@ -397,36 +400,8 @@ async fn compare_table_with_full_paths_to_original_table_gcp() {
         ],
     );
 
-    // Ensure cleanup at the end
-    // Not needed.
-    /*
-    struct Cleanup {
-        bucket: String,
-        endpoint: String,
-    }
-    impl Drop for Cleanup {
-        fn drop(&mut self) {
-            let delete_payload = serde_json::json!({ "name": self.bucket });
-            let _ = Command::new("curl")
-                .args([
-                    "--insecure",
-                    "-X",
-                    "DELETE",
-                    "--data-binary",
-                    &serde_json::to_string(&delete_payload).unwrap(),
-                    "-H",
-                    "Content-Type: application/json",
-                    &self.endpoint,
-                ])
-                .status();
-        }
-    }
-    let _cleanup = Cleanup {
-        bucket: bucket.clone(),
-        endpoint: gcs_endpoint_url.clone(),
-    };
-    */
-
+    // No explicit cleanup is needed for the GCS emulator in this test context,
+    // as the emulator runs in an isolated environment and is cleaned up automatically.
 
     // For GCS emulator, we use the object_store API to upload files since gsutil
     // may not be available. We'll use deltalake's built-in storage capabilities.
@@ -547,15 +522,15 @@ async fn compare_table_with_full_paths_to_original_table_gcp() {
     // 2) Clone original -> cloned in GCS
     copy_gcs_to_gcs(&original_uri, &cloned_uri).await;
 
-    // 3) Download cloned _delta_log locally, rewrite paths to ABS paths, upload back
+    // 3) Download cloned _delta_log locally, rewrite paths to absolute paths, upload back
     let tmpdir = tempfile::tempdir().unwrap();
     let local_log_dir = tmpdir.path().join("_delta_log");
     fs::create_dir_all(&local_log_dir).unwrap();
 
     download_gcs_to_local(&cloned_uri, tmpdir.path(), "_delta_log").await;
 
-    // Rewrite JSON actions inside downloaded log files. For GCS table location,
-    // rewrite to fully-qualified gs:// URIs pointing at the original GCS bucket.
+    // Rewrite JSON actions inside downloaded log files. For the table location,
+    // rewrite to fully-qualified URIs (e.g., gs://, s3://, abfs://) pointing at the original bucket/container.
     rewrite_log_paths_with_prefix(&local_log_dir, &original_uri);
 
     // Upload rewritten log back to GCS cloned table
@@ -794,9 +769,16 @@ fn unique_suffix() -> String {
 // Small utility to run an external command and assert success, with a helpful message
 fn run_cmd(program: &str, args: &[&str]) {
     use std::process::Command;
-    let status = Command::new(program)
+    let output = Command::new(program)
         .args(args)
-        .status()
+        .output()
         .expect("failed to run command");
-    assert!(status.success(), "command failed: {} {:?}", program, args);
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        panic!(
+            "command failed: {} {:?}\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+            program, args, output.status, stdout, stderr
+        );
+    }
 }

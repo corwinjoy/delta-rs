@@ -582,15 +582,15 @@ impl<'a> DeltaScanBuilder<'a> {
 
         for action in files.iter() {
             // Normalize path using shared utility to support full path URIs
-            let mut adjusted = action.clone();
+            let mut action_with_normalized_path = action.clone();
             let (normalized_path, needs_bucket_root) =
-                crate::logstore::normalize_add_path_for_scan(&root, adjusted.path.as_str());
-            adjusted.path = normalized_path;
+                crate::logstore::normalize_add_path_for_scan(&root, action_with_normalized_path.path.as_str());
+            action_with_normalized_path.path = normalized_path;
             need_bucket_root_store |= needs_bucket_root;
 
             // Build PartitionedFile with ObjectMeta that matches the selected store
-            let ts_secs = adjusted.modification_time / 1000;
-            let ts_ns = (adjusted.modification_time % 1000) * 1_000_000;
+            let ts_secs = action_with_normalized_path.modification_time / 1000;
+            let ts_ns = (action_with_normalized_path.modification_time % 1000) * 1_000_000;
             let last_modified = Utc.from_utc_datetime(
                 &DateTime::from_timestamp(ts_secs, ts_ns as u32)
                     .expect(
@@ -604,23 +604,23 @@ impl<'a> DeltaScanBuilder<'a> {
                 ObjectMeta {
                     location: crate::logstore::object_store_path_for_file_root(
                         &root,
-                        adjusted.path.as_str(),
+                        action_with_normalized_path.path.as_str(),
                     ),
                     last_modified,
-                    size: adjusted.size as u64,
+                    size: action_with_normalized_path.size as u64,
                     e_tag: None,
                     version: None,
                 }
             } else {
                 ObjectMeta {
                     last_modified,
-                    ..adjusted.clone().try_into().unwrap()
+                    ..action_with_normalized_path.clone().try_into().unwrap()
                 }
             };
 
             // Build PartitionedFile from action to ensure partition values align with schema
             // and DataFusion expectations
-            let mut part = partitioned_file_from_action(&adjusted, table_partition_cols, &schema);
+            let mut part = partitioned_file_from_action(&action_with_normalized_path, table_partition_cols, &schema);
             // Overwrite object_meta with the one computed above to preserve normalized path
             part.object_meta = object_meta;
 
@@ -711,22 +711,29 @@ impl<'a> DeltaScanBuilder<'a> {
         let file_source =
             file_source.with_schema_adapter_factory(Arc::new(DeltaSchemaAdapterFactory {}))?;
 
+        // SECURITY WARNING:
+        // Registering a root object store for the file scheme allows reading ANY file on the filesystem,
+        // not just files within the table directory. This is a potential security risk if tables
+        // contain malicious absolute paths. This feature is OPT-IN and must be explicitly enabled
+        // via the DELTA_RS_ALLOW_UNRESTRICTED_FILE_ACCESS environment variable.
+        let allow_unrestricted_file_access = std::env::var("DELTA_RS_ALLOW_UNRESTRICTED_FILE_ACCESS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
         // If using local filesystem, register a root-scoped store and scan against that
         let scan_store_url = if self.log_store.config().location.scheme() == "file" {
-            let url = ObjectStoreUrl::parse("delta-rs://file-root").unwrap();
-            // Ensure a root store is registered for the session runtime
-            self.session
-                .runtime_env()
-                .register_object_store(url.as_ref(), self.log_store.root_object_store(None));
-            // TODO: Security
-            // Registering root_object_store for the file scheme
-            // could cause security issues or unintended file access if tables contain malicious
-            // absolute paths. This allows the table to read any file on the filesystem rather than
-            // being scoped to the table directory. Consider documenting this security implication
-            // and whether there should be any validation or sandboxing of absolute paths to
-            // prevent unauthorized file access. Perhaps this should be an OPT-IN feature
-            // to allow absolute paths.
-            url
+            if allow_unrestricted_file_access {
+                let url = ObjectStoreUrl::parse("delta-rs://file-root").unwrap();
+                // Ensure a root store is registered for the session runtime
+                self.session
+                    .runtime_env()
+                    .register_object_store(url.as_ref(), self.log_store.root_object_store(None));
+                url
+            } else {
+                // By default, do NOT register a root object store for the file scheme.
+                // Only files within the table directory will be accessible.
+                self.log_store.object_store_url()
+            }
         } else {
             if need_bucket_root_store {
                 // Build a root-scoped store identifier unique per (scheme, host)

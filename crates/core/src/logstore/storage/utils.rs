@@ -40,7 +40,18 @@ pub fn is_absolute_uri_or_path(s: &str) -> bool {
 /// - Otherwise, treat input as relative and join under the filesystem path of `root`.
 pub fn normalize_path_for_file_scheme(root: &Url, input: &str) -> String {
     match Url::parse(input) {
-        Ok(url) if url.scheme() == "file" => url.path().to_string(),
+        Ok(url) if url.scheme() == "file" => {
+            // Use to_file_path() for proper platform-specific conversion.
+            // On Windows, url.path() returns "/C:/Users/..." which is incorrect;
+            // to_file_path() correctly handles this by removing the leading slash.
+            match url.to_file_path() {
+                Ok(pathbuf) => pathbuf
+                    .to_str()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| pathbuf.to_string_lossy().into_owned()),
+                Err(_) => url.path().to_string(), // fallback for invalid file:// URLs
+            }
+        }
         Ok(_) => input.to_string(),
         Err(_) => {
             if StdPath::new(input).is_absolute() {
@@ -89,6 +100,10 @@ pub fn relativize_path_for_file_scheme(root: &Url, input: &str) -> String {
 ///
 /// For file scheme tables using a root-scoped store, paths need to be absolute filesystem
 /// paths with leading slashes stripped (since object_store paths are relative to store root).
+///
+/// Note: This function intentionally removes ALL leading slashes and backslashes from the path
+/// (e.g., `///path` becomes `path`). This is correct behavior because object_store paths are
+/// always relative to the store root, and any leading separators would be invalid.
 pub fn object_store_path_for_file_root(root: &Url, path: &str) -> Path {
     let abs = match root.to_file_path() {
         Ok(root_fs) => {
@@ -101,6 +116,7 @@ pub fn object_store_path_for_file_root(root: &Url, path: &str) -> Path {
         }
         Err(_) => StdPath::new(path).to_path_buf(),
     };
+    // Remove all leading path separators - object_store paths are relative to store root
     let rel_from_root = abs
         .to_str()
         .map(|s| s.trim_start_matches(['/', '\\']).to_string())
@@ -161,6 +177,12 @@ pub fn strip_table_root_from_full_uri(root: &Url, input: &str) -> String {
 /// This function is scheme-tolerant: it can match `s3://bucket/key` against
 /// `http(s)://endpoint/bucket/` (path-style) or `http(s)://bucket.endpoint/`
 /// (virtual-hosted-style) as long as the bucket names are the same.
+///
+/// **Limitation:** This function compares bucket names only, not full endpoint identity.
+/// If `root` is `s3://bucket/prefix` and `input` is `http://endpoint/bucket/key`, they
+/// will be recognized as the same bucket even though they use different schemes and
+/// endpoints. This is intentional for S3-compatible endpoint scenarios, but callers
+/// should be aware that scheme differences are not validated.
 pub fn relativize_uri_to_bucket_root(root: &Url, input: &str) -> String {
     // If it's not a URI, return as-is
     let Ok(input_url) = Url::parse(input) else {
@@ -213,8 +235,8 @@ fn bucket_key_from_url(url: &Url) -> Option<String> {
         if let Some((_, rest)) = path.split_once('/') {
             return Some(rest.to_string());
         } else {
-            // Only bucket with no key
-            return Some(String::new());
+            // Only bucket with no key - return None to indicate there's no object key
+            return None;
         }
     }
 
@@ -254,10 +276,17 @@ fn extract_bucket_name(url: &Url) -> Option<String> {
     None
 }
 
+/// Checks if a host looks like an S3 virtual-hosted-style endpoint.
+///
+/// **Note:** This function is S3-specific and only detects AWS S3, S3 website endpoints,
+/// and common LocalStack patterns. It does NOT cover other cloud providers:
+/// - GCS virtual-hosted-style URLs use `.storage.googleapis.com`
+/// - Azure Blob Storage uses different URL patterns
+///
+/// For other providers, bucket extraction falls back to path-style parsing.
 fn looks_like_virtual_hosted_style(host: &str) -> bool {
     // Check for known S3 virtual-hosted-style host suffixes.
     // This includes AWS S3, S3 website endpoints, and common localstack patterns.
-    // Only match S3-specific suffixes and patterns
     const S3_SUFFIXES: &[&str] = &[
         ".s3.amazonaws.com",
         ".s3.amazonaws.com.cn",
