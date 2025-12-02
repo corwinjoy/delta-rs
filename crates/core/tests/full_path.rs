@@ -7,6 +7,41 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use url::Url;
 
+// Small utility to build original/cloned URIs from a base URI and two prefixes
+fn build_prefixed_uris(
+    base_uri: &str,
+    original_prefix: &str,
+    cloned_prefix: &str,
+) -> (String, String) {
+    let base = base_uri.trim_end_matches('/');
+    let original = format!("{}/{}", base, original_prefix);
+    let cloned = format!("{}/{}", base, cloned_prefix);
+    (original, cloned)
+}
+
+// A generic RAII cleanup helper that runs a command on drop. Errors are ignored.
+struct CommandCleanup {
+    program: &'static str,
+    args: Vec<String>,
+}
+
+impl CommandCleanup {
+    fn new(program: &'static str, args: &[&str]) -> Self {
+        Self {
+            program,
+            args: args.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+}
+
+impl Drop for CommandCleanup {
+    fn drop(&mut self) {
+        use std::process::Command;
+        let _ = Command::new(self.program).args(&self.args).status();
+    }
+}
+
+// Test to use absolute file paths
 #[tokio::test]
 async fn compare_table_with_full_paths() {
     std::env::set_var("DELTA_RS_ALLOW_UNRESTRICTED_FILE_ACCESS", "1");
@@ -23,7 +58,8 @@ async fn compare_table_with_full_paths() {
     assert_table_uris_and_data(&cloned_dir, &tmpdir.path(), &expected_abs).await;
 }
 
-
+// Test to use absolute file paths pointing to an original source table directory
+// Similar to what a shallow clone with full paths would produce.
 #[tokio::test]
 async fn compare_table_with_full_paths_to_original_table() {
     std::env::set_var("DELTA_RS_ALLOW_UNRESTRICTED_FILE_ACCESS", "1");
@@ -43,6 +79,7 @@ async fn compare_table_with_full_paths_to_original_table() {
     assert_table_uris_and_data(&cloned_dir, &expected_abs, &expected_abs).await;
 }
 
+// Test to use absolute file paths of the form file://<path> in _delta_log entries.
 #[tokio::test]
 async fn compare_table_with_uri_paths() {
     std::env::set_var("DELTA_RS_ALLOW_UNRESTRICTED_FILE_ACCESS", "1");
@@ -74,18 +111,9 @@ async fn compare_table_with_uri_paths() {
     assert_table_uris_and_data_cloud(&table_uri, &expected_prefix_uri, &expected_abs, None).await;
 }
 
-
-//
-// S3 variant using Localstack: requires cargo feature `cloud` (see Cargo.toml test features)
-// Environment variables used (configured here for Localstack):
-//   AWS_ACCESS_KEY_ID=deltalake
-//   AWS_SECRET_ACCESS_KEY=weloverust
-//   AWS_DEFAULT_REGION=us-east-1
-//   AWS_ENDPOINT_URL=http://localhost:4566
-//   AWS_ALLOW_HTTP=true
+// Test using S3 bucket paths, s3://
 // To run: start Localstack via `docker compose up -d` in repo root.
 // S3 Test requires the AWS CLI (`aws` command) to be installed and available in PATH.
-
 #[cfg(feature = "cloud")]
 #[tokio::test]
 async fn compare_table_with_full_paths_to_original_table_s3() {
@@ -114,8 +142,8 @@ async fn compare_table_with_full_paths_to_original_table_s3() {
     let original_prefix = "original";
     let cloned_prefix = "cloned";
     let bucket_uri = format!("s3://{}", bucket);
-    let original_uri = format!("{}/{}", bucket_uri, original_prefix);
-    let cloned_uri = format!("{}/{}", bucket_uri, cloned_prefix);
+    let (original_uri, cloned_uri) =
+        build_prefixed_uris(&bucket_uri, original_prefix, cloned_prefix);
 
     // Helper to run a command and assert success
     let run = |program: &str, args: &[&str]| run_cmd(program, args);
@@ -124,15 +152,7 @@ async fn compare_table_with_full_paths_to_original_table_s3() {
     run("aws", &["s3", "mb", &bucket_uri]);
 
     // Ensure cleanup at the end
-    struct Cleanup(String);
-    impl Drop for Cleanup {
-        fn drop(&mut self) {
-            let _ = Command::new("aws")
-                .args(["s3", "rb", &self.0, "--force"])
-                .status();
-        }
-    }
-    let _cleanup = Cleanup(bucket_uri.clone());
+    let _cleanup = CommandCleanup::new("aws", &["s3", "rb", &bucket_uri, "--force"]);
 
     // 1) Copy the original local table directory to s3://bucket/original
     run(
@@ -188,18 +208,13 @@ async fn compare_table_with_full_paths_to_original_table_s3() {
     assert_table_uris_and_data_cloud(&cloned_uri, &original_uri, &expected_abs, None).await;
 }
 
+// Test using Azure Blob Storage paths, abfs://
 // Azure Test requires azure CLI (`az`) to be installed.
 // The azurite emulator is in docker: start `docker compose up -d` in repo root.
 #[cfg(feature = "cloud")]
 #[tokio::test]
 async fn compare_table_with_full_paths_to_original_table_azure() {
     use std::process::Command;
-
-    // Skip test if `az` CLI is not available
-    if Command::new("az").arg("--version").output().is_err() {
-        eprintln!("Skipping test: `az` CLI not found");
-        return;
-    }
 
     // Register Azure handlers for deltalake-core tests. In normal usage the `deltalake`
     // meta-crate auto-registers these via a ctor, but core tests run without it.
@@ -229,8 +244,8 @@ async fn compare_table_with_full_paths_to_original_table_azure() {
     let original_prefix = "original";
     let cloned_prefix = "cloned";
     let container_uri = format!("abfs://{}", container);
-    let original_uri = format!("{}/{}", container_uri, original_prefix);
-    let cloned_uri = format!("{}/{}", container_uri, cloned_prefix);
+    let (original_uri, cloned_uri) =
+        build_prefixed_uris(&container_uri, original_prefix, cloned_prefix);
 
     // Helper to run a command and assert success
     let run = |program: &str, args: &[&str]| run_cmd(program, args);
@@ -239,15 +254,7 @@ async fn compare_table_with_full_paths_to_original_table_azure() {
     run("az", &["storage", "container", "create", "-n", &container]);
 
     // Ensure cleanup at the end
-    struct Cleanup(String);
-    impl Drop for Cleanup {
-        fn drop(&mut self) {
-            let _ = Command::new("az")
-                .args(["storage", "container", "delete", "-n", &self.0])
-                .status();
-        }
-    }
-    let _cleanup = Cleanup(container.clone());
+    let _cleanup = CommandCleanup::new("az", &["storage", "container", "delete", "-n", &container]);
 
     // 1) Copy the original local table directory to abfs://container/original
     run(
@@ -373,6 +380,8 @@ async fn compare_table_with_full_paths_to_original_table_azure() {
     assert_table_uris_and_data_cloud(&cloned_uri, &original_uri, &expected_abs, None).await;
 }
 
+// Test using Google Cloud Storage paths, gs://
+// The gcp emulator is in docker: start `docker compose up -d` in repo root.
 #[cfg(feature = "cloud")]
 #[tokio::test]
 async fn compare_table_with_full_paths_to_original_table_gcp() {
@@ -413,8 +422,8 @@ async fn compare_table_with_full_paths_to_original_table_gcp() {
     let original_prefix = "original";
     let cloned_prefix = "cloned";
     let bucket_uri = format!("gs://{}", bucket);
-    let original_uri = format!("{}/{}", bucket_uri, original_prefix);
-    let cloned_uri = format!("{}/{}", bucket_uri, cloned_prefix);
+    let (original_uri, cloned_uri) =
+        build_prefixed_uris(&bucket_uri, original_prefix, cloned_prefix);
 
     // Helper to run a command and assert success
     let run = |program: &str, args: &[&str]| run_cmd(program, args);
