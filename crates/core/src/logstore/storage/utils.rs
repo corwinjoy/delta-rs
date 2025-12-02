@@ -214,12 +214,7 @@ fn bucket_key_from_url(url: &Url) -> Option<String> {
 
     // For s3://, gs://, abfs://, abfss://, az:// URLs, the host is the bucket/container
     // and the path is the key
-    if scheme == "s3"
-        || scheme == "gs"
-        || scheme == "abfs"
-        || scheme == "abfss"
-        || scheme == "az"
-    {
+    if scheme == "s3" || scheme == "gs" || scheme == "abfs" || scheme == "abfss" || scheme == "az" {
         return Some(path.to_string());
     }
 
@@ -249,12 +244,7 @@ fn extract_bucket_name(url: &Url) -> Option<String> {
     let scheme = url.scheme();
 
     // For s3://, gs://, abfs://, abfss://, az:// URLs, the host is the bucket/container
-    if scheme == "s3"
-        || scheme == "gs"
-        || scheme == "abfs"
-        || scheme == "abfss"
-        || scheme == "az"
-    {
+    if scheme == "s3" || scheme == "gs" || scheme == "abfs" || scheme == "abfss" || scheme == "az" {
         return url.host_str().map(|s| s.to_string());
     }
     if scheme == "http" || scheme == "https" {

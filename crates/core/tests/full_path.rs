@@ -2,10 +2,10 @@
 // and that reading them yields the same data as the corresponding table
 // with relative file paths.
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use url::Url;
-use std::collections::HashMap;
 
 #[tokio::test]
 async fn compare_table_with_full_paths() {
@@ -155,7 +155,6 @@ async fn compare_table_with_full_paths_to_original_table_s3() {
     assert_table_uris_and_data_cloud(&cloned_uri, &original_uri, &expected_abs, None).await;
 }
 
-
 // Azure Test requires azure CLI (`az`) to be installed.
 // The azurite emulator is in docker: start `docker compose up -d` in repo root.
 #[cfg(feature = "cloud")]
@@ -178,7 +177,10 @@ async fn compare_table_with_full_paths_to_original_table_azure() {
     // Ensure environment is prepared for Azurite emulator
     std::env::set_var("AZURE_STORAGE_USE_EMULATOR", "1");
     std::env::set_var("AZURE_STORAGE_ACCOUNT_NAME", "devstoreaccount1");
-    std::env::set_var("AZURE_STORAGE_ACCOUNT_KEY", "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==");
+    std::env::set_var(
+        "AZURE_STORAGE_ACCOUNT_KEY",
+        "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==",
+    );
     std::env::set_var(
         "AZURE_STORAGE_CONNECTION_STRING",
         "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://localhost:10000/devstoreaccount1;"
@@ -464,8 +466,17 @@ async fn compare_table_with_full_paths_to_original_table_gcp() {
         let mut stream = from_obj_store.list(None);
         while let Some(meta) = stream.next().await {
             if let Ok(meta) = meta {
-                let bytes = from_obj_store.get(&meta.location).await.unwrap().bytes().await.unwrap();
-                to_obj_store.put(&meta.location, bytes.into()).await.unwrap();
+                let bytes = from_obj_store
+                    .get(&meta.location)
+                    .await
+                    .unwrap()
+                    .bytes()
+                    .await
+                    .unwrap();
+                to_obj_store
+                    .put(&meta.location, bytes.into())
+                    .await
+                    .unwrap();
             }
         }
     }
@@ -484,7 +495,13 @@ async fn compare_table_with_full_paths_to_original_table_gcp() {
         let mut stream = store.list(Some(&prefix));
         while let Some(meta) = stream.next().await {
             if let Ok(meta) = meta {
-                let bytes = store.get(&meta.location).await.unwrap().bytes().await.unwrap();
+                let bytes = store
+                    .get(&meta.location)
+                    .await
+                    .unwrap()
+                    .bytes()
+                    .await
+                    .unwrap();
                 let local_path = local_dir.join(meta.location.as_ref());
                 if let Some(parent) = local_path.parent() {
                     fs::create_dir_all(parent).ok();
@@ -510,7 +527,8 @@ async fn compare_table_with_full_paths_to_original_table_gcp() {
             if path.is_file() {
                 let bytes = fs::read(&path).unwrap();
                 let filename = path.file_name().unwrap().to_str().unwrap();
-                let object_path = object_store::path::Path::from(format!("{}/{}", prefix, filename));
+                let object_path =
+                    object_store::path::Path::from(format!("{}/{}", prefix, filename));
                 store.put(&object_path, bytes.into()).await.unwrap();
             }
         }

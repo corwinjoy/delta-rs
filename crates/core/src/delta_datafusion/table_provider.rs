@@ -585,18 +585,21 @@ impl<'a> DeltaScanBuilder<'a> {
         // not just files within the table directory. This is a potential security risk if tables
         // contain malicious absolute paths. This feature is OPT-IN and must be explicitly enabled
         // via the DELTA_RS_ALLOW_UNRESTRICTED_FILE_ACCESS environment variable.
-        let allow_unrestricted_file_access = std::env::var("DELTA_RS_ALLOW_UNRESTRICTED_FILE_ACCESS")
-            .map(|v| {
-                let v = v.trim();
-                v.eq_ignore_ascii_case("1") || v.eq_ignore_ascii_case("true")
-            })
-            .unwrap_or(false);
+        let allow_unrestricted_file_access =
+            std::env::var("DELTA_RS_ALLOW_UNRESTRICTED_FILE_ACCESS")
+                .map(|v| {
+                    let v = v.trim();
+                    v.eq_ignore_ascii_case("1") || v.eq_ignore_ascii_case("true")
+                })
+                .unwrap_or(false);
 
         for action in files.iter() {
             // Normalize path using shared utility to support full path URIs
             let mut action_with_normalized_path = action.clone();
-            let (normalized_path, needs_bucket_root) =
-                crate::logstore::normalize_add_path_for_scan(&root, action_with_normalized_path.path.as_str());
+            let (normalized_path, needs_bucket_root) = crate::logstore::normalize_add_path_for_scan(
+                &root,
+                action_with_normalized_path.path.as_str(),
+            );
             action_with_normalized_path.path = normalized_path;
             need_bucket_root_store |= needs_bucket_root;
 
@@ -628,14 +631,23 @@ impl<'a> DeltaScanBuilder<'a> {
                     location: action_with_normalized_path.path.clone().into(),
                     last_modified,
                     size: action_with_normalized_path.size as u64,
-                    e_tag: action_with_normalized_path.tags.as_ref().and_then(|tags| tags.get("etag")).cloned().flatten(),
+                    e_tag: action_with_normalized_path
+                        .tags
+                        .as_ref()
+                        .and_then(|tags| tags.get("etag"))
+                        .cloned()
+                        .flatten(),
                     version: None,
                 }
             };
 
             // Build PartitionedFile from action to ensure partition values align with schema
             // and DataFusion expectations
-            let mut part = partitioned_file_from_action(&action_with_normalized_path, table_partition_cols, &schema);
+            let mut part = partitioned_file_from_action(
+                &action_with_normalized_path,
+                table_partition_cols,
+                &schema,
+            );
             // Overwrite object_meta with the one computed above to preserve normalized path
             part.object_meta = object_meta;
 
