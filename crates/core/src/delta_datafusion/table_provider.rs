@@ -720,7 +720,10 @@ impl<'a> DeltaScanBuilder<'a> {
         // contain malicious absolute paths. This feature is OPT-IN and must be explicitly enabled
         // via the DELTA_RS_ALLOW_UNRESTRICTED_FILE_ACCESS environment variable.
         let allow_unrestricted_file_access = std::env::var("DELTA_RS_ALLOW_UNRESTRICTED_FILE_ACCESS")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .map(|v| {
+                let v = v.trim();
+                v.eq_ignore_ascii_case("1") || v.eq_ignore_ascii_case("true")
+            })
             .unwrap_or(false);
 
         // If using local filesystem, register a root-scoped store and scan against that
