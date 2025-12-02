@@ -712,7 +712,7 @@ impl<'a> DeltaScanBuilder<'a> {
             file_source.with_schema_adapter_factory(Arc::new(DeltaSchemaAdapterFactory {}))?;
 
         // If using local filesystem, register a root-scoped store and scan against that
-        let (scan_store_url, _) = if self.log_store.config().location.scheme() == "file" {
+        let scan_store_url = if self.log_store.config().location.scheme() == "file" {
             let url = ObjectStoreUrl::parse("delta-rs://file-root").unwrap();
             // Ensure a root store is registered for the session runtime
             self.session
@@ -726,7 +726,7 @@ impl<'a> DeltaScanBuilder<'a> {
             // and whether there should be any validation or sandboxing of absolute paths to
             // prevent unauthorized file access. Perhaps this should be an OPT-IN feature
             // to allow absolute paths.
-            (url, ())
+            url
         } else {
             if need_bucket_root_store {
                 // Build a root-scoped store identifier unique per (scheme, host)
@@ -738,9 +738,9 @@ impl<'a> DeltaScanBuilder<'a> {
                 self.session
                     .runtime_env()
                     .register_object_store(url.as_ref(), self.log_store.root_object_store(None));
-                (url, ())
+                url
             } else {
-                (self.log_store.object_store_url(), ())
+                self.log_store.object_store_url()
             }
         };
 

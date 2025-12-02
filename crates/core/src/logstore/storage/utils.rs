@@ -240,15 +240,17 @@ fn extract_bucket_name(url: &Url) -> Option<String> {
 fn looks_like_virtual_hosted_style(host: &str) -> bool {
     // Check for known S3 virtual-hosted-style host suffixes.
     // This includes AWS S3, S3 website endpoints, and common localstack patterns.
+    // Only match S3-specific suffixes and patterns
     const S3_SUFFIXES: &[&str] = &[
         ".s3.amazonaws.com",
         ".s3.amazonaws.com.cn",
-        ".s3-website.",
-        ".amazonaws.com",
         ".localstack.cloud",
         ".localhost.localstack.cloud",
     ];
-    S3_SUFFIXES.iter().any(|suffix| host.ends_with(suffix))
+    // Match .s3-website-<region>.amazonaws.com and .s3.dualstack.<region>.amazonaws.com
+    host.contains(".s3-website-")
+        || host.contains(".s3.dualstack.")
+        || S3_SUFFIXES.iter().any(|suffix| host.ends_with(suffix))
 }
 
 fn bucket_from_virtual_hosted_style(host: &str) -> Option<&str> {
