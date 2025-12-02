@@ -49,8 +49,6 @@ use futures::StreamExt as _;
 use itertools::Itertools;
 use object_store::ObjectMeta;
 use serde::{Deserialize, Serialize};
-use std::path::Path as StdPath;
-use url::Url;
 
 use crate::delta_datafusion::schema_adapter::DeltaSchemaAdapterFactory;
 use crate::delta_datafusion::{
@@ -580,42 +578,15 @@ impl<'a> DeltaScanBuilder<'a> {
 
         let table_partition_cols = &self.snapshot.metadata().partition_columns();
 
-        for action in files.iter() {
-            // Normalize path using shared utilities to avoid duplication and support full path URIs
-            let mut adjusted = action.clone();
-            let root = self.log_store.config().location.clone();
-            let p = adjusted.path.as_str();
+        let root = self.log_store.config().location.clone();
 
-            if root.scheme() == "file" {
-                // For local filesystem tables, DataFusion reads via the table's registered object
-                // store which may be prefixed. We prefer relative paths under the table dir when
-                // possible. Use the shared utility function to relativize absolute paths.
-                adjusted.path = crate::logstore::relativize_path_for_file_scheme(&root, p);
-            } else {
-                // For non-file schemes, if the path is an absolute URI under the table root,
-                // strip the table root so it becomes table-relative. Otherwise, if it points
-                // to the same bucket but a different prefix, relativize to the bucket root so
-                // the registered store (bucket-scoped) can resolve it. If neither applies,
-                // keep as-is.
-                match Url::parse(p) {
-                    Ok(_) => {
-                        let stripped = crate::logstore::strip_table_root_from_full_uri(&root, p);
-                        if stripped == p {
-                            let bucket_rel =
-                                crate::logstore::relativize_uri_to_bucket_root(&root, p);
-                            if bucket_rel != p {
-                                need_bucket_root_store = true;
-                            }
-                            adjusted.path = bucket_rel;
-                        } else {
-                            adjusted.path = stripped;
-                        }
-                    }
-                    Err(_) => {
-                        // Not a URI; keep as-is (typically already relative to the store)
-                    }
-                }
-            }
+        for action in files.iter() {
+            // Normalize path using shared utility to support full path URIs
+            let mut adjusted = action.clone();
+            let (normalized_path, needs_bucket_root) =
+                crate::logstore::normalize_add_path_for_scan(&root, adjusted.path.as_str());
+            adjusted.path = normalized_path;
+            need_bucket_root_store |= needs_bucket_root;
 
             // Build PartitionedFile with ObjectMeta that matches the selected store
             let ts_secs = adjusted.modification_time / 1000;
@@ -630,24 +601,11 @@ impl<'a> DeltaScanBuilder<'a> {
 
             let object_meta = if root.scheme() == "file" {
                 // Use a root-scoped filesystem store; provide absolute path without leading '/'
-                let abs = match root.to_file_path() {
-                    Ok(root_fs) => {
-                        let input_fs = StdPath::new(adjusted.path.as_str());
-                        if input_fs.is_absolute() {
-                            input_fs.to_path_buf()
-                        } else {
-                            root_fs.join(input_fs)
-                        }
-                    }
-                    Err(_) => StdPath::new(adjusted.path.as_str()).to_path_buf(),
-                };
-                let rel_from_root = abs
-                    .to_str()
-                    .map(|s| s.trim_start_matches(['/', '\\']).to_string())
-                    .unwrap_or_else(|| abs.to_string_lossy().trim_start_matches('/').to_string());
-
                 ObjectMeta {
-                    location: object_store::path::Path::from(rel_from_root.as_str()),
+                    location: crate::logstore::object_store_path_for_file_root(
+                        &root,
+                        adjusted.path.as_str(),
+                    ),
                     last_modified,
                     size: adjusted.size as u64,
                     e_tag: None,

@@ -85,6 +85,61 @@ pub fn relativize_path_for_file_scheme(root: &Url, input: &str) -> String {
     }
 }
 
+/// Convert a path to an object_store::Path for use with a root-scoped filesystem store.
+///
+/// For file scheme tables using a root-scoped store, paths need to be absolute filesystem
+/// paths with leading slashes stripped (since object_store paths are relative to store root).
+pub fn object_store_path_for_file_root(root: &Url, path: &str) -> Path {
+    let abs = match root.to_file_path() {
+        Ok(root_fs) => {
+            let input_fs = StdPath::new(path);
+            if input_fs.is_absolute() {
+                input_fs.to_path_buf()
+            } else {
+                root_fs.join(input_fs)
+            }
+        }
+        Err(_) => StdPath::new(path).to_path_buf(),
+    };
+    let rel_from_root = abs
+        .to_str()
+        .map(|s| s.trim_start_matches(['/', '\\']).to_string())
+        .unwrap_or_else(|| abs.to_string_lossy().trim_start_matches('/').to_string());
+    Path::from(rel_from_root.as_str())
+}
+
+/// Normalize a path from an Add action for use in a scan.
+///
+/// Returns a tuple of (normalized_path, needs_bucket_root_store).
+/// - For file scheme: relativizes absolute paths to table root when possible.
+/// - For non-file schemes: strips table root prefix or relativizes to bucket root.
+/// - `needs_bucket_root_store` is true if the path required bucket-level relativization.
+pub fn normalize_add_path_for_scan(root: &Url, path: &str) -> (String, bool) {
+    if root.scheme() == "file" {
+        // For local filesystem tables, relativize absolute paths under the table dir
+        (relativize_path_for_file_scheme(root, path), false)
+    } else {
+        // For non-file schemes, try to strip table root first
+        match Url::parse(path) {
+            Ok(_) => {
+                let stripped = strip_table_root_from_full_uri(root, path);
+                if stripped != path {
+                    (stripped, false)
+                } else {
+                    // Not under table root; try bucket-level relativization
+                    let bucket_rel = relativize_uri_to_bucket_root(root, path);
+                    let needs_bucket_root = bucket_rel != path;
+                    (bucket_rel, needs_bucket_root)
+                }
+            }
+            Err(_) => {
+                // Not a URI; keep as-is (typically already relative)
+                (path.to_string(), false)
+            }
+        }
+    }
+}
+
 /// For non-file schemes, if `input` is a fully-qualified URI beginning with `root`,
 /// strip the table root prefix so the result is relative to the table root.
 pub fn strip_table_root_from_full_uri(root: &Url, input: &str) -> String {
