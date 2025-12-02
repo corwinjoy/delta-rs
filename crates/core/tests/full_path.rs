@@ -85,7 +85,7 @@ async fn compare_table_with_full_paths_to_original_table_s3() {
     let cloned_uri = format!("{}/{}", bucket_uri, cloned_prefix);
 
     // Helper to run a command and assert success
-    let mut run = |program: &str, args: &[&str]| {
+    let run = |program: &str, args: &[&str]| {
         let status = Command::new(program)
             .args(args)
             .status()
@@ -361,7 +361,7 @@ fn rewrite_log_paths_with_prefix(log_dir: &Path, prefix_uri: &str) {
                 continue;
             }
             let mut v: serde_json::Value = serde_json::from_str(line).unwrap();
-            let mut rewrite = |action: &mut Value| {
+            let rewrite = |action: &mut Value| {
                 if let Some(obj) = action.as_object_mut() {
                     if let Some(path_val) = obj.get_mut("path") {
                         if let Some(rel) = path_val.as_str() {
