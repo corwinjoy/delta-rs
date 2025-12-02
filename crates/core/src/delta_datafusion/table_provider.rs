@@ -613,8 +613,11 @@ impl<'a> DeltaScanBuilder<'a> {
                 }
             } else {
                 ObjectMeta {
+                    location: action_with_normalized_path.path.clone().into(),
                     last_modified,
-                    ..action_with_normalized_path.clone().try_into().unwrap()
+                    size: action_with_normalized_path.size as u64,
+                    e_tag: action_with_normalized_path.tags.as_ref().and_then(|tags| tags.get("etag").cloned()),
+                    version: None,
                 }
             };
 
