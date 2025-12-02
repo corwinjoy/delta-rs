@@ -193,7 +193,7 @@ fn looks_like_virtual_hosted_style(host: &str) -> bool {
         ".localstack.cloud",
         ".localhost.localstack.cloud",
     ];
-    S3_SUFFIXES.iter().any(|suffix| host.contains(suffix))
+    S3_SUFFIXES.iter().any(|suffix| host.ends_with(suffix))
 }
 
 fn bucket_from_virtual_hosted_style(host: &str) -> Option<&str> {
