@@ -18,6 +18,7 @@ use datafusion::datasource::physical_plan::{
     wrap_partition_type_in_dict, wrap_partition_value_in_dict, FileGroup, FileSource,
 };
 use datafusion::datasource::physical_plan::{FileScanConfigBuilder, ParquetSource};
+use datafusion::datasource::object_store::ObjectStoreUrl;
 use datafusion::datasource::sink::{DataSink, DataSinkExec};
 use datafusion::datasource::TableType;
 use datafusion::error::DataFusionError;
@@ -48,6 +49,8 @@ use futures::StreamExt as _;
 use itertools::Itertools;
 use object_store::ObjectMeta;
 use serde::{Deserialize, Serialize};
+use std::path::Path as StdPath;
+use url::Url;
 
 use crate::delta_datafusion::schema_adapter::DeltaSchemaAdapterFactory;
 use crate::delta_datafusion::{
@@ -570,12 +573,102 @@ impl<'a> DeltaScanBuilder<'a> {
         // and partitions are somewhat evenly distributed, probably not the worst choice ...
         // However we may want to do some additional balancing in case we are far off from the above.
         let mut file_groups: HashMap<Vec<ScalarValue>, Vec<PartitionedFile>> = HashMap::new();
+        // If we encounter any absolute URIs outside the table root but within the same
+        // bucket/account, we will need to scan against a root-scoped object store rather
+        // than the table-prefixed one.
+        let mut need_bucket_root_store = false;
 
         let table_partition_cols = &self.snapshot.metadata().partition_columns();
 
         for action in files.iter() {
-            let mut part = partitioned_file_from_action(action, table_partition_cols, &schema);
+            // Normalize path using shared utilities to avoid duplication and support full path URIs
+            let mut adjusted = action.clone();
+            let root = self.log_store.config().location.clone();
+            let p = adjusted.path.as_str();
 
+            if root.scheme() == "file" {
+                // For local filesystem tables, DataFusion reads via the table's registered object
+                // store which may be prefixed. We prefer relative paths under the table dir when
+                // possible. Use the shared utility function to relativize absolute paths.
+                adjusted.path = crate::logstore::relativize_path_for_file_scheme(&root, p);
+            } else {
+                // For non-file schemes, if the path is an absolute URI under the table root,
+                // strip the table root so it becomes table-relative. Otherwise, if it points
+                // to the same bucket but a different prefix, relativize to the bucket root so
+                // the registered store (bucket-scoped) can resolve it. If neither applies,
+                // keep as-is.
+                match Url::parse(p) {
+                    Ok(_) => {
+                        let stripped = crate::logstore::strip_table_root_from_full_uri(&root, p);
+                        if stripped == p {
+                            let bucket_rel =
+                                crate::logstore::relativize_uri_to_bucket_root(&root, p);
+                            if bucket_rel != p {
+                                need_bucket_root_store = true;
+                            }
+                            adjusted.path = bucket_rel;
+                        } else {
+                            adjusted.path = stripped;
+                        }
+                    }
+                    Err(_) => {
+                        // Not a URI; keep as-is (typically already relative to the store)
+                    }
+                }
+            }
+
+            // Build PartitionedFile with ObjectMeta that matches the selected store
+            let ts_secs = adjusted.modification_time / 1000;
+            let ts_ns = (adjusted.modification_time % 1000) * 1_000_000;
+            let last_modified = Utc.from_utc_datetime(
+                &DateTime::from_timestamp(ts_secs, ts_ns as u32)
+                    .expect("Invalid timestamp in PartitionedFile: modification_time is out of range")
+                    .naive_utc(),
+            );
+
+            let object_meta = if root.scheme() == "file" {
+                // Use a root-scoped filesystem store; provide absolute path without leading '/'
+                let abs = match root.to_file_path() {
+                    Ok(root_fs) => {
+                        let input_fs = StdPath::new(adjusted.path.as_str());
+                        if input_fs.is_absolute() {
+                            input_fs.to_path_buf()
+                        } else {
+                            root_fs.join(input_fs)
+                        }
+                    }
+                    Err(_) => StdPath::new(adjusted.path.as_str()).to_path_buf(),
+                };
+                let rel_from_root = abs
+                    .to_str()
+                    .map(|s| s.trim_start_matches(['/', '\\']).to_string())
+                    .unwrap_or_else(|| abs.to_string_lossy().trim_start_matches('/').to_string());
+
+                ObjectMeta {
+                    location: object_store::path::Path::from(rel_from_root.as_str()),
+                    last_modified,
+                    size: adjusted.size as u64,
+                    e_tag: None,
+                    version: None,
+                }
+            } else {
+                ObjectMeta {
+                    last_modified,
+                    ..adjusted.clone().try_into().unwrap()
+                }
+            };
+
+            // Build PartitionedFile from action to ensure partition values align with schema
+            // and DataFusion expectations
+            let mut part = partitioned_file_from_action(
+                &adjusted,
+                table_partition_cols,
+                &schema,
+            );
+            // Overwrite object_meta with the one computed above to preserve normalized path
+            part.object_meta = object_meta;
+
+            // Optionally append the virtual file column as an extra partition value
             if config.file_column_name.is_some() {
                 let partition_value = if config.wrap_partition_values {
                     wrap_partition_value_in_dict(ScalarValue::Utf8(Some(action.path.clone())))
@@ -662,8 +755,35 @@ impl<'a> DeltaScanBuilder<'a> {
         let file_source =
             file_source.with_schema_adapter_factory(Arc::new(DeltaSchemaAdapterFactory {}))?;
 
+        // If using local filesystem, register a root-scoped store and scan against that
+        let (scan_store_url, _) = if self.log_store.config().location.scheme() == "file" {
+            let url = ObjectStoreUrl::parse("delta-rs://file-root").unwrap();
+            // Ensure a root store is registered for the session runtime
+            self.session
+                .runtime_env()
+                .register_object_store(url.as_ref(), self.log_store.root_object_store(None));
+            (url, ())
+        } else {
+            if need_bucket_root_store {
+                // Build a root-scoped store identifier unique per (scheme, host)
+                let loc = &self.log_store.config().location;
+                let host = loc.host_str().unwrap_or("-");
+                let url = ObjectStoreUrl::parse(format!(
+                    "delta-rs://root-{}-{}",
+                    loc.scheme(), host
+                ))
+                .unwrap();
+                self.session
+                    .runtime_env()
+                    .register_object_store(url.as_ref(), self.log_store.root_object_store(None));
+                (url, ())
+            } else {
+                (self.log_store.object_store_url(), ())
+            }
+        };
+
         let file_scan_config =
-            FileScanConfigBuilder::new(self.log_store.object_store_url(), file_schema, file_source)
+            FileScanConfigBuilder::new(scan_store_url, file_schema, file_source)
                 .with_file_groups(
                     // If all files were filtered out, we still need to emit at least one partition to
                     // pass datafusion sanity checks.
@@ -1139,7 +1259,7 @@ fn partitioned_file_from_action(
     let ts_ns = (action.modification_time % 1000) * 1_000_000;
     let last_modified = Utc.from_utc_datetime(
         &DateTime::from_timestamp(ts_secs, ts_ns as u32)
-            .unwrap()
+            .expect("Invalid timestamp in PartitionedFile: modification_time is out of range")
             .naive_utc(),
     );
     PartitionedFile {
