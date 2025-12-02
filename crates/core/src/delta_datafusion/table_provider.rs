@@ -580,6 +580,18 @@ impl<'a> DeltaScanBuilder<'a> {
 
         let root = self.log_store.config().location.clone();
 
+        // SECURITY WARNING:
+        // Registering a root object store for the file scheme allows reading ANY file on the filesystem,
+        // not just files within the table directory. This is a potential security risk if tables
+        // contain malicious absolute paths. This feature is OPT-IN and must be explicitly enabled
+        // via the DELTA_RS_ALLOW_UNRESTRICTED_FILE_ACCESS environment variable.
+        let allow_unrestricted_file_access = std::env::var("DELTA_RS_ALLOW_UNRESTRICTED_FILE_ACCESS")
+            .map(|v| {
+                let v = v.trim();
+                v.eq_ignore_ascii_case("1") || v.eq_ignore_ascii_case("true")
+            })
+            .unwrap_or(false);
+
         for action in files.iter() {
             // Normalize path using shared utility to support full path URIs
             let mut action_with_normalized_path = action.clone();
@@ -599,7 +611,7 @@ impl<'a> DeltaScanBuilder<'a> {
                     .naive_utc(),
             );
 
-            let object_meta = if root.scheme() == "file" {
+            let object_meta = if root.scheme() == "file" && allow_unrestricted_file_access {
                 // Use a root-scoped filesystem store; provide absolute path without leading '/'
                 ObjectMeta {
                     location: crate::logstore::object_store_path_for_file_root(
@@ -713,18 +725,6 @@ impl<'a> DeltaScanBuilder<'a> {
         };
         let file_source =
             file_source.with_schema_adapter_factory(Arc::new(DeltaSchemaAdapterFactory {}))?;
-
-        // SECURITY WARNING:
-        // Registering a root object store for the file scheme allows reading ANY file on the filesystem,
-        // not just files within the table directory. This is a potential security risk if tables
-        // contain malicious absolute paths. This feature is OPT-IN and must be explicitly enabled
-        // via the DELTA_RS_ALLOW_UNRESTRICTED_FILE_ACCESS environment variable.
-        let allow_unrestricted_file_access = std::env::var("DELTA_RS_ALLOW_UNRESTRICTED_FILE_ACCESS")
-            .map(|v| {
-                let v = v.trim();
-                v.eq_ignore_ascii_case("1") || v.eq_ignore_ascii_case("true")
-            })
-            .unwrap_or(false);
 
         // If using local filesystem, register a root-scoped store and scan against that
         let scan_store_url = if self.log_store.config().location.scheme() == "file" {
