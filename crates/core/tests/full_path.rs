@@ -96,7 +96,7 @@ async fn compare_table_with_full_paths_to_original_table_s3() {
     // Create bucket
     run(
         "aws",
-        &["--endpoint-url=http://localhost:4566", "s3", "mb", &bucket_uri],
+        &["s3", "mb", &bucket_uri],
     );
 
     // Ensure cleanup at the end
@@ -105,7 +105,6 @@ async fn compare_table_with_full_paths_to_original_table_s3() {
         fn drop(&mut self) {
             let _ = Command::new("aws")
                 .args([
-                    "--endpoint-url=http://localhost:4566",
                     "s3",
                     "rb",
                     &self.0,
@@ -120,7 +119,6 @@ async fn compare_table_with_full_paths_to_original_table_s3() {
     run(
         "aws",
         &[
-            "--endpoint-url=http://localhost:4566",
             "s3",
             "cp",
             expected_abs.to_str().unwrap(),
@@ -133,7 +131,6 @@ async fn compare_table_with_full_paths_to_original_table_s3() {
     run(
         "aws",
         &[
-            "--endpoint-url=http://localhost:4566",
             "s3",
             "cp",
             &original_uri,
@@ -150,7 +147,6 @@ async fn compare_table_with_full_paths_to_original_table_s3() {
     run(
         "aws",
         &[
-            "--endpoint-url=http://localhost:4566",
             "s3",
             "cp",
             &format!("{}/_delta_log", &cloned_uri),
@@ -167,7 +163,6 @@ async fn compare_table_with_full_paths_to_original_table_s3() {
     run(
         "aws",
         &[
-            "--endpoint-url=http://localhost:4566",
             "s3",
             "cp",
             local_log_dir.to_str().unwrap(),
