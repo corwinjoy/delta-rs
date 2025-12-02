@@ -23,6 +23,7 @@ async fn compare_table_with_full_paths() {
     assert_table_uris_and_data(&cloned_dir, &tmpdir.path(), &expected_abs).await;
 }
 
+
 #[tokio::test]
 async fn compare_table_with_full_paths_to_original_table() {
     std::env::set_var("DELTA_RS_ALLOW_UNRESTRICTED_FILE_ACCESS", "1");
@@ -41,6 +42,38 @@ async fn compare_table_with_full_paths_to_original_table() {
     // Open the cloned table and compare URIs to original table dir and data to original.
     assert_table_uris_and_data(&cloned_dir, &expected_abs, &expected_abs).await;
 }
+
+#[tokio::test]
+async fn compare_table_with_uri_paths() {
+    std::env::set_var("DELTA_RS_ALLOW_UNRESTRICTED_FILE_ACCESS", "1");
+
+    // Path to the original test table (with relative paths in _delta_log)
+    let expected_rel = Path::new("../test/tests/data/delta-0.8.0");
+    let expected_abs = fs::canonicalize(expected_rel).unwrap();
+
+    // Use a fresh temporary directory as the target table location and clone the
+    // expected table there while rewriting data file paths to file:// URIs.
+    let tmpdir = tempfile::tempdir().unwrap();
+    let cloned_dir: PathBuf = tmpdir.path().to_path_buf();
+
+    // Re-create target by copying contents of expected table
+    use fs_extra::dir::{copy as copy_dir, CopyOptions};
+    let mut opts = CopyOptions::new();
+    opts.overwrite = true;
+    opts.copy_inside = true;
+    opts.content_only = true; // copy contents of source into dest root
+    copy_dir(&expected_abs, &cloned_dir, &opts).unwrap();
+
+    // Rewrite _delta_log entries so that add/remove.path values are file:// URIs
+    let log_dir = cloned_dir.join("_delta_log");
+    rewrite_log_paths(&log_dir, &cloned_dir, true);
+
+    // Compare the cloned table against expected file:// URIs and data from the original table.
+    let table_uri = Url::from_directory_path(&cloned_dir).unwrap().to_string();
+    let expected_prefix_uri = table_uri.clone();
+    assert_table_uris_and_data_cloud(&table_uri, &expected_prefix_uri, &expected_abs, None).await;
+}
+
 
 //
 // S3 variant using Localstack: requires cargo feature `cloud` (see Cargo.toml test features)

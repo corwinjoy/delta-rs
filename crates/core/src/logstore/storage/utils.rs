@@ -132,8 +132,10 @@ pub fn object_store_path_for_file_root(root: &Url, path: &str) -> Path {
 /// - `needs_bucket_root_store` is true if the path required bucket-level relativization.
 pub fn normalize_add_path_for_scan(root: &Url, path: &str) -> (String, bool) {
     if root.scheme() == "file" {
-        // For local filesystem tables, relativize absolute paths under the table dir
-        (relativize_path_for_file_scheme(root, path), false)
+        // For local filesystem tables, first normalize any input (including file:// URIs)
+        // into a platform filesystem path, then relativize absolute paths under the table dir.
+        let normalized = normalize_path_for_file_scheme(root, path);
+        (relativize_path_for_file_scheme(root, &normalized), false)
     } else {
         // For non-file schemes, try to strip table root first
         match Url::parse(path) {
