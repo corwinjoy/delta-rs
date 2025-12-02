@@ -760,6 +760,14 @@ impl<'a> DeltaScanBuilder<'a> {
             self.session
                 .runtime_env()
                 .register_object_store(url.as_ref(), self.log_store.root_object_store(None));
+            // TODO: Security
+            // Registering root_object_store for the file scheme
+            // could cause security issues or unintended file access if tables contain malicious
+            // absolute paths. This allows the table to read any file on the filesystem rather than
+            // being scoped to the table directory. Consider documenting this security implication
+            // and whether there should be any validation or sandboxing of absolute paths to
+            // prevent unauthorized file access. Perhaps this should be an OPT-IN feature
+            // to allow absolute paths.
             (url, ())
         } else {
             if need_bucket_root_store {
