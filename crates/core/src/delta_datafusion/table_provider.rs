@@ -745,6 +745,10 @@ impl<'a> DeltaScanBuilder<'a> {
                 // Build a root-scoped store identifier unique per (scheme, host)
                 let loc = &self.log_store.config().location;
                 let host = loc.host_str().unwrap_or("-");
+                // TODO. May be a security risk to allow absolute paths outside the bucket/account.
+                // When need_bucket_root_store is true, the code registers a bucket-root object
+                // store that could access ANY object in the bucket, not just those in the
+                // table directory. This has similar security implications to the file-root store above.
                 let url =
                     ObjectStoreUrl::parse(format!("delta-rs://root-{}-{}", loc.scheme(), host))
                         .unwrap();
