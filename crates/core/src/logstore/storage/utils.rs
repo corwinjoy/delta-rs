@@ -194,8 +194,10 @@ impl TryFrom<&Add> for ObjectMeta {
             // a concrete object store is used. At that point, `value.path` must
             // already be normalized (either relative to table root for remote
             // schemes or an absolute filesystem path for file scheme).
-            // We therefore parse it directly without attempting to alter it.
-            location: Path::parse(value.path.as_str())?,
+            // The path from the Delta log is already percent-encoded per the Delta
+            // protocol. Using `Path::from` instead of `Path::parse` avoids
+            // double-encoding (e.g., `%20` becoming `%2520`).
+            location: Path::from(value.path.as_str()),
             last_modified,
             size: value.size as u64,
             e_tag: None,
@@ -228,10 +230,9 @@ mod tests {
         let meta: ObjectMeta = (&add).try_into().unwrap();
         assert_eq!(
             meta.location,
-            Path::parse(
+            Path::from(
                 "x=A%252FA/part-00007-b350e235-2832-45df-9918-6cab4f7578f7.c000.snappy.parquet"
             )
-            .unwrap()
         );
         assert_eq!(meta.size, 123);
         assert_eq!(meta.last_modified.timestamp_millis(), 123456789);
