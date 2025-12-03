@@ -603,53 +603,15 @@ impl<'a> DeltaScanBuilder<'a> {
             action_with_normalized_path.path = normalized_path;
             need_bucket_root_store |= needs_bucket_root;
 
-            // Build PartitionedFile with ObjectMeta that matches the selected store
-            let ts_secs = action_with_normalized_path.modification_time / 1000;
-            let ts_ns = (action_with_normalized_path.modification_time % 1000) * 1_000_000;
-            let last_modified = Utc.from_utc_datetime(
-                &DateTime::from_timestamp(ts_secs, ts_ns as u32)
-                    .expect(
-                        "Invalid timestamp in PartitionedFile: modification_time is out of range",
-                    )
-                    .naive_utc(),
-            );
-
-            let object_meta = if root.scheme() == "file" && allow_unrestricted_file_access {
-                // Use a root-scoped filesystem store; provide absolute path without leading '/'
-                ObjectMeta {
-                    location: crate::logstore::object_store_path_for_file_root(
-                        &root,
-                        action_with_normalized_path.path.as_str(),
-                    ),
-                    last_modified,
-                    size: action_with_normalized_path.size as u64,
-                    e_tag: None,
-                    version: None,
-                }
-            } else {
-                ObjectMeta {
-                    location: action_with_normalized_path.path.clone().into(),
-                    last_modified,
-                    size: action_with_normalized_path.size as u64,
-                    e_tag: action_with_normalized_path
-                        .tags
-                        .as_ref()
-                        .and_then(|tags| tags.get("etag"))
-                        .cloned()
-                        .flatten(),
-                    version: None,
-                }
-            };
-
             // Build PartitionedFile from action to ensure partition values align with schema
             // and DataFusion expectations
             let mut part = partitioned_file_from_action(
                 &action_with_normalized_path,
                 table_partition_cols,
                 &schema,
+                &root,
+                allow_unrestricted_file_access,
             );
-            // Overwrite object_meta with the one computed above to preserve normalized path
-            part.object_meta = object_meta;
 
             // Optionally append the virtual file column as an extra partition value
             if config.file_column_name.is_some() {
@@ -1219,6 +1181,8 @@ fn partitioned_file_from_action(
     action: &Add,
     partition_columns: &[String],
     schema: &Schema,
+    root: &url::Url,
+    allow_unrestricted_file_access: bool,
 ) -> PartitionedFile {
     let partition_values = partition_columns
         .iter()
@@ -1252,11 +1216,33 @@ fn partitioned_file_from_action(
             .expect("Invalid timestamp in PartitionedFile: modification_time is out of range")
             .naive_utc(),
     );
-    PartitionedFile {
-        object_meta: ObjectMeta {
+
+    let object_meta = if root.scheme() == "file" && allow_unrestricted_file_access {
+        // Use a root-scoped filesystem store; provide absolute path without leading '/'
+        ObjectMeta {
+            location: crate::logstore::object_store_path_for_file_root(root, action.path.as_str()),
             last_modified,
-            ..action.try_into().unwrap()
-        },
+            size: action.size as u64,
+            e_tag: None,
+            version: None,
+        }
+    } else {
+        ObjectMeta {
+            location: action.path.clone().into(),
+            last_modified,
+            size: action.size as u64,
+            e_tag: action
+                .tags
+                .as_ref()
+                .and_then(|tags| tags.get("etag"))
+                .cloned()
+                .flatten(),
+            version: None,
+        }
+    };
+
+    PartitionedFile {
+        object_meta,
         partition_values,
         range: None,
         extensions: None,
@@ -1389,7 +1375,8 @@ mod tests {
         ]);
 
         let part_columns = vec!["year".to_string(), "month".to_string()];
-        let file = partitioned_file_from_action(&action, &part_columns, &schema);
+        let root = url::Url::parse("s3://test-bucket/").unwrap();
+        let file = partitioned_file_from_action(&action, &part_columns, &schema, &root, false);
         let ref_file = PartitionedFile {
             object_meta: object_store::ObjectMeta {
                 location: Path::from("year=2015/month=1/part-00000-4dcb50d3-d017-450c-9df7-a7257dbd3c5d-c000.snappy.parquet".to_string()),
