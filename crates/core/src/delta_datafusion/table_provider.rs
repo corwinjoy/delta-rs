@@ -616,9 +616,11 @@ impl<'a> DeltaScanBuilder<'a> {
             // Optionally append the virtual file column as an extra partition value
             if config.file_column_name.is_some() {
                 let partition_value = if config.wrap_partition_values {
-                    wrap_partition_value_in_dict(ScalarValue::Utf8(Some(action.path.clone())))
+                    wrap_partition_value_in_dict(ScalarValue::Utf8(Some(
+                        action_with_normalized_path.path.clone(),
+                    )))
                 } else {
-                    ScalarValue::Utf8(Some(action.path.clone()))
+                    ScalarValue::Utf8(Some(action_with_normalized_path.path.clone()))
                 };
                 part.partition_values.push(partition_value);
             }
