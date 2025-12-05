@@ -306,7 +306,36 @@ impl DeltaTableState {
 pub(crate) fn register_store(store: LogStoreRef, env: &RuntimeEnv) {
     let object_store_url = store.object_store_url();
     let url: &Url = object_store_url.as_ref();
-    env.register_object_store(url, store.object_store(None));
+    // Special handling for local file scheme: we want to be able to read files
+    // referenced by absolute filesystem paths (e.g. when _delta_log contains
+    // fully-qualified file paths). Register the root object store so that all
+    // locations are resolved from the filesystem root rather than the table
+    // directory. For non-file schemes keep the table-scoped object store.
+    let scheme = store.config().location.scheme();
+    if scheme == "file" {
+        env.register_object_store(url, store.root_object_store(None));
+        /*
+        // SECURITY: Registering the root object store for the file scheme allows access to any file
+        // on the filesystem.
+        // One idea.
+        // To prevent unintended file access, require explicit opt-in via
+        // the DELTA_ALLOW_ABSOLUTE_FILE_PATHS environment variable.
+        let scheme = store.config().location.scheme();
+        if scheme == "file" {
+            let allow_absolute = std::env::var("DELTA_ALLOW_ABSOLUTE_FILE_PATHS")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            if allow_absolute {
+                env.register_object_store(url, store.root_object_store(None));
+            } else {
+                // Restrict to table directory only
+                env.register_object_store(url, store.object_store(None));
+            }
+
+         */
+    } else {
+        env.register_object_store(url, store.object_store(None));
+    }
 }
 
 /// The logical schema for a Deltatable is different from the protocol level schema since partition

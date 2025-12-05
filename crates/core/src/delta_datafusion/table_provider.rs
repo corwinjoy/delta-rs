@@ -48,6 +48,8 @@ use futures::StreamExt as _;
 use itertools::Itertools;
 use object_store::ObjectMeta;
 use serde::{Deserialize, Serialize};
+use std::path::Path as StdPath;
+use url::Url;
 
 use crate::delta_datafusion::schema_adapter::DeltaSchemaAdapterFactory;
 use crate::delta_datafusion::{
@@ -57,6 +59,7 @@ use crate::delta_datafusion::{
 use crate::kernel::schema::cast::cast_record_batch;
 use crate::kernel::transaction::{CommitBuilder, PROTOCOL};
 use crate::kernel::{Action, Add, EagerSnapshot, Remove};
+use crate::logstore::{normalize_path_for_file_scheme, strip_table_root_from_full_uri};
 use crate::operations::write::writer::{DeltaWriter, WriterConfig};
 use crate::operations::write::WriterStatsConfig;
 use crate::protocol::{DeltaOperation, SaveMode};
@@ -574,7 +577,27 @@ impl<'a> DeltaScanBuilder<'a> {
         let table_partition_cols = &self.snapshot.metadata().partition_columns();
 
         for action in files.iter() {
-            let mut part = partitioned_file_from_action(action, table_partition_cols, &schema);
+            // Normalize path using shared utilities to avoid duplication.
+            let mut adjusted = action.clone();
+            let root = self.log_store.config().location.clone();
+            let p = adjusted.path.as_str();
+
+            if root.scheme() == "file" {
+                adjusted.path = normalize_path_for_file_scheme(&root, p);
+            } else {
+                // For non-file schemes, strip root when full URI is given so paths are relative
+                // to the table-scoped object store.
+                match Url::parse(p) {
+                    Ok(_) => {
+                        adjusted.path = strip_table_root_from_full_uri(&root, p);
+                    }
+                    Err(_) => {
+                        // Not a URI; keep as-is (typically already relative to the store)
+                    }
+                }
+            }
+
+            let mut part = partitioned_file_from_action(&adjusted, table_partition_cols, &schema);
 
             if config.file_column_name.is_some() {
                 let partition_value = if config.wrap_partition_values {

@@ -11,6 +11,7 @@ use object_store::{path::Path, ObjectStore};
 use serde::de::{Error, SeqAccess, Visitor};
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use url::Url;
 
 use self::builder::DeltaTableConfig;
 use self::state::DeltaTableState;
@@ -291,23 +292,76 @@ impl DeltaTable {
         &self,
         filters: &[PartitionFilter],
     ) -> Result<Vec<String>, DeltaTableError> {
-        let files = self.get_files_by_partitions(filters).await?;
-        Ok(files
-            .iter()
-            .map(|fname| self.log_store.to_uri(fname))
-            .collect())
+        let Some(state) = self.state.as_ref() else {
+            return Err(DeltaTableError::NotInitialized);
+        };
+        let mut out: Vec<String> = Vec::new();
+        let mut stream = state
+            .snapshot()
+            .file_views_by_partitions(&self.log_store, filters);
+        while let Some(item) = stream.next().await {
+            let add = item?;
+            let p_cow = add.path();
+            let p = p_cow.as_ref();
+            let obj_path = add.object_store_path();
+            out.push(self.resolve_add_path_to_uri(p, &obj_path));
+        }
+        Ok(out)
     }
 
     /// Returns a URIs for all active files present in the current table version.
     pub fn get_file_uris(&self) -> DeltaResult<impl Iterator<Item = String> + '_> {
-        Ok(self
-            .state
-            .as_ref()
-            .ok_or(DeltaTableError::NotInitialized)?
-            .log_data()
-            .into_iter()
-            .map(|add| add.object_store_path())
-            .map(|path| self.log_store.to_uri(&path)))
+        let state = self.state.as_ref().ok_or(DeltaTableError::NotInitialized)?;
+        let root = self.log_store.config().location.clone();
+        // The clone is necessary here because the closure needs to own `root` (a `Url`),
+        // as it is moved into the closure for the iterator, which may outlive the current scope.
+        #[allow(clippy::redundant_clone)]
+        Ok(state.log_data().into_iter().map(move |add| {
+            let p_cow = add.path();
+            let p = p_cow.as_ref();
+            // Try parsing as a URI first. If it parses, it's an absolute URI.
+            // If it fails with RelativeUrlWithoutBase (or any other error),
+            // treat it as a filesystem path and check if it's absolute.
+            let obj_path = add.object_store_path();
+            // We still keep `root` cloned above to preserve the move semantics in iterator,
+            // but the resolution logic is centralized in `resolve_add_path_to_uri`.
+            let _ = &root; // keep root captured in the closure
+            self.resolve_add_path_to_uri(p, &obj_path)
+        }))
+    }
+
+    /// Resolve an add action's `path` string to a fully-qualified URI string.
+    ///
+    /// Behavior:
+    /// - If `p` parses as a URI, return it verbatim.
+    /// - Else if `p` is an absolute filesystem path, return it verbatim.
+    /// - Else interpret it relative to the table root and return the store URI.
+    /// - Includes special handling for `file://` roots to restore a missing leading slash
+    ///   that can be lost when going through object_store::path::Path conversions.
+    fn resolve_add_path_to_uri(&self, p: &str, obj_path: &Path) -> String {
+        // Absolute URI case
+        if Url::parse(p).is_ok() {
+            return p.to_string();
+        }
+
+        // Absolute filesystem path case
+        if crate::logstore::is_absolute_uri_or_path(p) {
+            return p.to_string();
+        }
+
+        // Special handling for absolute file paths where the leading slash was lost
+        // when converting through object_store::path::Path elsewhere.
+        let root = &self.log_store.config().location;
+        if root.scheme() == "file" {
+            let root_path = root.path(); // e.g. "/home/user/table"
+            let root_no_lead = root_path.trim_start_matches('/');
+            if p.starts_with(root_no_lead) {
+                return format!("/{}", p);
+            }
+        }
+
+        // Fallback: construct a URI using the store from the object_store path
+        self.log_store.to_uri(obj_path)
     }
 
     /// Returns the currently loaded state snapshot.

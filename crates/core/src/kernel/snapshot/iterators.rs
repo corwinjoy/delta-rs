@@ -15,6 +15,7 @@ use delta_kernel::schema::DataType;
 use object_store::path::Path;
 use object_store::ObjectMeta;
 use percent_encoding::percent_decode_str;
+use url::Url;
 
 use crate::kernel::scalars::ScalarExt;
 use crate::kernel::{Add, DeletionVectorDescriptor, Remove};
@@ -119,10 +120,23 @@ impl LogicalFileView {
     // TODO assert consistent handling of the paths encoding when reading log data so this logic can be removed.
     pub(crate) fn object_store_path(&self) -> Path {
         let path = self.path();
-        // Try to preserve percent encoding if possible
-        match Path::parse(path.as_ref()) {
-            Ok(path) => path,
-            Err(_) => Path::from(path.as_ref()),
+        let raw = path.as_ref();
+        // Try parsing as a URI first. If it parses, it's an absolute URI.
+        // If it fails with RelativeUrlWithoutBase (or any other error),
+        // treat it as a filesystem path and check if it's absolute.
+        match Url::parse(raw) {
+            Ok(_) => Path::from(raw),
+            Err(_) => {
+                if crate::logstore::is_absolute_uri_or_path(raw) {
+                    Path::from(raw)
+                } else {
+                    // Try to preserve percent encoding if possible for relative paths
+                    match Path::parse(raw) {
+                        Ok(path) => path,
+                        Err(_) => Path::from(raw),
+                    }
+                }
+            }
         }
     }
 

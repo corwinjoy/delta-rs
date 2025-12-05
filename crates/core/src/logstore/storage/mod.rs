@@ -15,6 +15,11 @@ pub use runtime::{DeltaIOStorageBackend, IORuntime};
 pub(super) mod retry_ext;
 pub(super) mod runtime;
 pub(super) mod utils;
+// Re-export selected utilities for broader use across the crate without exposing the
+// private `utils` submodule path.
+pub use utils::{
+    normalize_path_for_file_scheme, strip_table_root_from_full_uri,
+};
 
 static DELTA_LOG_PATH: LazyLock<Path> = LazyLock::new(|| Path::from("_delta_log"));
 
