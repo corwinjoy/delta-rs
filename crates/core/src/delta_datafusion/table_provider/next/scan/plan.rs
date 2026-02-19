@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use arrow::datatypes::{Schema, SchemaRef};
-use arrow_schema::{DataType, Field, FieldRef, SchemaBuilder};
+use arrow_schema::{DataType, FieldRef, SchemaBuilder};
 use datafusion::common::error::Result;
 use datafusion::common::tree_node::{Transformed, TreeNode};
 use datafusion::common::{HashMap, HashSet, exec_err, plan_err};
@@ -218,15 +218,7 @@ impl KernelScanPlan {
 
 impl DeltaScanConfig {
     pub(crate) fn file_id_field(&self) -> FieldRef {
-        // NOTE: keep the synthetic file-id column as Dictionary<UInt16, Utf8>.
-        // Arrow's dictionary packing does not support Utf8View, and this column is internal.
-        Arc::new(Field::new(
-            self.file_column_name
-                .as_deref()
-                .unwrap_or(FILE_ID_COLUMN_DEFAULT),
-            DataType::Dictionary(DataType::UInt16.into(), DataType::Utf8.into()),
-            false,
-        ))
+        crate::delta_datafusion::file_id::file_id_field(self.file_column_name.as_deref())
     }
 
     pub(crate) fn retain_file_id(&self) -> bool {
@@ -425,16 +417,22 @@ fn process_predicate<'a>(
         only_partition_refs || expr.column_refs().iter().any(|c| cols.contains(&c.name));
     let has_file_id = expr.column_refs().iter().any(|c| file_id_column == &c.name);
 
+    if has_file_id {
+        // file-id filters cannot be evaluated in kernel and must not be pushed to parquet.
+        // Mark as Unsupported so DataFusion keeps a post-scan filter for correctness.
+        return ProcessedPredicate {
+            pushdown: TableProviderFilterPushDown::Unsupported,
+            kernel_predicate: None,
+            parquet_predicate: None,
+        };
+    }
+
     // TODO(roeap): we may allow pusing predicates referencing partition columns
     // into the parquet scan, if the table has materialized partition columns
     let _has_partition_data = config.is_feature_enabled(&TableFeature::MaterializePartitionColumns);
 
     // Try to convert the expression into a kernel predicate
-    if let Ok(kernel_predicate) = to_delta_predicate(expr)
-        // delta kernel is unaware of the file id field, so it cannot process
-        // predicates that reference it.
-        && !has_file_id
-    {
+    if let Ok(kernel_predicate) = to_delta_predicate(expr) {
         let (pushdown, parquet_predicate) = if only_partition_refs {
             // All references are to partition columns so the kernel
             // scan can fully handle the predicate and return exact results
@@ -815,6 +813,22 @@ mod tests {
             ]
         );
 
+        let file_id_only = col(FILE_ID_COLUMN_DEFAULT).eq(lit("part-00000"));
+        assert_eq!(
+            supports_filters_pushdown(&[&file_id_only], table_config, &scan_config),
+            vec![TableProviderFilterPushDown::Unsupported]
+        );
+
         Ok(())
+    }
+
+    #[test]
+    fn test_file_id_field_uses_canonical_file_id_type() {
+        let config = DeltaScanConfig::default();
+        let field = config.file_id_field();
+        assert_eq!(
+            field.data_type(),
+            &crate::delta_datafusion::file_id::file_id_data_type()
+        );
     }
 }

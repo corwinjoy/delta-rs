@@ -2,7 +2,7 @@
 //!
 //! # Example
 //! ```rust ignore
-//! let table = open_table("../path/to/table")?;
+//! let table = open_table(Url::from_directory_path("/abs/path/to/table").unwrap())?;
 //! let builder = CdfLoadBuilder::new(table.log_store(), table.snapshot())
 //!     .with_starting_version(3);
 //!
@@ -340,7 +340,7 @@ impl CdfLoadBuilder {
     }
 
     /// Executes the scan
-    pub(crate) async fn build(
+    pub async fn build(
         &self,
         session: &dyn Session,
         filters: Option<&Arc<dyn PhysicalExpr>>,

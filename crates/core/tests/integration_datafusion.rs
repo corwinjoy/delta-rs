@@ -20,6 +20,7 @@ use datafusion::execution::context::SessionContext;
 use datafusion::logical_expr::Expr;
 use datafusion::physical_plan::metrics::Label;
 use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanVisitor, visit_execution_plan};
+use datafusion::prelude::SessionConfig;
 use datafusion_proto::bytes::{
     logical_plan_from_bytes_with_extension_codec, logical_plan_to_bytes_with_extension_codec,
 };
@@ -27,7 +28,9 @@ use deltalake_core::DeltaTableBuilder;
 use deltalake_core::delta_datafusion::{
     DeltaScan, DeltaScanConfigBuilder, DeltaTableFactory, DeltaTableProvider,
 };
-use deltalake_core::kernel::{DataType, MapType, PrimitiveType, StructField, StructType};
+use deltalake_core::kernel::{
+    ColumnMetadataKey, DataType, MapType, MetadataValue, PrimitiveType, StructField, StructType,
+};
 use deltalake_core::operations::create::CreateBuilder;
 use deltalake_core::operations::write::SchemaMode;
 use deltalake_core::protocol::SaveMode;
@@ -39,8 +42,16 @@ use deltalake_test::utils::*;
 use serial_test::serial;
 use url::Url;
 
-pub fn context_with_delta_table_factory() -> SessionContext {
+fn context_with_delta_table_factory() -> SessionContext {
     let mut state = SessionStateBuilder::new().build();
+    state
+        .table_factories_mut()
+        .insert("DELTATABLE".to_string(), Arc::new(DeltaTableFactory {}));
+    SessionContext::new_with_state(state)
+}
+
+fn context_with_delta_table_factory_with_config(config: SessionConfig) -> SessionContext {
+    let mut state = SessionStateBuilder::new().with_config(config).build();
     state
         .table_factories_mut()
         .insert("DELTATABLE".to_string(), Arc::new(DeltaTableFactory {}));
@@ -187,6 +198,65 @@ mod local {
         );
 
         Ok(())
+    }
+
+    async fn assert_registered_table_has_no_view_types(
+        ctx: &SessionContext,
+        table_name: &str,
+    ) -> Result<()> {
+        let provider = ctx.table_provider(table_name).await?;
+        let plan = provider.scan(&ctx.state(), None, &[], None).await?;
+        let has_view_types = plan.schema().fields().iter().any(|field| {
+            matches!(
+                field.data_type(),
+                ArrowDataType::Utf8View | ArrowDataType::BinaryView
+            )
+        });
+
+        assert!(
+            !has_view_types,
+            "view types should be disabled when schema_force_view_types is false in session config"
+        );
+        Ok(())
+    }
+
+    async fn assert_sql_registration_honors_session_scan_config(
+        options_clause: Option<&str>,
+    ) -> Result<()> {
+        let config = SessionConfig::new().set_bool(
+            "datafusion.execution.parquet.schema_force_view_types",
+            false,
+        );
+        let ctx = context_with_delta_table_factory_with_config(config);
+
+        let mut d = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        d.push("../test/tests/data/delta-0.8.0-partitioned");
+        let location = d.to_str().unwrap();
+        let sql = match options_clause {
+            Some(options) => format!(
+                "CREATE EXTERNAL TABLE demo STORED AS DELTATABLE OPTIONS ({options}) LOCATION '{location}'"
+            ),
+            None => {
+                format!("CREATE EXTERNAL TABLE demo STORED AS DELTATABLE LOCATION '{location}'")
+            }
+        };
+        ctx.sql(sql.as_str()).await?;
+
+        assert_registered_table_has_no_view_types(&ctx, "demo").await
+    }
+
+    #[tokio::test]
+    async fn test_datafusion_sql_registration_honors_session_scan_config() -> Result<()> {
+        assert_sql_registration_honors_session_scan_config(None).await
+    }
+
+    #[tokio::test]
+    async fn test_datafusion_sql_registration_with_options_honors_session_scan_config() -> Result<()>
+    {
+        assert_sql_registration_honors_session_scan_config(Some(
+            "'DYNAMO_LOCK_OWNER_NAME' 'session-regression'",
+        ))
+        .await
     }
 
     #[tokio::test]
@@ -1442,6 +1512,160 @@ async fn test_schema_evolution_missing_column_returns_nulls() {
             "+---+",
         ],
         &batches
+    );
+}
+
+fn schema_with_generated_column_and_user(user_nullable: bool) -> StructType {
+    StructType::try_new(vec![
+        StructField::new(
+            "id".to_string(),
+            DataType::Primitive(PrimitiveType::Integer),
+            false,
+        ),
+        StructField::new(
+            "value".to_string(),
+            DataType::Primitive(PrimitiveType::Integer),
+            false,
+        ),
+        StructField::new(
+            "computed".to_string(),
+            DataType::Primitive(PrimitiveType::Integer),
+            false,
+        )
+        .with_metadata(vec![(
+            ColumnMetadataKey::GenerationExpression.as_ref().to_string(),
+            MetadataValue::String("id + value".to_string()),
+        )]),
+        StructField::new(
+            "user".to_string(),
+            DataType::Primitive(PrimitiveType::String),
+            user_nullable,
+        ),
+    ])
+    .unwrap()
+}
+
+fn id_value_record_batch() -> RecordBatch {
+    id_value_record_batch_with(vec![1, 2], vec![10, 20])
+}
+
+fn id_value_record_batch_with(ids: Vec<i32>, values: Vec<i32>) -> RecordBatch {
+    let id_arr = Int32Array::from(ids);
+    let value_arr = Int32Array::from(values);
+    RecordBatch::try_from_iter_with_nullable(vec![
+        ("id", Arc::new(id_arr) as ArrayRef, false),
+        ("value", Arc::new(value_arr) as ArrayRef, false),
+    ])
+    .unwrap()
+}
+
+async fn create_table_with_schema(table_uri: &str, table_schema: &StructType) -> DeltaTable {
+    DeltaTable::try_from_url(ensure_table_uri(table_uri).unwrap())
+        .await
+        .unwrap()
+        .create()
+        .with_columns(table_schema.fields().cloned())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn test_schema_merge_append_missing_nullable_column_with_generated_columns() {
+    let ctx = SessionContext::new();
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let table_uri = tmp_dir.path().to_str().unwrap();
+
+    let table_schema = schema_with_generated_column_and_user(true);
+    let table = create_table_with_schema(table_uri, &table_schema).await;
+
+    // Append with schema evolution: input omits nullable non-generated column `user`.
+    let table = table
+        .write(vec![id_value_record_batch()])
+        .with_schema_mode(SchemaMode::Merge)
+        .await
+        .unwrap();
+
+    // Ensure schema merge didn't strip generated column metadata.
+    let schema = table.snapshot().unwrap().snapshot().arrow_schema();
+    let computed = schema.field_with_name("computed").unwrap();
+    assert_eq!(
+        computed
+            .metadata()
+            .get(ColumnMetadataKey::GenerationExpression.as_ref())
+            .map(|v| v.as_str()),
+        Some("id + value")
+    );
+
+    // Subsequent appends should continue to generate values for missing generated columns.
+    let table = table
+        .write(vec![id_value_record_batch_with(vec![3, 4], vec![30, 40])])
+        .with_schema_mode(SchemaMode::Merge)
+        .await
+        .unwrap();
+
+    // Ensure subsequent schema merges also preserve generated column metadata.
+    let schema = table.snapshot().unwrap().snapshot().arrow_schema();
+    let computed = schema.field_with_name("computed").unwrap();
+    assert_eq!(
+        computed
+            .metadata()
+            .get(ColumnMetadataKey::GenerationExpression.as_ref())
+            .map(|v| v.as_str()),
+        Some("id + value")
+    );
+
+    let batches = ctx
+        .read_table(table.table_provider().await.unwrap())
+        .unwrap()
+        .select_exprs(&["id", "value", "computed", "user"])
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    assert_batches_sorted_eq!(
+        #[rustfmt::skip]
+        &[
+            "+----+-------+----------+------+",
+            "| id | value | computed | user |",
+            "+----+-------+----------+------+",
+            "| 1  | 10    | 11       |      |",
+            "| 2  | 20    | 22       |      |",
+            "| 3  | 30    | 33       |      |",
+            "| 4  | 40    | 44       |      |",
+            "+----+-------+----------+------+",
+        ],
+        &batches
+    );
+}
+
+#[tokio::test]
+async fn test_schema_merge_append_missing_non_nullable_column_with_generated_columns_fails() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let table_uri = tmp_dir.path().to_str().unwrap();
+
+    let table_schema = schema_with_generated_column_and_user(false);
+    let table = create_table_with_schema(table_uri, &table_schema).await;
+
+    // Append with schema evolution: input omits required column `user`.
+    let result = table
+        .write(vec![id_value_record_batch()])
+        .with_schema_mode(SchemaMode::Merge)
+        .await;
+
+    assert!(
+        result.is_err(),
+        "Writing with a missing non-nullable column should fail"
+    );
+
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("Invalid data found"),
+        "Expected a data validation error, got: {err}",
+    );
+    assert!(
+        !err.contains("Generated column expression for missing column"),
+        "Expected missing non-nullable column to fail validation, not generated-column planning: {err}",
     );
 }
 

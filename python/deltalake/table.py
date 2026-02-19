@@ -14,7 +14,7 @@ from typing import (
     Union,
 )
 
-from arro3.core import RecordBatch, RecordBatchReader
+from arro3.core import RecordBatchReader, Table
 from arro3.core.types import (
     ArrowArrayExportable,
     ArrowSchemaExportable,
@@ -265,6 +265,39 @@ class DeltaTable:
 
         return cls(table_uri=table_uri, storage_options=storage_options)
 
+    def shallow_clone(self, target_uri: str | Path | os.PathLike[str]) -> "DeltaTable":
+        """
+        Create a shallow clone of this Delta table at the given target location and
+        return a new `DeltaTable` instance for the cloned table.
+
+        The shallow clone references the same data files as the source table and does
+        not copy data. Only metadata is created at the target table to reference the
+        existing data files.
+
+        Limitations:
+        - Currently, both source and target locations must be `file://` URLs.
+
+        Args:
+            target_uri: Destination URI for the cloned table. Can be a string path,
+                a `pathlib.Path`, or any `os.PathLike`.
+
+        Returns:
+            DeltaTable: a new `DeltaTable` instance pointing at the cloned table located
+            at `target_uri`.
+        """
+        # Normalize target_uri to a string
+        target_str = str(target_uri) if not isinstance(target_uri, str) else target_uri
+
+        # Execute the shallow clone via the Rust bindings; a new RawDeltaTable is returned
+        cloned_raw = self._table.shallow_clone(target_str)
+
+        # Construct DeltaTable directly with the cloned raw table
+        new_dt = DeltaTable.__new__(DeltaTable)
+        new_dt._table = cloned_raw
+        new_dt._storage_options = self._storage_options
+
+        return new_dt
+
     def version(self) -> int:
         """
         Get the version of the DeltaTable.
@@ -413,6 +446,21 @@ class DeltaTable:
             allow_out_of_range=allow_out_of_range,
         )
 
+    def deletion_vectors(self) -> RecordBatchReader:
+        """
+        Return deletion vectors for data files in this table.
+
+        Returns:
+            RecordBatchReader: A reader with two columns:
+                - filepath (str): fully-qualified file URI.
+                - selection_vector (list[bool]): row keep mask where True means keep and False means deleted.
+
+        Notes:
+            Only files that have deletion vectors are returned.
+            Deletion vectors are materialized in memory before being exposed as record batches.
+        """
+        return self._table.deletion_vectors()
+
     @property
     def table_uri(self) -> str:
         return self._table.table_uri()
@@ -539,7 +587,9 @@ class DeltaTable:
         keep_versions: list[int] | None = None,
     ) -> list[str]:
         """
-        Run the Vacuum command on the Delta Table: list and delete files no longer referenced by the Delta table and are older than the retention threshold.
+        Run the Vacuum command on the Delta Table: list and delete files no longer referenced by the Delta table.
+        Here "not referenced" means all removed files (from vacuum/delete/update/merge) older than the retention threshold,
+        plus any files not mentioned in the logs (unless they start with underscore).
 
         Args:
             retention_hours: the retention threshold in hours, if none then the value from `delta.deletedFileRetentionDuration` is used or default of 1 week otherwise.
@@ -547,7 +597,8 @@ class DeltaTable:
             enforce_retention_duration: when disabled, accepts retention hours smaller than the value from `delta.deletedFileRetentionDuration`.
             post_commithook_properties: properties for the post commit hook. If None, default values are used.
             commit_properties: properties of the transaction commit. If None, default values are used.
-            full: when set to True, will perform a "full" vacuum and remove all files not referenced in the transaction log
+            full: when set to True, will perform a "full" vacuum and remove all files not referenced the transaction log.
+                when False, it will only vacuum not referenced files since last log checkpoint (or since genesis if no checkpoint exists).
             keep_versions: An optional list of versions to keep. If provided, files from these versions will not be deleted.
         Returns:
             the list of files no longer referenced by the Delta Table and are older than the retention threshold.
@@ -1013,43 +1064,49 @@ class DeltaTable:
             out.append((field, op, str_value))
         return out
 
-    def get_add_actions(self, flatten: bool = False) -> RecordBatch:
-        """
-        Return a dataframe with all current add actions.
+    def get_add_actions(self, flatten: bool = False) -> Table:
+        """Return an Arrow table describing every file currently in the table.
 
-        Add actions represent the files that currently make up the table. This
-        data is a low-level representation parsed from the transaction log.
+        Each row corresponds to one data file (an *add* action in the
+        Delta transaction log).  The returned columns always include:
+
+        - ``path`` relative file path
+        - ``size_bytes`` file size in bytes
+        - ``modification_time`` last modification timestamp (ms)
+        - ``num_records`` row count (when stats are available)
+
+        When ``flatten=False`` (default), partition values and column
+        statistics are returned as nested struct columns (``partition``,
+        ``null_count``, ``min``, ``max``).
+
+        When ``flatten=True``, those structs are flattened into
+        top-level columns with dot-separated prefixes, e.g.
+        ``partition.year``, ``null_count.value``, ``min.value``.
 
         Args:
-            flatten: whether to flatten the schema. Partition values columns are
-                        given the prefix `partition.`, statistics (null_count, min, and max) are
-                        given the prefix `null_count.`, `min.`, and `max.`, and tags the
-                        prefix `tags.`. Nested field names are concatenated with `.`.
+            flatten: If True, flatten nested partition and statistics
+                columns into dot-separated top-level columns.
 
         Returns:
-            a PyArrow RecordBatch containing the add action data.
+            An arro3 Table containing one row per data file.
 
         Example:
             ```python
-            from pprint import pprint
             from deltalake import DeltaTable, write_deltalake
             import pyarrow as pa
-            data = pa.table({"x": [1, 2, 3], "y": [4, 5, 6]})
-            write_deltalake("tmp", data, partition_by=["x"])
-            dt = DeltaTable("tmp")
-            df = dt.get_add_actions().to_pandas()
-            df["path"].sort_values(ignore_index=True)
-            0    x=1/0
-            1    x=2/0
-            2    x=3/0
-            ```
 
-            ```python
-            df = dt.get_add_actions(flatten=True).to_pandas()
-            df["partition.x"].sort_values(ignore_index=True)
-            0    1
-            1    2
-            2    3
+            data = pa.table({"x": [1, 2, 3], "y": [4, 5, 6]})
+            write_deltalake("/tmp/my_table", data, partition_by=["x"])
+            dt = DeltaTable("/tmp/my_table")
+
+            # Default: partition values in a nested struct column
+            actions = dt.get_add_actions()
+            actions.column("path")
+            actions.column("partition").field("x")
+
+            # Flattened: partition values as top-level columns
+            flat = dt.get_add_actions(flatten=True)
+            flat.column("partition.x")
             ```
         """
         return self._table.get_add_actions(flatten)

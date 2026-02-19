@@ -12,7 +12,7 @@ from typing import (
 
 from arro3.core import DataType as ArrowDataType
 from arro3.core import Field as ArrowField
-from arro3.core import RecordBatch, RecordBatchReader
+from arro3.core import RecordBatchReader, Table
 from arro3.core import Schema as ArrowSchema
 from arro3.core.types import ArrowSchemaExportable
 
@@ -84,6 +84,7 @@ class RawDeltaTable:
         data_catalog_id: str | None = None,
         catalog_options: dict[str, str] | None = None,
     ) -> str: ...
+    def shallow_clone(self, target_uri: str) -> RawDeltaTable: ...
     @staticmethod
     def is_deltatable(
         table_uri: str, storage_options: dict[str, str] | None
@@ -195,7 +196,7 @@ class RawDeltaTable:
         partition_filters: FilterConjunctionType | None,
     ) -> list[Any]: ...
     def create_checkpoint(self) -> None: ...
-    def get_add_actions(self, flatten: bool) -> RecordBatch: ...
+    def get_add_actions(self, flatten: bool) -> Table: ...
     def delete(
         self,
         predicate: str | None,
@@ -257,6 +258,7 @@ class RawDeltaTable:
         ending_timestamp: str | None = None,
         allow_out_of_range: bool = False,
     ) -> RecordBatchReader: ...
+    def deletion_vectors(self) -> RecordBatchReader: ...
     def transaction_version(self, app_id: str) -> int | None: ...
     def set_column_metadata(
         self,

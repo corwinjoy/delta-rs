@@ -123,7 +123,7 @@ impl From<WriteError> for DeltaTableError {
 }
 
 /// Configuration to write data into Delta tables
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct WriterConfig {
     /// Schema of the delta table
     table_schema: ArrowSchemaRef,
@@ -325,6 +325,7 @@ impl PartitionWriterConfig {
         let writer_properties = writer_properties.unwrap_or_else(|| {
             WriterProperties::builder()
                 .set_created_by(format!("delta-rs version {}", crate_version()))
+                .set_compression(Compression::SNAPPY)
                 .build()
         });
         let target_file_size = target_file_size.unwrap_or(DEFAULT_TARGET_FILE_SIZE);
