@@ -65,6 +65,7 @@ pub use self::session::{
     create_session, create_session_state_with_spill_config,
 };
 pub use self::table_provider::next::{DeletionVectorSelection, DeltaScan as DeltaScanNext};
+pub(crate) use self::table_provider::next::FileSelection;
 pub(crate) use self::utils::*;
 pub use cdf::scan::DeltaCdfTableProvider;
 pub(crate) use data_validation::{

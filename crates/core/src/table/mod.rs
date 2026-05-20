@@ -27,6 +27,7 @@ use crate::{DeltaResult, DeltaTableBuilder, DeltaTableError};
 
 pub mod builder;
 pub mod config;
+pub mod file_format_options;
 pub mod state;
 
 mod columns;

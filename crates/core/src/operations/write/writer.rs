@@ -14,16 +14,16 @@ use object_store::buffered::BufWriter;
 use object_store::path::Path;
 use parquet::arrow::AsyncArrowWriter;
 use parquet::arrow::async_writer::ParquetObjectWriter;
-use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 use tokio::task::JoinSet;
 use tracing::*;
 
-use crate::crate_version;
-
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::kernel::{Add, PartitionsExt};
 use crate::logstore::ObjectStoreRef;
+use crate::table::file_format_options::{
+    WriterPropertiesFactoryRef, default_writer_properties_factory,
+};
 use crate::writer::record_batch::{PartitionResult, divide_by_partition_values};
 use crate::writer::stats::create_add;
 use crate::writer::utils::{
@@ -128,8 +128,8 @@ pub struct WriterConfig {
     table_schema: ArrowSchemaRef,
     /// Column names for columns the table is partitioned by
     partition_columns: Vec<String>,
-    /// Properties passed to underlying parquet writer
-    writer_properties: WriterProperties,
+    /// Factory that creates per-file [`WriterProperties`] (supports async KMS key fetching)
+    writer_properties_factory: WriterPropertiesFactoryRef,
     /// Size above which we will write a buffered parquet file to disk.
     /// If None, the writer will not create a new file until the writer is closed.
     target_file_size: Option<NonZeroU64>,
@@ -147,23 +147,20 @@ impl WriterConfig {
     pub fn new(
         table_schema: ArrowSchemaRef,
         partition_columns: Vec<String>,
-        writer_properties: Option<WriterProperties>,
+        writer_properties_factory: Option<WriterPropertiesFactoryRef>,
         target_file_size: Option<NonZeroU64>,
         write_batch_size: Option<usize>,
         num_indexed_cols: DataSkippingNumIndexedCols,
         stats_columns: Option<Vec<String>>,
     ) -> Self {
-        let writer_properties = writer_properties.unwrap_or_else(|| {
-            WriterProperties::builder()
-                .set_compression(Compression::SNAPPY)
-                .build()
-        });
+        let writer_properties_factory =
+            writer_properties_factory.unwrap_or_else(default_writer_properties_factory);
         let write_batch_size = write_batch_size.unwrap_or(DEFAULT_WRITE_BATCH_SIZE);
 
         Self {
             table_schema,
             partition_columns,
-            writer_properties,
+            writer_properties_factory,
             target_file_size,
             write_batch_size,
             num_indexed_cols,
@@ -199,7 +196,9 @@ impl DeltaWriter {
 
     /// Apply custom writer_properties to the underlying parquet writer
     pub fn with_writer_properties(mut self, writer_properties: WriterProperties) -> Self {
-        self.config.writer_properties = writer_properties;
+        use crate::table::file_format_options::SimpleWriterPropertiesFactory;
+        self.config.writer_properties_factory =
+            std::sync::Arc::new(SimpleWriterPropertiesFactory::new(writer_properties));
         self
     }
 
@@ -236,7 +235,7 @@ impl DeltaWriter {
                 let config = PartitionWriterConfig::try_new(
                     self.config.file_schema(),
                     partition_values.clone(),
-                    Some(self.config.writer_properties.clone()),
+                    Some(self.config.writer_properties_factory.clone()),
                     self.config.target_file_size,
                     Some(self.config.write_batch_size),
                     None,
@@ -298,8 +297,8 @@ pub struct PartitionWriterConfig {
     prefix: Path,
     /// Values for all partition columns
     partition_values: IndexMap<String, Scalar>,
-    /// Properties passed to underlying parquet writer
-    writer_properties: WriterProperties,
+    /// Factory that creates per-file [`WriterProperties`] (supports async KMS key fetching)
+    writer_properties_factory: WriterPropertiesFactoryRef,
     /// Size above which we will write a buffered parquet file to disk.
     /// If None, the writer will not create a new file until the writer is closed.
     target_file_size: Option<NonZeroU64>,
@@ -315,26 +314,22 @@ impl PartitionWriterConfig {
     pub fn try_new(
         file_schema: ArrowSchemaRef,
         partition_values: IndexMap<String, Scalar>,
-        writer_properties: Option<WriterProperties>,
+        writer_properties_factory: Option<WriterPropertiesFactoryRef>,
         target_file_size: Option<NonZeroU64>,
         write_batch_size: Option<usize>,
         max_concurrency_tasks: Option<usize>,
     ) -> DeltaResult<Self> {
         let part_path = partition_values.hive_partition_path();
         let prefix = Path::parse(part_path)?;
-        let writer_properties = writer_properties.unwrap_or_else(|| {
-            WriterProperties::builder()
-                .set_created_by(format!("delta-rs version {}", crate_version()))
-                .set_compression(Compression::SNAPPY)
-                .build()
-        });
+        let writer_properties_factory =
+            writer_properties_factory.unwrap_or_else(default_writer_properties_factory);
         let write_batch_size = write_batch_size.unwrap_or(DEFAULT_WRITE_BATCH_SIZE);
 
         Ok(Self {
             file_schema,
             prefix,
             partition_values,
-            writer_properties,
+            writer_properties_factory,
             target_file_size,
             write_batch_size,
             max_concurrency_tasks: max_concurrency_tasks.unwrap_or_else(get_max_concurrency_tasks),
@@ -351,6 +346,10 @@ impl LazyArrowWriter {
     async fn write_batch(&mut self, batch: &RecordBatch) -> DeltaResult<()> {
         match self {
             LazyArrowWriter::Initialized(path, object_store, config) => {
+                let writer_properties = config
+                    .writer_properties_factory
+                    .create_writer_properties(path, &config.file_schema)
+                    .await?;
                 let writer = ParquetObjectWriter::from_buf_writer(
                     BufWriter::with_capacity(
                         object_store.clone(),
@@ -362,7 +361,7 @@ impl LazyArrowWriter {
                 let mut arrow_writer = AsyncArrowWriter::try_new(
                     writer,
                     config.file_schema.clone(),
-                    Some(config.writer_properties.clone()),
+                    Some(writer_properties),
                 )?;
                 arrow_writer.write(batch).await?;
                 *self = LazyArrowWriter::Writing(path.clone(), arrow_writer);
@@ -411,7 +410,10 @@ impl PartitionWriter {
         stats_columns: Option<Vec<String>>,
     ) -> DeltaResult<Self> {
         let writer_id = uuid::Uuid::new_v4();
-        let first_path = next_data_path(&config.prefix, 0, &writer_id, &config.writer_properties);
+        let compression = config
+            .writer_properties_factory
+            .compression(&parquet::schema::types::ColumnPath::new(Vec::new()));
+        let first_path = next_data_path(&config.prefix, 0, &writer_id, compression);
         let writer = Self::create_writer(object_store.clone(), first_path.clone(), &config)?;
 
         Ok(Self {
@@ -437,12 +439,15 @@ impl PartitionWriter {
 
     fn next_data_path(&mut self) -> Path {
         self.part_counter += 1;
-
+        let compression = self
+            .config
+            .writer_properties_factory
+            .compression(&parquet::schema::types::ColumnPath::new(Vec::new()));
         next_data_path(
             &self.config.prefix,
             self.part_counter,
             &self.writer_id,
-            &self.config.writer_properties,
+            compression,
         )
     }
 
@@ -547,6 +552,13 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
     use std::sync::Arc;
 
+    fn props_factory(writer_properties: Option<WriterProperties>) -> Option<WriterPropertiesFactoryRef> {
+        use crate::table::file_format_options::SimpleWriterPropertiesFactory;
+        writer_properties.map(|wp| {
+            std::sync::Arc::new(SimpleWriterPropertiesFactory::new(wp)) as WriterPropertiesFactoryRef
+        })
+    }
+
     fn get_delta_writer(
         object_store: ObjectStoreRef,
         batch: &RecordBatch,
@@ -557,7 +569,7 @@ mod tests {
         let config = WriterConfig::new(
             batch.schema(),
             vec![],
-            writer_properties,
+            props_factory(writer_properties),
             target_file_size,
             write_batch_size,
             DataSkippingNumIndexedCols::NumColumns(DEFAULT_NUM_INDEX_COLS),
@@ -576,7 +588,7 @@ mod tests {
         let config = PartitionWriterConfig::try_new(
             batch.schema(),
             IndexMap::new(),
-            writer_properties,
+            props_factory(writer_properties),
             target_file_size,
             write_batch_size,
             None,

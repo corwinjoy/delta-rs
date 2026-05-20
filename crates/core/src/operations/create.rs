@@ -19,7 +19,7 @@ use crate::kernel::{
 };
 use crate::logstore::LogStoreRef;
 use crate::protocol::{DeltaOperation, SaveMode};
-use crate::table::builder::ensure_table_uri;
+use crate::table::builder::{DeltaTableConfig, ensure_table_uri};
 use crate::table::config::TableProperty;
 use crate::table::normalize_table_url;
 use crate::{DeltaTable, DeltaTableBuilder};
@@ -67,6 +67,8 @@ pub struct CreateBuilder {
     commit_properties: CommitProperties,
     raise_if_key_not_exists: bool,
     custom_execute_handler: Option<Arc<dyn CustomExecuteHandler>>,
+    /// Table-level config (carries file_format_options for encryption, etc.)
+    table_config: DeltaTableConfig,
 }
 
 impl super::Operation for CreateBuilder {
@@ -103,7 +105,14 @@ impl CreateBuilder {
             commit_properties: CommitProperties::default(),
             raise_if_key_not_exists: true,
             custom_execute_handler: None,
+            table_config: DeltaTableConfig::default(),
         }
+    }
+
+    /// Set the table-level config (carries [`FileFormatOptions`](crate::table::file_format_options::FileFormatOptions) for encryption, etc.)
+    pub fn with_table_config(mut self, config: DeltaTableConfig) -> Self {
+        self.table_config = config;
+        self
     }
 
     /// Specify the table name. Optionally qualified with
@@ -263,7 +272,7 @@ impl CreateBuilder {
         let (storage_url, table) = if let Some(log_store) = self.log_store {
             (
                 normalize_table_url(log_store.root_url()),
-                DeltaTable::new(log_store, Default::default()),
+                DeltaTable::new(log_store, self.table_config.clone()),
             )
         } else {
             let storage_url =
@@ -272,6 +281,7 @@ impl CreateBuilder {
                 storage_url.clone(),
                 DeltaTableBuilder::from_url(storage_url)?
                     .with_storage_options(self.storage_options.clone().unwrap_or_default())
+                    .with_table_config(self.table_config.clone())
                     .build()?,
             )
         };

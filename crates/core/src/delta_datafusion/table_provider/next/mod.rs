@@ -405,6 +405,14 @@ impl TableProvider for DeltaScan {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        // Register encryption factory (and any other runtime state) in the session so the
+        // parquet reader can decrypt file footers and pages.
+        if let SnapshotWrapper::EagerSnapshot(eager) = &self.snapshot {
+            if let Some(ffo) = &eager.load_config().file_format_options {
+                ffo.update_session(session)?;
+            }
+        }
+
         let engine = DataFusionEngine::new_from_session(session);
 
         // Filter out file_id column from projection if present

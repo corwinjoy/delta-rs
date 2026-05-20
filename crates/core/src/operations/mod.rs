@@ -117,7 +117,9 @@ impl DeltaTable {
 
     #[must_use]
     pub fn create(&self) -> CreateBuilder {
-        CreateBuilder::default().with_log_store(self.log_store())
+        CreateBuilder::default()
+            .with_log_store(self.log_store())
+            .with_table_config(self.config.clone())
     }
 
     #[must_use]
@@ -198,6 +200,7 @@ impl DeltaTable {
     #[must_use]
     pub fn write(self, batches: impl IntoIterator<Item = RecordBatch>) -> WriteBuilder {
         WriteBuilder::new(self.log_store(), self.state.clone().map(|s| s.snapshot))
+            .with_table_config(self.config.clone())
             .with_input_batches(batches)
     }
 
@@ -205,18 +208,21 @@ impl DeltaTable {
     #[must_use]
     pub fn optimize<'a>(self) -> OptimizeBuilder<'a> {
         OptimizeBuilder::new(self.log_store(), self.state.clone().map(|s| s.snapshot))
+            .with_table_config(self.config.clone())
     }
 
     /// Delete data from Delta table
     #[must_use]
     pub fn delete(self) -> DeleteBuilder {
         DeleteBuilder::new(self.log_store(), self.state.clone().map(|s| s.snapshot))
+            .with_table_config(self.config.clone())
     }
 
     /// Update data from Delta table
     #[must_use]
     pub fn update(self) -> UpdateBuilder {
         UpdateBuilder::new(self.log_store(), self.state.clone().map(|s| s.snapshot))
+            .with_table_config(self.config.clone())
     }
 
     /// Update data from Delta table
@@ -232,6 +238,7 @@ impl DeltaTable {
             predicate.into(),
             source,
         )
+        .with_table_config(self.config.clone())
     }
 
     /// Add a check constraint to a table
@@ -376,7 +383,9 @@ impl DeltaOps {
     #[must_use]
     #[deprecated(note = "Use [`DeltaTable::create`] instead")]
     pub fn create(self) -> CreateBuilder {
-        CreateBuilder::default().with_log_store(self.0.log_store)
+        CreateBuilder::default()
+            .with_log_store(self.0.log_store)
+            .with_table_config(self.0.config.clone())
     }
 
     /// Generate a symlink_format_manifest for other engines
@@ -407,6 +416,7 @@ impl DeltaOps {
     #[deprecated(note = "Use [`DeltaTable::write`] instead")]
     pub fn write(self, batches: impl IntoIterator<Item = RecordBatch>) -> WriteBuilder {
         WriteBuilder::new(self.0.log_store, self.0.state.map(|s| s.snapshot))
+            .with_table_config(self.0.config.clone())
             .with_input_batches(batches)
     }
 
@@ -430,6 +440,7 @@ impl DeltaOps {
     #[deprecated(note = "Use [`DeltaTable::optimize`] instead")]
     pub fn optimize<'a>(self) -> OptimizeBuilder<'a> {
         OptimizeBuilder::new(self.0.log_store, self.0.state.map(|s| s.snapshot))
+            .with_table_config(self.0.config.clone())
     }
 
     /// Delete data from Delta table
@@ -438,6 +449,7 @@ impl DeltaOps {
     #[deprecated(note = "Use [`DeltaTable::delete`] instead")]
     pub fn delete(self) -> DeleteBuilder {
         DeleteBuilder::new(self.0.log_store, self.0.state.map(|s| s.snapshot))
+            .with_table_config(self.0.config.clone())
     }
 
     /// Update data from Delta table
@@ -446,6 +458,7 @@ impl DeltaOps {
     #[deprecated(note = "Use [`DeltaTable::update`] instead")]
     pub fn update(self) -> UpdateBuilder {
         UpdateBuilder::new(self.0.log_store, self.0.state.map(|s| s.snapshot))
+            .with_table_config(self.0.config.clone())
     }
 
     /// Restore delta table to a specified version or datetime
@@ -470,6 +483,7 @@ impl DeltaOps {
             predicate.into(),
             source,
         )
+        .with_table_config(self.0.config.clone())
     }
 
     /// Add a check constraint to a table

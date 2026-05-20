@@ -15,6 +15,7 @@ use super::normalize_table_url;
 use crate::kernel::Version;
 use crate::logstore::storage::IORuntime;
 use crate::logstore::{LogStoreRef, StorageConfig, object_store_factories};
+use crate::table::file_format_options::FileFormatRef;
 use crate::{DeltaResult, DeltaTable, DeltaTableError};
 
 /// possible version specifications for loading a delta table
@@ -57,6 +58,12 @@ pub struct DeltaTableConfig {
     #[delta(skip)]
     /// When a runtime handler is provided, all IO tasks are spawn in that handle
     pub io_runtime: Option<IORuntime>,
+
+    #[serde(skip_serializing, skip_deserializing)]
+    #[delta(skip)]
+    /// Options controlling how individual Parquet files are read and written.
+    /// Used to plug in encryption, custom compression, or KMS-based key management.
+    pub file_format_options: Option<FileFormatRef>,
 }
 
 impl Default for DeltaTableConfig {
@@ -66,6 +73,7 @@ impl Default for DeltaTableConfig {
             log_buffer_size: num_cpus::get() * 4,
             log_batch_size: 1024,
             io_runtime: None,
+            file_format_options: None,
         }
     }
 }
@@ -221,6 +229,18 @@ impl DeltaTableBuilder {
     /// Provide a custom runtime handle or runtime config
     pub fn with_io_runtime(mut self, io_runtime: IORuntime) -> Self {
         self.table_config.io_runtime = Some(io_runtime);
+        self
+    }
+
+    /// Replace the entire table configuration.
+    pub fn with_table_config(mut self, table_config: DeltaTableConfig) -> Self {
+        self.table_config = table_config;
+        self
+    }
+
+    /// Set per-file format options (e.g. encryption, custom compression, KMS key management).
+    pub fn with_file_format_options(mut self, file_format_options: FileFormatRef) -> Self {
+        self.table_config.file_format_options = Some(file_format_options);
         self
     }
 

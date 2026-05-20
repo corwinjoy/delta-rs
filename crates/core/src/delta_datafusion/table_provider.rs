@@ -180,12 +180,19 @@ impl DeltaScanConfigBuilder {
             None
         };
 
+        let table_parquet_options = snapshot
+            .load_config()
+            .file_format_options
+            .as_ref()
+            .map(|ffo| ffo.table_options().parquet);
+
         Ok(DeltaScanConfig {
             file_column_name,
             wrap_partition_values: self.wrap_partition_values.unwrap_or(true),
             enable_parquet_pushdown: self.enable_parquet_pushdown,
             schema: self.schema.clone(),
             schema_force_view_types: true,
+            table_parquet_options,
         })
     }
 }
@@ -204,6 +211,10 @@ pub struct DeltaScanConfig {
     pub schema_force_view_types: bool,
     /// Schema to read as
     pub schema: Option<SchemaRef>,
+    /// Parquet scan options derived from the table's [`FileFormatOptions`].
+    /// When `Some`, these are applied to the parquet source (enabling encrypted reads).
+    #[serde(skip)]
+    pub table_parquet_options: Option<TableParquetOptions>,
 }
 
 impl Default for DeltaScanConfig {
@@ -221,6 +232,7 @@ impl DeltaScanConfig {
             enable_parquet_pushdown: true,
             schema_force_view_types: true,
             schema: None,
+            table_parquet_options: None,
         }
     }
 
@@ -232,6 +244,7 @@ impl DeltaScanConfig {
             enable_parquet_pushdown: config_options.execution.parquet.pushdown_filters,
             schema_force_view_types: config_options.execution.parquet.schema_force_view_types,
             schema: None,
+            table_parquet_options: None,
         }
     }
 
@@ -518,17 +531,24 @@ impl<'a> DeltaScanBuilder<'a> {
             ));
         }
 
-        let parquet_options = TableParquetOptions {
-            global: self.session.config().options().execution.parquet.clone(),
-            ..Default::default()
-        };
+        let parquet_options = config
+            .table_parquet_options
+            .clone()
+            .unwrap_or_else(|| self.session.table_options().parquet.clone());
 
         let partition_fields: Vec<Arc<Field>> =
             table_partition_cols.into_iter().map(Arc::new).collect();
         let table_schema = TableSchema::new(file_schema, partition_fields);
 
         let mut file_source =
-            ParquetSource::new(table_schema).with_table_parquet_options(parquet_options);
+            ParquetSource::new(table_schema).with_table_parquet_options(parquet_options.clone());
+
+        // Set encryption factory if configured via file_format_options.
+        if let Some(factory_id) = &parquet_options.crypto.factory_id {
+            let encryption_factory =
+                self.session.runtime_env().parquet_encryption_factory(factory_id)?;
+            file_source = file_source.with_encryption_factory(encryption_factory);
+        }
 
         // Sometimes (i.e Merge) we want to prune files that don't make the
         // filter and read the entire contents for files that do match the
@@ -708,6 +728,8 @@ impl TableProviderBuilder {
             config = config.with_file_column_name(file_column);
         }
 
+        // table_parquet_options is set after the snapshot is resolved below.
+
         let snapshot = match snapshot {
             Some(wrapper) => wrapper,
             None => {
@@ -739,6 +761,15 @@ impl TableProviderBuilder {
                     "Provided snapshot root ({snapshot_root_redacted}) does not match provided log store root ({log_store_root_redacted})"
                 )));
             }
+        }
+
+        // Propagate encryption / file-format options from an EagerSnapshot into the scan config.
+        if let next::SnapshotWrapper::EagerSnapshot(eager) = &snapshot {
+            config.table_parquet_options = eager
+                .load_config()
+                .file_format_options
+                .as_ref()
+                .map(|ffo| ffo.table_options().parquet);
         }
 
         let mut provider = next::DeltaScan::new(snapshot, config)?;

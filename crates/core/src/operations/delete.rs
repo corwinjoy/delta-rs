@@ -61,6 +61,8 @@ use crate::delta_datafusion::DeltaSessionExt;
 use crate::delta_datafusion::SessionFallbackPolicy;
 use crate::delta_datafusion::SessionResolveContext;
 use crate::delta_datafusion::expr::fmt_expr_to_sql;
+use crate::table::builder::DeltaTableConfig;
+use crate::table::file_format_options::apply_file_format_to_state;
 use crate::delta_datafusion::logical::{
     LogicalPlanBuilderExt as _, LogicalPlanExt, MetricObserver,
 };
@@ -101,6 +103,8 @@ pub struct DeleteBuilder {
     /// Commit properties and configuration
     commit_properties: CommitProperties,
     custom_execute_handler: Option<Arc<dyn CustomExecuteHandler>>,
+    /// Table-level config (carries file_format_options for encryption, etc.)
+    table_config: DeltaTableConfig,
 }
 
 impl std::fmt::Debug for DeleteBuilder {
@@ -154,7 +158,14 @@ impl DeleteBuilder {
             commit_properties: CommitProperties::default(),
             writer_properties: None,
             custom_execute_handler: None,
+            table_config: DeltaTableConfig::default(),
         }
+    }
+
+    /// Set the table-level config (carries [`FileFormatOptions`](crate::table::file_format_options::FileFormatOptions) for encryption, etc.)
+    pub fn with_table_config(mut self, config: DeltaTableConfig) -> Self {
+        self.table_config = config;
+        self
     }
 
     /// A predicate that determines if a record is deleted
@@ -232,6 +243,7 @@ impl std::future::IntoFuture for DeleteBuilder {
             )?;
             update_datafusion_session(&session, &this.log_store, Some(operation_id))?;
             session.ensure_log_store_registered(this.log_store.as_ref())?;
+            let session = apply_file_format_to_state(session, this.table_config.file_format_options.as_ref())?;
 
             let predicate = this
                 .predicate

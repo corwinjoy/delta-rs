@@ -96,7 +96,9 @@ use crate::operations::write::generated_columns::{
     add_generated_columns, add_missing_generated_columns, gc_is_enabled,
 };
 use crate::protocol::{DeltaOperation, MergePredicate};
+use crate::table::builder::DeltaTableConfig;
 use crate::table::config::TablePropertiesExt as _;
+use crate::table::file_format_options::apply_file_format_to_state;
 use crate::table::state::DeltaTableState;
 use crate::{DeltaResult, DeltaTable, DeltaTableError};
 
@@ -164,6 +166,8 @@ pub struct MergeBuilder {
     /// By default an error is returned
     safe_cast: bool,
     custom_execute_handler: Option<Arc<dyn CustomExecuteHandler>>,
+    /// Table-level config (carries file_format_options for encryption, etc.)
+    table_config: DeltaTableConfig,
 }
 
 impl super::Operation for MergeBuilder {
@@ -202,7 +206,14 @@ impl MergeBuilder {
             safe_cast: false,
             streaming: false,
             custom_execute_handler: None,
+            table_config: DeltaTableConfig::default(),
         }
+    }
+
+    /// Set the table-level config (carries [`FileFormatOptions`](crate::table::file_format_options::FileFormatOptions) for encryption, etc.)
+    pub fn with_table_config(mut self, config: DeltaTableConfig) -> Self {
+        self.table_config = config;
+        self
     }
 
     /// Update a target record when it matches with a source record
@@ -1687,6 +1698,7 @@ impl std::future::IntoFuture for MergeBuilder {
             )?;
 
             update_datafusion_session(&state, this.log_store.as_ref(), Some(operation_id))?;
+            let state = apply_file_format_to_state(state, this.table_config.file_format_options.as_ref())?;
 
             let (snapshot, metrics) = execute(
                 this.predicate,

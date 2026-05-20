@@ -50,6 +50,8 @@ use crate::delta_datafusion::{
     DeltaScanConfig, Expression, scan_files_where_matches, update_datafusion_session,
 };
 use crate::kernel::resolve_snapshot;
+use crate::table::builder::DeltaTableConfig;
+use crate::table::file_format_options::apply_file_format_to_state;
 use crate::logstore::LogStoreRef;
 use crate::operations::cdc::*;
 use crate::protocol::DeltaOperation;
@@ -102,6 +104,8 @@ pub struct UpdateBuilder {
     /// By default an error is returned
     safe_cast: bool,
     custom_execute_handler: Option<Arc<dyn CustomExecuteHandler>>,
+    /// Table-level config (carries file_format_options for encryption, etc.)
+    table_config: DeltaTableConfig,
 }
 
 #[derive(Default, Serialize, Debug)]
@@ -144,7 +148,14 @@ impl UpdateBuilder {
             commit_properties: CommitProperties::default(),
             safe_cast: false,
             custom_execute_handler: None,
+            table_config: DeltaTableConfig::default(),
         }
+    }
+
+    /// Set the table-level config (carries [`FileFormatOptions`](crate::table::file_format_options::FileFormatOptions) for encryption, etc.)
+    pub fn with_table_config(mut self, config: DeltaTableConfig) -> Self {
+        self.table_config = config;
+        self
     }
 
     /// Which records to update
@@ -462,6 +473,7 @@ impl std::future::IntoFuture for UpdateBuilder {
             )?;
             update_datafusion_session(&state, &this.log_store, Some(operation_id))?;
             state.ensure_log_store_registered(this.log_store.as_ref())?;
+            let state = apply_file_format_to_state(state, this.table_config.file_format_options.as_ref())?;
 
             if this.updates.is_empty() {
                 return Ok((

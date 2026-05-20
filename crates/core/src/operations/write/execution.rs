@@ -26,6 +26,9 @@ use uuid::Uuid;
 
 use super::writer::{DeltaWriter, WriterConfig};
 use crate::DeltaTableError;
+use crate::table::file_format_options::{
+    SimpleWriterPropertiesFactory, WriterPropertiesFactoryRef, factory_from_session,
+};
 use crate::delta_datafusion::{
     DataFusionMixins, DataValidationExec, DeltaScanConfigBuilder, DeltaTableProvider, find_files,
     generated_columns_to_exprs,
@@ -563,12 +566,6 @@ pub(crate) async fn write_exec_plan(
     target_file_size: Option<NonZeroU64>,
     write_as_cdc: bool,
 ) -> DeltaResult<(Vec<Action>, WriteExecutionPlanMetrics)> {
-    let writer_properties = session
-        .config_options()
-        .execution
-        .parquet
-        .into_writer_properties_builder()?
-        .build();
     let stats_config = WriterStatsConfig::from_config(table_config);
     let object_store = log_store.object_store(operation_id);
     let partition_columns = table_config.metadata().partition_columns().clone();
@@ -581,7 +578,7 @@ pub(crate) async fn write_exec_plan(
             object_store,
             target_file_size,
             None,
-            Some(writer_properties),
+            None, // factory resolved inside write_cdc_plan from session extension
             stats_config,
         )
         .await
@@ -593,7 +590,7 @@ pub(crate) async fn write_exec_plan(
             object_store,
             target_file_size,
             None,
-            Some(writer_properties),
+            None, // factory resolved inside write_data_plan from session extension
             stats_config,
         )
         .await
@@ -768,6 +765,32 @@ fn repartition_by_partition_columns(
     )?))
 }
 
+fn resolve_writer_factory(
+    session: &dyn Session,
+    writer_properties: Option<WriterProperties>,
+) -> DeltaResult<Option<WriterPropertiesFactoryRef>> {
+    if let Some(wp) = writer_properties {
+        // Caller explicitly set properties — wrap in simple static factory.
+        return Ok(Some(
+            std::sync::Arc::new(SimpleWriterPropertiesFactory::new(wp)) as WriterPropertiesFactoryRef,
+        ));
+    }
+    // Check if file_format_options registered a factory via apply_file_format_to_state.
+    if let Some(factory) = factory_from_session(session) {
+        return Ok(Some(factory));
+    }
+    // Fall back to deriving from session's parquet config (existing behavior).
+    let wp = session
+        .config_options()
+        .execution
+        .parquet
+        .into_writer_properties_builder()?
+        .build();
+    Ok(Some(
+        std::sync::Arc::new(SimpleWriterPropertiesFactory::new(wp)) as WriterPropertiesFactoryRef,
+    ))
+}
+
 async fn write_data_plan(
     session: &dyn Session,
     plan: Arc<dyn ExecutionPlan>,
@@ -778,10 +801,11 @@ async fn write_data_plan(
     writer_properties: Option<WriterProperties>,
     writer_stats_config: WriterStatsConfig,
 ) -> DeltaResult<(Vec<Action>, WriteExecutionPlanMetrics)> {
+    let factory = resolve_writer_factory(session, writer_properties)?;
     let config = WriterConfig::new(
         plan.schema().clone(),
         partition_columns.clone(),
-        writer_properties.clone(),
+        factory,
         target_file_size,
         write_batch_size,
         writer_stats_config.num_indexed_cols,
@@ -870,6 +894,7 @@ async fn write_cdc_plan(
     writer_properties: Option<WriterProperties>,
     writer_stats_config: WriterStatsConfig,
 ) -> DeltaResult<(Vec<Action>, WriteExecutionPlanMetrics)> {
+    let factory = resolve_writer_factory(session, writer_properties)?;
     let cdf_store = Arc::new(PrefixStore::new(object_store.clone(), "_change_data"));
 
     let write_schema = Arc::new(Schema::new(
@@ -891,7 +916,7 @@ async fn write_cdc_plan(
     let normal_config = WriterConfig::new(
         write_schema.clone(),
         partition_columns.clone(),
-        writer_properties.clone(),
+        factory.clone(),
         target_file_size,
         write_batch_size,
         writer_stats_config.num_indexed_cols,
@@ -901,7 +926,7 @@ async fn write_cdc_plan(
     let cdf_config = WriterConfig::new(
         cdf_schema.clone(),
         partition_columns.clone(),
-        writer_properties.clone(),
+        factory,
         target_file_size,
         write_batch_size,
         writer_stats_config.num_indexed_cols,
