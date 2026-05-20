@@ -484,10 +484,11 @@ impl std::future::IntoFuture for WriteBuilder {
 
                 update_datafusion_session(&session, &this.log_store, Some(operation_id))?;
                 session.ensure_log_store_registered(this.log_store.as_ref())?;
-                let session = apply_file_format_to_state(
-                    session,
-                    snapshot.load_config().file_format_options.as_ref(),
-                )?;
+                let ffo = this
+                    .snapshot
+                    .as_ref()
+                    .and_then(|s| s.load_config().file_format_options.clone());
+                let session = apply_file_format_to_state(session, ffo.as_ref())?;
 
                 let mut schema_drift = false;
 
