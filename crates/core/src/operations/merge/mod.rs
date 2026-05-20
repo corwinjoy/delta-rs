@@ -1698,7 +1698,8 @@ impl std::future::IntoFuture for MergeBuilder {
             )?;
 
             update_datafusion_session(&state, this.log_store.as_ref(), Some(operation_id))?;
-            let state = apply_file_format_to_state(state, this.table_config.file_format_options.as_ref())?;
+            let state =
+                apply_file_format_to_state(state, this.table_config.file_format_options.as_ref())?;
 
             let (snapshot, metrics) = execute(
                 this.predicate,

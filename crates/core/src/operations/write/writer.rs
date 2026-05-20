@@ -552,10 +552,13 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
     use std::sync::Arc;
 
-    fn props_factory(writer_properties: Option<WriterProperties>) -> Option<WriterPropertiesFactoryRef> {
+    fn props_factory(
+        writer_properties: Option<WriterProperties>,
+    ) -> Option<WriterPropertiesFactoryRef> {
         use crate::table::file_format_options::SimpleWriterPropertiesFactory;
         writer_properties.map(|wp| {
-            std::sync::Arc::new(SimpleWriterPropertiesFactory::new(wp)) as WriterPropertiesFactoryRef
+            std::sync::Arc::new(SimpleWriterPropertiesFactory::new(wp))
+                as WriterPropertiesFactoryRef
         })
     }
 

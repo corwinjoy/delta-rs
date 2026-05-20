@@ -50,8 +50,8 @@ use uuid::Uuid;
 use super::write::writer::{PartitionWriter, PartitionWriterConfig};
 use super::{CustomExecuteHandler, Operation};
 use crate::delta_datafusion::{
-    SessionFallbackPolicy, SessionResolveContext,
-    create_session_state_with_spill_config, resolve_session_state,
+    SessionFallbackPolicy, SessionResolveContext, create_session_state_with_spill_config,
+    resolve_session_state,
 };
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::kernel::transaction::{CommitBuilder, CommitProperties, DEFAULT_RETRIES, PROTOCOL};
@@ -373,7 +373,10 @@ impl<'a> std::future::IntoFuture for OptimizeBuilder<'a> {
                     cdc: false,
                 },
             )?;
-            let session = apply_file_format_to_state(session, this.table_config.file_format_options.as_ref())?;
+            let session = apply_file_format_to_state(
+                session,
+                this.table_config.file_format_options.as_ref(),
+            )?;
             let plan = create_merge_plan(
                 &this.log_store,
                 this.optimize_type,
@@ -756,9 +759,11 @@ impl MergePlan {
                                         let object_store_ref = object_store_ref.clone();
                                         let meta = ObjectMeta::try_from(file).unwrap();
                                         async move {
-                                            let file_reader =
-                                                ParquetObjectReader::new(object_store_ref, meta.location)
-                                                    .with_file_size(meta.size);
+                                            let file_reader = ParquetObjectReader::new(
+                                                object_store_ref,
+                                                meta.location,
+                                            )
+                                            .with_file_size(meta.size);
                                             ParquetRecordBatchStreamBuilder::new(file_reader)
                                                 .await?
                                                 .build()
@@ -791,7 +796,9 @@ impl MergePlan {
                 )?);
                 let task_parameters = self.task_parameters.clone();
 
-                use crate::delta_datafusion::{DataFusionMixins, DeltaScanConfigBuilder, DeltaScanNext, FileSelection};
+                use crate::delta_datafusion::{
+                    DataFusionMixins, DeltaScanConfigBuilder, DeltaScanNext, FileSelection,
+                };
 
                 let mut scan_config = DeltaScanConfigBuilder::default()
                     .with_file_column(false)
@@ -824,11 +831,8 @@ impl MergePlan {
                                     .expect("failed to create file selection for z-order"),
                                 ),
                         );
-                        let batch_stream = Self::read_zorder(
-                            files.clone(),
-                            exec_context.clone(),
-                            provider,
-                        );
+                        let batch_stream =
+                            Self::read_zorder(files.clone(), exec_context.clone(), provider);
                         let rewrite_result = tokio::task::spawn(Self::rewrite_files(
                             task_parameters.clone(),
                             partition,
@@ -950,15 +954,19 @@ pub async fn create_merge_plan(
     };
     // Prefer a KMS factory from the session (set by apply_file_format_to_state) if available,
     // otherwise wrap the explicit/default WriterProperties in a simple static factory.
-    let writer_properties_factory: WriterPropertiesFactoryRef =
-        factory_from_session(&session).unwrap_or_else(|| {
+    let writer_properties_factory: WriterPropertiesFactoryRef = factory_from_session(&session)
+        .unwrap_or_else(|| {
             std::sync::Arc::new(SimpleWriterPropertiesFactory::new(writer_properties))
         });
     let target_size = target_size.unwrap_or_else(|| snapshot.table_properties().target_file_size());
     let partitions_keys = snapshot.metadata().partition_columns();
 
     // Capture session copy for compact-path reads before it's potentially moved into z-order.
-    let read_session = if file_format_options.is_some() { Some(session.clone()) } else { None };
+    let read_session = if file_format_options.is_some() {
+        Some(session.clone())
+    } else {
+        None
+    };
 
     let (operations, metrics) = match optimize_type {
         OptimizeType::Compact => {
@@ -994,7 +1002,9 @@ pub async fn create_merge_plan(
         partitions_keys,
     );
 
-    let table_parquet_options = file_format_options.as_ref().map(|ffo| ffo.table_options().parquet);
+    let table_parquet_options = file_format_options
+        .as_ref()
+        .map(|ffo| ffo.table_options().parquet);
     // Store a copy of the session (with encryption factories registered) for compact reads.
     // session may have been moved into build_zorder_plan above, so we captured it earlier.
 

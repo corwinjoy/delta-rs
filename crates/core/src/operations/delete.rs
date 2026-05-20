@@ -61,8 +61,6 @@ use crate::delta_datafusion::DeltaSessionExt;
 use crate::delta_datafusion::SessionFallbackPolicy;
 use crate::delta_datafusion::SessionResolveContext;
 use crate::delta_datafusion::expr::fmt_expr_to_sql;
-use crate::table::builder::DeltaTableConfig;
-use crate::table::file_format_options::apply_file_format_to_state;
 use crate::delta_datafusion::logical::{
     LogicalPlanBuilderExt as _, LogicalPlanExt, MetricObserver,
 };
@@ -79,7 +77,9 @@ use crate::operations::CustomExecuteHandler;
 use crate::operations::cdc::CDC_COLUMN_NAME;
 use crate::operations::write::execution::write_exec_plan;
 use crate::protocol::DeltaOperation;
+use crate::table::builder::DeltaTableConfig;
 use crate::table::config::TablePropertiesExt as _;
+use crate::table::file_format_options::apply_file_format_to_state;
 use crate::table::state::DeltaTableState;
 
 const SOURCE_COUNT_ID: &str = "delete_source_count";
@@ -243,7 +243,10 @@ impl std::future::IntoFuture for DeleteBuilder {
             )?;
             update_datafusion_session(&session, &this.log_store, Some(operation_id))?;
             session.ensure_log_store_registered(this.log_store.as_ref())?;
-            let session = apply_file_format_to_state(session, this.table_config.file_format_options.as_ref())?;
+            let session = apply_file_format_to_state(
+                session,
+                this.table_config.file_format_options.as_ref(),
+            )?;
 
             let predicate = this
                 .predicate

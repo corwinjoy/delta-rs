@@ -473,11 +473,11 @@ async fn get_read_plan(
         let table_schema =
             TableSchema::new(parquet_read_schema.clone(), vec![file_id_field.clone()]);
         let full_table_schema = table_schema.table_schema().clone();
-        let encryption_configured = pq_options.crypto.factory_id.is_some()
-            || pq_options.crypto.file_decryption.is_some();
+        let encryption_configured =
+            pq_options.crypto.factory_id.is_some() || pq_options.crypto.file_decryption.is_some();
 
-        let mut file_source = ParquetSource::new(table_schema)
-            .with_table_parquet_options(pq_options.clone());
+        let mut file_source =
+            ParquetSource::new(table_schema).with_table_parquet_options(pq_options.clone());
 
         // Only attach the caching reader factory when no encryption is configured.
         // The cached reader factory does not integrate cleanly with per-file decryption key
@@ -489,8 +489,7 @@ async fn get_read_plan(
 
         // Set encryption factory if configured via file_format_options.
         if let Some(factory_id) = &pq_options.crypto.factory_id {
-            let encryption_factory =
-                state.runtime_env().parquet_encryption_factory(factory_id)?;
+            let encryption_factory = state.runtime_env().parquet_encryption_factory(factory_id)?;
             file_source = file_source.with_encryption_factory(encryption_factory);
         }
 

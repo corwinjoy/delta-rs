@@ -393,7 +393,9 @@ impl DeltaWriter<Vec<Value>> for JsonWriter {
                 &prefix,
                 0,
                 &uuid,
-                writer.writer_properties.compression(&parquet::schema::types::ColumnPath::new(Vec::new())),
+                writer
+                    .writer_properties
+                    .compression(&parquet::schema::types::ColumnPath::new(Vec::new())),
             );
             let obj_bytes = Bytes::from(writer.buffer.to_vec());
             let file_size = obj_bytes.len() as i64;

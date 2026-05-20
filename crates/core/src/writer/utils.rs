@@ -185,8 +185,13 @@ mod tests {
             "x=0/y=0/part-00001-02f09a3f-1624-3b1d-8409-44eff7708208-c000.lz4raw.parquet"
         );
         assert_eq!(
-            next_data_path(&prefix, 1, &uuid, Compression::BROTLI(BrotliLevel::default()))
-                .as_ref(),
+            next_data_path(
+                &prefix,
+                1,
+                &uuid,
+                Compression::BROTLI(BrotliLevel::default())
+            )
+            .as_ref(),
             "x=0/y=0/part-00001-02f09a3f-1624-3b1d-8409-44eff7708208-c000.br.parquet"
         );
     }

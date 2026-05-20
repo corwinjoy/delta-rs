@@ -545,8 +545,10 @@ impl<'a> DeltaScanBuilder<'a> {
 
         // Set encryption factory if configured via file_format_options.
         if let Some(factory_id) = &parquet_options.crypto.factory_id {
-            let encryption_factory =
-                self.session.runtime_env().parquet_encryption_factory(factory_id)?;
+            let encryption_factory = self
+                .session
+                .runtime_env()
+                .parquet_encryption_factory(factory_id)?;
             file_source = file_source.with_encryption_factory(encryption_factory);
         }
 

@@ -31,10 +31,12 @@ use std::sync::Arc;
 use arrow_schema::Schema as ArrowSchema;
 use async_trait::async_trait;
 use datafusion::catalog::Session;
-use datafusion::config::{ConfigEntry, ConfigExtension, EncryptionFactoryOptions, ExtensionOptions};
+use datafusion::config::{
+    ConfigEntry, ConfigExtension, EncryptionFactoryOptions, ExtensionOptions,
+};
+pub use datafusion::config::{TableOptions, TableParquetOptions};
 use datafusion::execution::parquet_encryption::EncryptionFactory;
 use datafusion::execution::{SessionState, SessionStateBuilder};
-pub use datafusion::config::{TableOptions, TableParquetOptions};
 use object_store::path::Path;
 use parquet::basic::Compression;
 use parquet::encryption::decrypt::FileDecryptionProperties;
@@ -237,9 +239,9 @@ impl SimpleFileFormatOptions {
             .file_decryption
             .clone()
             .map(|cfg| Arc::new(FileDecryptionProperties::from(cfg)));
-        let factory_id = decryption_properties.as_ref().map(|_| {
-            format!("delta-static-{}", Uuid::new_v4())
-        });
+        let factory_id = decryption_properties
+            .as_ref()
+            .map(|_| format!("delta-static-{}", Uuid::new_v4()));
         let mut opts = Self {
             table_options,
             factory_id,
@@ -272,10 +274,9 @@ impl FileFormatOptions for SimpleFileFormatOptions {
     }
 
     fn update_session(&self, session: &dyn Session) -> DeltaResult<()> {
-        if let (Some(factory_id), Some(decryption_props)) = (
-            &self.factory_id,
-            &self.decryption_properties,
-        ) {
+        if let (Some(factory_id), Some(decryption_props)) =
+            (&self.factory_id, &self.decryption_properties)
+        {
             let factory = Arc::new(StaticEncryptionFactory {
                 decryption_properties: Arc::clone(decryption_props),
             }) as Arc<dyn EncryptionFactory>;

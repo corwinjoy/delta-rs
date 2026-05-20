@@ -26,9 +26,6 @@ use uuid::Uuid;
 
 use super::writer::{DeltaWriter, WriterConfig};
 use crate::DeltaTableError;
-use crate::table::file_format_options::{
-    SimpleWriterPropertiesFactory, WriterPropertiesFactoryRef, factory_from_session,
-};
 use crate::delta_datafusion::{
     DataFusionMixins, DataValidationExec, DeltaScanConfigBuilder, DeltaTableProvider, find_files,
     generated_columns_to_exprs,
@@ -41,6 +38,9 @@ use crate::logstore::{LogStore, LogStoreRef, ObjectStoreRef};
 use crate::operations::cdc::{CDC_COLUMN_NAME, should_write_cdc};
 use crate::operations::write::WriterStatsConfig;
 use crate::table::config::TablePropertiesExt as _;
+use crate::table::file_format_options::{
+    SimpleWriterPropertiesFactory, WriterPropertiesFactoryRef, factory_from_session,
+};
 
 const DEFAULT_WRITER_BATCH_CHANNEL_SIZE: usize = 10;
 const WRITER_TASK_CLOSED_UNEXPECTEDLY_MSG: &str = "Writer task closed unexpectedly";
@@ -772,7 +772,8 @@ fn resolve_writer_factory(
     if let Some(wp) = writer_properties {
         // Caller explicitly set properties — wrap in simple static factory.
         return Ok(Some(
-            std::sync::Arc::new(SimpleWriterPropertiesFactory::new(wp)) as WriterPropertiesFactoryRef,
+            std::sync::Arc::new(SimpleWriterPropertiesFactory::new(wp))
+                as WriterPropertiesFactoryRef,
         ));
     }
     // Check if file_format_options registered a factory via apply_file_format_to_state.

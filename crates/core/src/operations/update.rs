@@ -50,11 +50,11 @@ use crate::delta_datafusion::{
     DeltaScanConfig, Expression, scan_files_where_matches, update_datafusion_session,
 };
 use crate::kernel::resolve_snapshot;
-use crate::table::builder::DeltaTableConfig;
-use crate::table::file_format_options::apply_file_format_to_state;
 use crate::logstore::LogStoreRef;
 use crate::operations::cdc::*;
 use crate::protocol::DeltaOperation;
+use crate::table::builder::DeltaTableConfig;
+use crate::table::file_format_options::apply_file_format_to_state;
 use crate::table::state::DeltaTableState;
 use crate::{DeltaResult, DeltaTable, DeltaTableError};
 use crate::{
@@ -473,7 +473,8 @@ impl std::future::IntoFuture for UpdateBuilder {
             )?;
             update_datafusion_session(&state, &this.log_store, Some(operation_id))?;
             state.ensure_log_store_registered(this.log_store.as_ref())?;
-            let state = apply_file_format_to_state(state, this.table_config.file_format_options.as_ref())?;
+            let state =
+                apply_file_format_to_state(state, this.table_config.file_format_options.as_ref())?;
 
             if this.updates.is_empty() {
                 return Ok((
