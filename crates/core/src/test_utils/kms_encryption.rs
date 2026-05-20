@@ -35,7 +35,7 @@ use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
 use parquet::schema::types::ColumnPath;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
@@ -202,14 +202,14 @@ impl FileFormatOptions for KmsFileFormatOptions {
 #[derive(Debug, Default)]
 pub struct MockKmsClient {
     encryption_keys: Mutex<HashMap<Path, Vec<u8>>>,
-    counter: AtomicU8,
+    counter: AtomicU64,
 }
 
 impl MockKmsClient {
     pub fn new() -> Self {
         Self {
             encryption_keys: Mutex::new(HashMap::new()),
-            counter: AtomicU8::new(0),
+            counter: AtomicU64::new(0),
         }
     }
 }
@@ -223,7 +223,9 @@ impl EncryptionFactory for MockKmsClient {
         file_path: &Path,
     ) -> datafusion::error::Result<Option<Arc<FileEncryptionProperties>>> {
         let file_idx = self.counter.fetch_add(1, Ordering::Relaxed);
-        let key = vec![file_idx, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut key = [0u8; 16];
+        key[..8].copy_from_slice(&file_idx.to_le_bytes());
+        let key = key.to_vec();
         let mut keys = self.encryption_keys.lock().unwrap();
         // Use just the filename as key to handle path prefix differences between write and read
         let filename = Path::from(file_path.filename().unwrap_or(file_path.as_ref()));
