@@ -60,9 +60,8 @@ impl FileFormatOptions for SimpleFileFormatOptions {
     }
 
     fn writer_properties_factory(&self) -> WriterPropertiesFactoryRef {
-        // SAFETY: unwrap is safe because build_writer_properties_factory_tpo only returns None
-        // when given None. Since we pass Some(...), it will always return Some.
-        build_writer_properties_factory_tpo(&Some(self.table_options.parquet.clone())).unwrap()
+        build_writer_properties_factory_tpo(&Some(self.table_options.parquet.clone()))
+            .expect("build_writer_properties_factory_tpo returns None only for None input")
     }
 
     // Note: SimpleFileFormatOptions doesn't need to update the session
