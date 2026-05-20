@@ -1,131 +1,151 @@
-# FileFormatOptions — Minimal Encryption Implementation
+# FileFormatOptions — Encryption Implementation: Status and Re-evaluation
 
-## Why this branch exists
+## What was actually built (this branch)
 
-PR #2 (`file-format-options-rebase`) added `FileFormatOptions` and KMS-based Parquet
-encryption to delta-rs but was rejected upstream because the diff touched ~30 files
-and ~2000 lines.  The core complaint was that threading a `WriterPropertiesFactory`
-through every operation builder (delete, update, merge, optimize, write) caused the
-change to be too large to review.
+This branch (`file-format-options-minimal`) implements per-table Parquet encryption,
+including KMS-based per-file key derivation (AAD support).
 
-This branch reimplements the same feature with a smaller, more focused diff by using
-the **DataFusion session as the carrier for the `WriterPropertiesFactory`** rather than
-threading it through every operation's builder struct and function signature.
+### Approach taken
 
----
+- New `FileFormatOptions` trait + async `WriterPropertiesFactory` in `file_format_options.rs`
+- `DeltaTableConfig.file_format_options` carries the config
+- `apply_file_format_to_state()` registers the encryption factory in DataFusion's `RuntimeEnv`
+  AND stores the writer factory as a `DeltaWriterExtension` in the session config
+- Operations read `file_format_options` from the resolved snapshot and call
+  `apply_file_format_to_state` once in their `IntoFuture`
+- Write functions retrieve the factory from the session extension
+- `json.rs` and `record_batch.rs` compute the file path before creating the writer
+  so the factory can use it for AAD key derivation
 
-## Key design insight
+### Diff vs main
 
-On `main`, all write execution functions accept `writer_properties: Option<WriterProperties>`
-(a static parquet config).  The original PR changed these to `Option<WriterPropertiesFactoryRef>`,
-propagating the change through every caller.
-
-The minimal approach instead:
-
-1. **Stores `FileFormatOptions` in `DeltaTableConfig`** — the single source of truth.
-2. **`apply_file_format_to_state(SessionState, Option<&FileFormatRef>) → SessionState`**
-   registers:
-   - The **encryption factory** in the session's `RuntimeEnv` (for reads — exactly like
-     the original PR).
-   - The **`WriterPropertiesFactory`** as a `DeltaWriterExtension` inside the session's
-     `ConfigOptions` (for writes — new to this branch).
-3. **Operation builders** (`delete`, `update`, `merge`, `optimize`, `write`) store
-   `DeltaTableConfig` via a new `with_table_config()` method and call
-   `apply_file_format_to_state` after resolving their DataFusion session — **no type
-   changes** to their existing `writer_properties: Option<WriterProperties>` fields.
-4. **`write_data_plan` / `write_exec_plan`** retrieve the factory from the session
-   extension via `factory_from_session(session)` rather than accepting it as a parameter.
-   All write function signatures are **unchanged from `main`**.
-5. **`DeltaTable` methods** (`write`, `delete`, `update`, `merge`, `optimize`) pass
-   `self.config` to each builder via `.with_table_config(self.config.clone())`.
-
----
-
-## What changed vs. the original PR
-
-| Original PR | This branch |
-|-------------|-------------|
-| `writer_properties` field type changed in 5 builder structs | **No type changes** to builder structs |
-| Factory initialized from snapshot in each `new()` | `DeltaTableConfig` passed via `with_table_config()` |
-| Factory threaded through `execute()` signatures | Factory retrieved from session extension |
-| `resolve_snapshot_with_config` added to kernel | **Not needed** — config passed alongside snapshot |
-| 5 operation builders × ~40 lines each | 5 operation builders × ~15 lines each |
-
----
-
-## Read path (how scans decrypt files)
-
-1. `DeltaScanConfigBuilder::build(snapshot)` sets `DeltaScanConfig.table_parquet_options`
-   from `snapshot.load_config().file_format_options.table_options().parquet`.  This is
-   the only place the scan config learns about encryption.
-2. `DeltaScan::scan()` (next provider) calls `ffo.update_session(session)` to register
-   the encryption factory in `RuntimeEnv`.
-3. `get_read_plan()` in `scan/mod.rs` looks up the factory via `factory_id` and calls
-   `.with_encryption_factory(factory)` on the `ParquetSource`.  The cached reader factory
-   is **bypassed when encryption is active** (it interferes with decryption).
-4. For optimize Z-order and compact reads, `DeltaScanNext` is used directly with a
-   `FileSelection` built from the Add actions, ensuring the same encryption path applies.
-
-### `SimpleFileFormatOptions` — static key encryption
-
-Static-key encryption (`SimpleFileFormatOptions`) uses a `StaticEncryptionFactory` that
-returns the same `FileDecryptionProperties` for every file.  It is registered via
-`factory_id` in the `RuntimeEnv` (the `ConfigFileDecryptionProperties` → `FileDecryptionProperties`
-round-trip in the `ParquetSource` opener is unreliable in DataFusion v52, so we bypass it).
-
----
-
-## Write path (how files are encrypted)
-
-1. `apply_file_format_to_state` stores `WriterPropertiesFactory` as a `DeltaWriterExtension`
-   in the session config.
-2. `resolve_writer_factory(session, explicit_writer_properties)` checks:
-   - Explicit user-set `WriterProperties` (from `with_writer_properties()`) → static factory
-   - Session extension factory (from `FileFormatOptions`) → may be async/KMS
-   - Default: session parquet config (existing behaviour)
-3. `WriterConfig` / `PartitionWriterConfig` / `LazyArrowWriter` use `WriterPropertiesFactory`
-   instead of `WriterProperties` so each file can get a unique key (required for KMS).
-
----
-
-## Files changed
-
-| File | What changed |
-|------|-------------|
-| `table/file_format_options.rs` | **New file** — all core abstractions |
-| `table/mod.rs` | Expose `file_format_options` module |
-| `table/builder.rs` | `DeltaTableConfig.file_format_options`, `DeltaTableBuilder::with_file_format_options`, `with_table_config` |
-| `operations/mod.rs` | Pass `self.config` to builders; update `DeltaTable` + `DeltaOps` methods |
-| `operations/create.rs` | Thread `table_config` so returned table preserves `file_format_options` |
-| `operations/delete.rs` | `table_config` field + `apply_file_format_to_state` |
-| `operations/update.rs` | `table_config` field + `apply_file_format_to_state` |
-| `operations/merge/mod.rs` | `table_config` field + `apply_file_format_to_state` |
-| `operations/optimize.rs` | `table_config`, `apply_file_format_to_state`, Z-order + compact via `DeltaScanNext` |
-| `operations/write/mod.rs` | `table_config` field + `apply_file_format_to_state` |
-| `operations/write/writer.rs` | `WriterConfig`/`PartitionWriterConfig`/`LazyArrowWriter` use factory |
-| `operations/write/execution.rs` | `resolve_writer_factory` retrieves from session |
-| `operations/write/plan.rs` | Minor struct updates |
-| `delta_datafusion/mod.rs` | Re-export `FileSelection` |
-| `delta_datafusion/table_provider.rs` | `DeltaScanConfig.table_parquet_options` + ConfigBuilder + old scan encryption |
-| `delta_datafusion/table_provider/next/mod.rs` | `update_session` call in `scan()` |
-| `delta_datafusion/table_provider/next/scan/mod.rs` | Encryption factory lookup; bypass cached reader |
-| `writer/utils.rs` | `next_data_path` takes `Compression` directly |
-| `test_utils/kms_encryption.rs` | **New file** — KMS test utilities |
-| `tests/commands_with_encryption.rs` | **New file** — integration tests |
-| `crates/deltalake/examples/basic_operations_encryption.rs` | **New file** — usage example |
-
----
-
-## How to verify
-
-```bash
-# Build
-cargo build -p deltalake-core --features datafusion
-
-# Unit + integration tests
-cargo test -p deltalake-core --features datafusion
-
-# End-to-end example (plain + KMS encryption, Z-order, compact, update, delete, merge)
-cargo run --example basic_operations_encryption \
-  --features "datafusion integration-test" -p deltalake
 ```
+26 files changed, 2180 insertions(+), 147 deletions(-)
+```
+
+Excluding tests, example, plan.md (which any approach needs):
+
+```
+~15 core files changed, ~1300 lines
+```
+
+---
+
+## Honest comparison with PR2 (`file-format-options-rebase`)
+
+PR2 had ~30 files changed, ~2000 insertions. The "minimal" branch ended up with:
+- **26 files** — saved 4 files (no `resolve_snapshot_with_config`, no `kernel/snapshot`,
+  smaller `operations/mod.rs` changes)
+- **2180 insertions** — actually MORE than PR2
+
+**We are not significantly simpler.** The savings in one area (threading factory through
+builders) were offset by additions in other areas (AAD support in `json.rs` and
+`record_batch.rs`, session extension machinery, `StaticEncryptionFactory` for DataFusion
+v52 compatibility). The session-extension pattern hides complexity from callers but adds
+hidden state — arguably harder to reason about than the explicit threading in PR2.
+
+### Where the complexity is unavoidable
+
+The fundamental complexity drivers are:
+
+1. **Async per-file key derivation** (KMS) — requires `WriterPropertiesFactory` trait.
+   This is not optional for KMS; the key is fetched remotely per file.
+
+2. **Multiple write paths** — delta-rs has at least 7 separate write paths:
+   `WriteBuilder`, `DeleteBuilder`, `UpdateBuilder`, `MergeBuilder`, `OptimizeBuilder`
+   (compact + z-order), `JsonWriter`, `RecordBatchWriter`. Any approach must touch all of them.
+
+3. **Multiple read paths** — the next provider (`DeltaScanNext`), the old provider
+   (`DeltaTableProvider`), and optimize's internal scan.
+
+4. **DataFusion version quirk** — the `ConfigFileDecryptionProperties`→`FileDecryptionProperties`
+   round-trip is broken in DataFusion v52, requiring `StaticEncryptionFactory` workaround.
+
+---
+
+## Proposed new design: split into two focused PRs
+
+The core problem is that we're conflating two different use cases in one PR:
+- **Static key encryption** (simple, synchronous)
+- **KMS dynamic encryption** (complex, async, per-file)
+
+### PR A: Static key encryption (~10 files, ~400 lines)
+
+This covers the majority of users who just want to encrypt files with a fixed key.
+
+Design:
+- Add `DeltaTableConfig.writer_properties: Option<WriterProperties>` (not a factory, just
+  static properties)
+- Operations pass `writer_properties` to `WriterConfig` the same way they already pass it
+  via `with_writer_properties()` — but now read from snapshot config automatically
+- Reads: store `file_decryption` in `DeltaScanConfig.table_parquet_options` — already exists
+  in the DataFusion parquet source and works for static keys
+- No async factory, no session extensions, no `FileFormatOptions` trait
+
+Files changed:
+- `table/builder.rs` — add field (~5 lines)
+- `delta_datafusion/table_provider.rs` — set `table_parquet_options` from snapshot (~15 lines)
+- `delta_datafusion/table_provider/next/mod.rs` — apply decryption options (~5 lines)
+- `delta_datafusion/table_provider/next/scan/mod.rs` — factory lookup for read (~10 lines)
+- `operations/delete.rs`, `update.rs`, `merge/mod.rs`, `write/mod.rs`, `optimize.rs` —
+  read `writer_properties` from snapshot, pass to `WriterConfig` (~5 lines each)
+- `operations/write/writer.rs` — minimal: `WriterConfig` keeps `WriterProperties` field,
+  `LazyArrowWriter` just uses it directly (no factory change needed)
+
+**Total: ~10 files, ~150 lines of real change**
+
+Limitation: same key used for every file — no KMS.
+
+### PR B: KMS dynamic encryption (builds on PR A)
+
+Adds the factory abstraction for per-file key derivation.
+
+Design:
+- `FileFormatOptions` trait with `writer_properties_factory()` and `update_session()`
+- `WriterPropertiesFactory` async trait
+- `WriterConfig` upgrades from `WriterProperties` to `WriterPropertiesFactoryRef`
+- Session extension carries factory
+
+This is essentially the current design, but on a smaller base because PR A
+already handled the static case. Only the KMS-specific changes land here.
+
+**Total: ~15 additional files, ~700 additional lines**
+
+### Why this split is better
+
+- PR A can ship quickly and gives 90% of users what they need
+- PR A is small enough to be reviewed in a single sitting
+- PR B is clearly motivated ("here's why we need the factory for KMS") and
+  builds obviously on PR A
+- If PR B is still rejected as too complex, PR A still ships value
+
+---
+
+## Verdict on the current branch
+
+The current approach is technically correct, well-tested, and passes all CI checks.
+The diff is unavoidably large because the feature genuinely touches many files.
+
+If upstream reviewers are willing to accept a single-PR approach, this branch is ready.
+
+If not, the recommended path is to split as described above: PR A (static keys) first,
+PR B (KMS factory) second.
+
+---
+
+## Files changed (current branch vs main)
+
+| Category | Files | What |
+|----------|-------|------|
+| New abstractions | `file_format_options.rs` | FileFormatOptions, WriterPropertiesFactory, StaticEncryptionFactory, session extension |
+| Config plumbing | `table/builder.rs`, `table/mod.rs` | DeltaTableConfig.file_format_options |
+| Write path | `write/writer.rs`, `write/execution.rs` | Factory-based WriterConfig, resolve_writer_factory |
+| Read path | `table_provider.rs`, `next/mod.rs`, `next/scan/mod.rs` | DeltaScanConfig.table_parquet_options, factory lookup |
+| Operations (×5) | `delete`, `update`, `merge`, `write/mod`, `optimize` | ~5 lines each: apply_file_format_to_state |
+| Create | `create.rs`, `mod.rs` | Preserve file_format_options in returned table |
+| Legacy writers | `json.rs`, `record_batch.rs` | Factory + path-based for AAD support |
+| Test utilities | `kms_encryption.rs`, `mod.rs` | MockKmsClient, TableEncryption, KmsFileFormatOptions |
+| Tests | `commands_with_encryption.rs` | Integration tests for all operations |
+| Example | `basic_operations_encryption.rs` | End-to-end usage example |
+| Cargo | `Cargo.toml` ×3 | parquet/datafusion encryption features |
+| Documentation | `plan.md` | This file |
