@@ -59,7 +59,6 @@ use crate::kernel::{Action, Add, PartitionsExt, Remove, Version, scalars::Scalar
 use crate::kernel::{EagerSnapshot, resolve_snapshot};
 use crate::logstore::{LogStore, LogStoreRef, ObjectStoreRef};
 use crate::protocol::DeltaOperation;
-use crate::table::builder::DeltaTableConfig;
 use crate::table::config::TablePropertiesExt as _;
 use crate::table::file_format_options::apply_file_format_to_state;
 use crate::table::state::DeltaTableState;
@@ -225,8 +224,6 @@ pub struct OptimizeBuilder<'a> {
     session_fallback_policy: SessionFallbackPolicy,
     min_commit_interval: Option<Duration>,
     custom_execute_handler: Option<Arc<dyn CustomExecuteHandler>>,
-    /// Table-level config (carries file_format_options for encryption, etc.)
-    table_config: DeltaTableConfig,
 }
 
 impl super::Operation for OptimizeBuilder<'_> {
@@ -255,14 +252,7 @@ impl<'a> OptimizeBuilder<'a> {
             session: None,
             session_fallback_policy: SessionFallbackPolicy::default(),
             custom_execute_handler: None,
-            table_config: DeltaTableConfig::default(),
         }
-    }
-
-    /// Set the table-level config (carries [`FileFormatOptions`](crate::table::file_format_options::FileFormatOptions) for encryption, etc.)
-    pub fn with_table_config(mut self, config: DeltaTableConfig) -> Self {
-        self.table_config = config;
-        self
     }
 
     /// Choose the type of optimization to perform. Defaults to [OptimizeType::Compact].
@@ -373,10 +363,8 @@ impl<'a> std::future::IntoFuture for OptimizeBuilder<'a> {
                     cdc: false,
                 },
             )?;
-            let session = apply_file_format_to_state(
-                session,
-                this.table_config.file_format_options.as_ref(),
-            )?;
+            let ffo = snapshot.load_config().file_format_options.clone();
+            let session = apply_file_format_to_state(session, ffo.as_ref())?;
             let plan = create_merge_plan(
                 &this.log_store,
                 this.optimize_type,
@@ -385,7 +373,7 @@ impl<'a> std::future::IntoFuture for OptimizeBuilder<'a> {
                 this.target_size.to_owned(),
                 writer_properties,
                 session,
-                this.table_config.file_format_options.clone(),
+                ffo,
             )
             .await?;
 

@@ -410,10 +410,15 @@ impl PartitionWriter {
         stats_columns: Option<Vec<String>>,
     ) -> DeltaResult<Self> {
         let writer_id = uuid::Uuid::new_v4();
-        let compression = config
-            .writer_properties_factory
-            .compression(&parquet::schema::types::ColumnPath::new(Vec::new()));
-        let first_path = next_data_path(&config.prefix, 0, &writer_id, compression);
+        let first_path = {
+            let compression = config
+                .writer_properties_factory
+                .compression(&parquet::schema::types::ColumnPath::new(Vec::new()));
+            let props = parquet::file::properties::WriterProperties::builder()
+                .set_compression(compression)
+                .build();
+            next_data_path(&config.prefix, 0, &writer_id, &props)
+        };
         let writer = Self::create_writer(object_store.clone(), first_path.clone(), &config)?;
 
         Ok(Self {
@@ -443,11 +448,14 @@ impl PartitionWriter {
             .config
             .writer_properties_factory
             .compression(&parquet::schema::types::ColumnPath::new(Vec::new()));
+        let props = parquet::file::properties::WriterProperties::builder()
+            .set_compression(compression)
+            .build();
         next_data_path(
             &self.config.prefix,
             self.part_counter,
             &self.writer_id,
-            compression,
+            &props,
         )
     }
 

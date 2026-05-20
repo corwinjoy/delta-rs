@@ -10,24 +10,28 @@ use arrow_schema::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef};
 use object_store::path::Path;
 use parking_lot::RwLock;
 use parquet::basic::Compression;
+use parquet::file::properties::WriterProperties;
+use parquet::schema::types::ColumnPath;
 use serde_json::Value;
 use uuid::Uuid;
 
 use crate::errors::DeltaResult;
 use crate::writer::DeltaWriterError;
 
-/// Generate the name of the file to be written.
-///
-/// - `prefix`: directory portion of the path
-/// - `part_count`: monotonically increasing counter used when a single logical partition is
-///   split into multiple physical files (starts at 0)
-/// - `compression`: codec used, embedded in the file extension to match Hadoop conventions
+/// Generate the name of the file to be written
+/// prefix: The location of the file to be written
+/// part_count: Used the indicate that single logical partition was split into multiple physical files
+///     starts at 0. Is typically used when writer splits that data due to file size constraints
 pub(crate) fn next_data_path(
     prefix: &Path,
     part_count: usize,
     writer_id: &Uuid,
-    compression: Compression,
+    writer_properties: &WriterProperties,
 ) -> Path {
+    // We can not access the default column properties but the current implementation will return
+    // the default compression when the column is not found
+    let column_path = ColumnPath::new(Vec::new());
+    let compression = writer_properties.compression(&column_path);
     fn compression_to_str(compression: &Compression) -> &str {
         match compression {
             // This is to match HADOOP's convention
@@ -44,6 +48,7 @@ pub(crate) fn next_data_path(
     }
 
     let part = format!("{part_count:0>5}");
+
     // TODO: what does c000 mean?
     let file_name = format!(
         "part-{part}-{writer_id}-c000{}.parquet",
@@ -160,38 +165,60 @@ mod tests {
         let uuid = Uuid::parse_str("02f09a3f-1624-3b1d-8409-44eff7708208").unwrap();
 
         // Validated against Spark
+        let props = WriterProperties::builder()
+            .set_compression(Compression::UNCOMPRESSED)
+            .build();
+
         assert_eq!(
-            next_data_path(&prefix, 1, &uuid, Compression::UNCOMPRESSED).as_ref(),
+            next_data_path(&prefix, 1, &uuid, &props).as_ref(),
             "x=0/y=0/part-00001-02f09a3f-1624-3b1d-8409-44eff7708208-c000.parquet"
         );
+
+        let props = WriterProperties::builder()
+            .set_compression(Compression::SNAPPY)
+            .build();
         assert_eq!(
-            next_data_path(&prefix, 1, &uuid, Compression::SNAPPY).as_ref(),
+            next_data_path(&prefix, 1, &uuid, &props).as_ref(),
             "x=0/y=0/part-00001-02f09a3f-1624-3b1d-8409-44eff7708208-c000.snappy.parquet"
         );
+
+        let props = WriterProperties::builder()
+            .set_compression(Compression::GZIP(GzipLevel::default()))
+            .build();
         assert_eq!(
-            next_data_path(&prefix, 1, &uuid, Compression::GZIP(GzipLevel::default())).as_ref(),
+            next_data_path(&prefix, 1, &uuid, &props).as_ref(),
             "x=0/y=0/part-00001-02f09a3f-1624-3b1d-8409-44eff7708208-c000.gz.parquet"
         );
+
+        let props = WriterProperties::builder()
+            .set_compression(Compression::LZ4)
+            .build();
         assert_eq!(
-            next_data_path(&prefix, 1, &uuid, Compression::LZ4).as_ref(),
+            next_data_path(&prefix, 1, &uuid, &props).as_ref(),
             "x=0/y=0/part-00001-02f09a3f-1624-3b1d-8409-44eff7708208-c000.lz4.parquet"
         );
+
+        let props = WriterProperties::builder()
+            .set_compression(Compression::ZSTD(ZstdLevel::default()))
+            .build();
         assert_eq!(
-            next_data_path(&prefix, 1, &uuid, Compression::ZSTD(ZstdLevel::default())).as_ref(),
+            next_data_path(&prefix, 1, &uuid, &props).as_ref(),
             "x=0/y=0/part-00001-02f09a3f-1624-3b1d-8409-44eff7708208-c000.zstd.parquet"
         );
+
+        let props = WriterProperties::builder()
+            .set_compression(Compression::LZ4_RAW)
+            .build();
         assert_eq!(
-            next_data_path(&prefix, 1, &uuid, Compression::LZ4_RAW).as_ref(),
+            next_data_path(&prefix, 1, &uuid, &props).as_ref(),
             "x=0/y=0/part-00001-02f09a3f-1624-3b1d-8409-44eff7708208-c000.lz4raw.parquet"
         );
+
+        let props = WriterProperties::builder()
+            .set_compression(Compression::BROTLI(BrotliLevel::default()))
+            .build();
         assert_eq!(
-            next_data_path(
-                &prefix,
-                1,
-                &uuid,
-                Compression::BROTLI(BrotliLevel::default())
-            )
-            .as_ref(),
+            next_data_path(&prefix, 1, &uuid, &props).as_ref(),
             "x=0/y=0/part-00001-02f09a3f-1624-3b1d-8409-44eff7708208-c000.br.parquet"
         );
     }
