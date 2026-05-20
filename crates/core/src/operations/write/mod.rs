@@ -218,7 +218,6 @@ impl WriteBuilder {
         }
     }
 
-
     /// Specify the behavior when a table exists at location
     pub fn with_save_mode(mut self, save_mode: SaveMode) -> Self {
         self.mode = save_mode;

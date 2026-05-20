@@ -158,7 +158,6 @@ impl DeleteBuilder {
         }
     }
 
-
     /// A predicate that determines if a record is deleted
     pub fn with_predicate<E: Into<Expression>>(mut self, predicate: E) -> Self {
         self.predicate = Some(predicate.into());

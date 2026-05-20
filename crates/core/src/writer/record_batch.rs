@@ -19,9 +19,7 @@ use delta_kernel::table_properties::DataSkippingNumIndexedCols;
 use indexmap::IndexMap;
 use object_store::{ObjectStore, path::Path};
 use parquet::{arrow::ArrowWriter, errors::ParquetError};
-use parquet::{
-    basic::Compression, file::properties::WriterProperties, schema::types::ColumnPath,
-};
+use parquet::{basic::Compression, file::properties::WriterProperties, schema::types::ColumnPath};
 use tracing::log::*;
 use uuid::Uuid;
 
@@ -220,8 +218,10 @@ impl RecordBatchWriter {
                     .set_compression(compression)
                     .build();
                 let path = next_data_path(&prefix, 0, &uuid, &dummy_props);
-                let arrow_schema =
-                    arrow_schema_without_partitions(&self.arrow_schema_ref, &self.partition_columns);
+                let arrow_schema = arrow_schema_without_partitions(
+                    &self.arrow_schema_ref,
+                    &self.partition_columns,
+                );
                 let writer_properties = self
                     .writer_properties_factory
                     .create_writer_properties(&path, &arrow_schema)

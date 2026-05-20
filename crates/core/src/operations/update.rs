@@ -148,7 +148,6 @@ impl UpdateBuilder {
         }
     }
 
-
     /// Which records to update
     pub fn with_predicate<E: Into<Expression>>(mut self, predicate: E) -> Self {
         self.predicate = Some(predicate.into());
@@ -464,8 +463,10 @@ impl std::future::IntoFuture for UpdateBuilder {
             )?;
             update_datafusion_session(&state, &this.log_store, Some(operation_id))?;
             state.ensure_log_store_registered(this.log_store.as_ref())?;
-            let state =
-                apply_file_format_to_state(state, snapshot.load_config().file_format_options.as_ref())?;
+            let state = apply_file_format_to_state(
+                state,
+                snapshot.load_config().file_format_options.as_ref(),
+            )?;
 
             if this.updates.is_empty() {
                 return Ok((

@@ -206,7 +206,6 @@ impl MergeBuilder {
         }
     }
 
-
     /// Update a target record when it matches with a source record
     ///
     /// The update expressions can specify both source and target columns.
@@ -1689,8 +1688,10 @@ impl std::future::IntoFuture for MergeBuilder {
             )?;
 
             update_datafusion_session(&state, this.log_store.as_ref(), Some(operation_id))?;
-            let state =
-                apply_file_format_to_state(state, snapshot.load_config().file_format_options.as_ref())?;
+            let state = apply_file_format_to_state(
+                state,
+                snapshot.load_config().file_format_options.as_ref(),
+            )?;
 
             let (snapshot, metrics) = execute(
                 this.predicate,

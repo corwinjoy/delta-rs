@@ -28,10 +28,6 @@ pub(crate) fn next_data_path(
     writer_id: &Uuid,
     writer_properties: &WriterProperties,
 ) -> Path {
-    // We can not access the default column properties but the current implementation will return
-    // the default compression when the column is not found
-    let column_path = ColumnPath::new(Vec::new());
-    let compression = writer_properties.compression(&column_path);
     fn compression_to_str(compression: &Compression) -> &str {
         match compression {
             // This is to match HADOOP's convention
@@ -46,6 +42,11 @@ pub(crate) fn next_data_path(
             Compression::LZ4_RAW => ".lz4raw",
         }
     }
+
+    // We can not access the default column properties but the current implementation will return
+    // the default compression when the column is not found
+    let column_path = ColumnPath::new(Vec::new());
+    let compression = writer_properties.compression(&column_path);
 
     let part = format!("{part_count:0>5}");
 
