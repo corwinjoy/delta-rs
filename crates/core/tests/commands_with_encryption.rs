@@ -19,7 +19,6 @@ use deltalake_core::operations::optimize::OptimizeType;
 use deltalake_core::operations::write::encryption::register_encryption_factory;
 use deltalake_core::test_utils::kms_encryption::MockKmsFactory;
 use deltalake_core::{DeltaResult, DeltaTable};
-use paste::paste;
 use std::sync::Arc;
 use tempfile::TempDir;
 use url::Url;
@@ -283,21 +282,18 @@ async fn test_missing_factory_returns_error() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Paste-based test matrix for the positive path
-// ---------------------------------------------------------------------------
-
-paste! {
-    #[tokio::test]
-    async fn test_matrix_create_and_read() -> DeltaResult<()> {
-        let kms_id = register_fresh_factory();
-        let dir = TempDir::new()?;
-        let uri = dir.path().to_str().unwrap();
-        create_encrypted_table(uri, "test", &kms_id).await?;
-        let batches = read_table(uri).await?;
-        assert!(!batches.is_empty(), "Table should have rows after create_and_read");
-        Ok(())
-    }
+#[tokio::test]
+async fn test_matrix_create_and_read() -> DeltaResult<()> {
+    let kms_id = register_fresh_factory();
+    let dir = TempDir::new()?;
+    let uri = dir.path().to_str().unwrap();
+    create_encrypted_table(uri, "test", &kms_id).await?;
+    let batches = read_table(uri).await?;
+    assert!(
+        !batches.is_empty(),
+        "Table should have rows after create_and_read"
+    );
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -416,11 +412,14 @@ async fn test_encrypted_columnar_plaintext_footer() -> DeltaResult<()> {
             });
 
         // Reading column data without decryption keys must FAIL for the encrypted columns.
-        let result = builder.build().and_then(|stream| {
-            futures::executor::block_on(futures::StreamExt::collect::<Vec<_>>(stream))
+        let result: parquet::errors::Result<Vec<_>> = async {
+            let stream = builder.build()?;
+            futures::StreamExt::collect::<Vec<_>>(stream)
+                .await
                 .into_iter()
-                .collect::<Result<Vec<_>, _>>()
-        });
+                .collect()
+        }
+        .await;
         assert!(
             result.is_err(),
             "Expected reading encrypted column data to fail for {:?} without keys, \

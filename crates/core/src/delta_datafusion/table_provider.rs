@@ -182,14 +182,12 @@ impl DeltaScanConfigBuilder {
 
         // Derive TableParquetOptions from delta.encryption.* table properties so the
         // parquet reader can look up the factory by factory_id in the RuntimeEnv.
-        let table_parquet_options = {
-            use crate::table::config::EncryptionExt as _;
-            snapshot
-                .table_configuration()
-                .table_properties()
-                .encryption_config()
-                .map(|enc| enc.to_table_parquet_options())
-        };
+        // Use try_from_properties so partial configs (kms.id without footer.key) are
+        // detected at scan time rather than silently producing unencrypted reads.
+        let table_parquet_options = crate::table::config::EncryptionConfig::try_from_properties(
+            snapshot.table_configuration().table_properties(),
+        )?
+        .map(|enc| enc.to_table_parquet_options());
 
         Ok(DeltaScanConfig {
             file_column_name,
@@ -717,6 +715,7 @@ impl TableProviderBuilder {
     }
 
     /// Limit scan planning to an explicit set of file identifiers.
+    #[allow(dead_code)]
     pub(crate) fn with_file_selection(mut self, file_selection: next::FileSelection) -> Self {
         self.file_selection = Some(file_selection);
         self
@@ -777,12 +776,13 @@ impl TableProviderBuilder {
 
         // Propagate encryption options from table properties into the scan config so the
         // "next" scan provider can configure the parquet reader for decryption.
+        // Use try_from_properties so partial configs (kms.id without footer.key) are
+        // detected at scan time rather than silently producing unencrypted reads.
         if let next::SnapshotWrapper::EagerSnapshot(eager) = &snapshot {
-            use crate::table::config::EncryptionExt as _;
-            if let Some(enc) = eager
-                .table_configuration()
-                .table_properties()
-                .encryption_config()
+            if let Some(enc) = crate::table::config::EncryptionConfig::try_from_properties(
+                eager.table_configuration().table_properties(),
+            )
+            .map_err(|e| DataFusionError::External(Box::new(e)))?
             {
                 config.table_parquet_options = Some(enc.to_table_parquet_options());
             }

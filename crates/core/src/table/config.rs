@@ -531,9 +531,11 @@ pub struct EncryptionConfig {
     /// If `true` the parquet footer is left unencrypted (plaintext footer mode).
     /// Defaults to `false`. Corresponds to `delta.encryption.plaintext.footer`.
     pub plaintext_footer: bool,
-    /// Per-column master key IDs: map from column name → master key identifier.
+    /// Per-column encryption: map from master key identifier → list of column names.
+    /// Stored in the natural wire format (`keyId → [col1, col2]`) so serialisation is
+    /// a direct forward pass with no inversion.
     /// Corresponds to `delta.encryption.column.keys` with format `keyId:col1,col2;keyId2:col3`.
-    pub column_keys: HashMap<String, String>,
+    pub column_keys: HashMap<String, Vec<String>>,
 }
 
 impl EncryptionConfig {
@@ -609,18 +611,21 @@ impl EncryptionConfig {
         Ok(Self::from_properties(props))
     }
 
-    /// Parse `"keyId:col1,col2;keyId2:col3"` into `{col1: keyId, col2: keyId, col3: keyId2}`.
-    fn parse_column_keys(value: Option<&str>) -> HashMap<String, String> {
-        let mut map = HashMap::new();
+    /// Parse `"keyId:col1,col2;keyId2:col3"` into `{keyId: [col1, col2], keyId2: [col3]}`.
+    fn parse_column_keys(value: Option<&str>) -> HashMap<String, Vec<String>> {
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
         let Some(value) = value else { return map };
         for segment in value.split(';') {
             let segment = segment.trim();
             if let Some((key_id, cols)) = segment.split_once(':') {
-                for col in cols.split(',') {
-                    let col = col.trim();
-                    if !col.is_empty() {
-                        map.insert(col.to_string(), key_id.trim().to_string());
-                    }
+                let key_id = key_id.trim().to_string();
+                let cols: Vec<String> = cols
+                    .split(',')
+                    .map(|c| c.trim().to_string())
+                    .filter(|c| !c.is_empty())
+                    .collect();
+                if !cols.is_empty() {
+                    map.entry(key_id).or_default().extend(cols);
                 }
             }
         }
@@ -652,20 +657,18 @@ impl EncryptionConfig {
             self.plaintext_footer.to_string(),
         );
         if !self.column_keys.is_empty() {
-            // Invert col→key_id into key_id→sorted[cols]. BTreeMap ensures the encoded
-            // string is deterministic across runs (factories may use it as a cache key).
-            let mut by_key: std::collections::BTreeMap<&str, Vec<&str>> =
-                std::collections::BTreeMap::new();
-            for (col, key_id) in &self.column_keys {
-                by_key
-                    .entry(key_id.as_str())
-                    .or_default()
-                    .push(col.as_str());
-            }
-            let encoded = by_key
+            // Serialise key_id→[cols] in sorted order so the string is deterministic
+            // across runs (factories may use it as a cache key).
+            let mut sorted_keys: Vec<(&str, &Vec<String>)> = self
+                .column_keys
+                .iter()
+                .map(|(k, v)| (k.as_str(), v))
+                .collect();
+            sorted_keys.sort_unstable_by_key(|(k, _)| *k);
+            let encoded = sorted_keys
                 .iter()
                 .map(|(key_id, cols)| {
-                    let mut sorted_cols = cols.clone();
+                    let mut sorted_cols: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
                     sorted_cols.sort_unstable();
                     format!("{}:{}", key_id, sorted_cols.join(","))
                 })

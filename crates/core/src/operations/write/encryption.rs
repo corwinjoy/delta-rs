@@ -33,7 +33,7 @@ use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
 use parquet::schema::types::ColumnPath;
 
 use crate::errors::{DeltaResult, DeltaTableError};
-use crate::table::config::{EncryptionConfig, EncryptionExt as _};
+use crate::table::config::EncryptionConfig;
 use crate::writer::writer_factory::DefaultWriterPropertiesFactory;
 
 use delta_kernel::table_configuration::TableConfiguration;
