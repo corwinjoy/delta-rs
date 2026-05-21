@@ -29,12 +29,12 @@ use crate::DeltaTable;
 use crate::errors::DeltaTableError;
 use crate::kernel::{Add, PartitionsExt, scalars::ScalarExt};
 use crate::logstore::ObjectStoreRetryExt;
-use crate::operations::write::encryption::{
-    WriterEncryptionConfig, WriterPropertiesFactoryRef, default_writer_properties_factory,
-};
 use crate::table::builder::DeltaTableBuilder;
-use crate::table::config::{EncryptionExt as _, TablePropertiesExt as _};
+use crate::table::config::TablePropertiesExt as _;
 use crate::writer::utils::ShareableBuffer;
+use crate::writer::writer_factory::{
+    WriterPropertiesFactoryRef, default_writer_properties_factory,
+};
 
 type BadValue = (Value, ParquetError);
 
@@ -206,16 +206,22 @@ impl JsonWriter {
             .with_storage_options(storage_options.unwrap_or_default())
             .load()
             .await?;
-        // Derive factory from delta.encryption.* table properties using the global registry.
-        let enc_config = table
-            .snapshot()?
-            .snapshot()
-            .table_configuration()
-            .table_properties()
-            .encryption_config();
-        let writer_properties_factory = WriterEncryptionConfig::from_global_registry(enc_config)?
-            .factory
-            .unwrap_or_else(default_writer_properties_factory);
+        #[cfg(feature = "datafusion")]
+        let writer_properties_factory = {
+            use crate::operations::write::encryption::WriterEncryptionConfig;
+            use crate::table::config::EncryptionExt as _;
+            let enc_config = table
+                .snapshot()?
+                .snapshot()
+                .table_configuration()
+                .table_properties()
+                .encryption_config();
+            WriterEncryptionConfig::from_global_registry(enc_config)?
+                .factory
+                .unwrap_or_else(default_writer_properties_factory)
+        };
+        #[cfg(not(feature = "datafusion"))]
+        let writer_properties_factory = default_writer_properties_factory();
 
         Ok(Self {
             table,
@@ -230,15 +236,22 @@ impl JsonWriter {
     pub fn for_table(table: &DeltaTable) -> Result<JsonWriter, DeltaTableError> {
         let metadata = table.snapshot()?.metadata();
         let partition_columns = metadata.partition_columns().clone();
-        let enc_config = table
-            .snapshot()?
-            .snapshot()
-            .table_configuration()
-            .table_properties()
-            .encryption_config();
-        let writer_properties_factory = WriterEncryptionConfig::from_global_registry(enc_config)?
-            .factory
-            .unwrap_or_else(default_writer_properties_factory);
+        #[cfg(feature = "datafusion")]
+        let writer_properties_factory = {
+            use crate::operations::write::encryption::WriterEncryptionConfig;
+            use crate::table::config::EncryptionExt as _;
+            let enc_config = table
+                .snapshot()?
+                .snapshot()
+                .table_configuration()
+                .table_properties()
+                .encryption_config();
+            WriterEncryptionConfig::from_global_registry(enc_config)?
+                .factory
+                .unwrap_or_else(default_writer_properties_factory)
+        };
+        #[cfg(not(feature = "datafusion"))]
+        let writer_properties_factory = default_writer_properties_factory();
 
         Ok(Self {
             table: table.clone(),

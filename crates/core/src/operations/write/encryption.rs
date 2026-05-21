@@ -18,7 +18,6 @@
 //!    **with the actual file path** so that the factory can derive the encryption key
 //!    from the path (AAD — Additional Authenticated Data).
 
-use std::fmt::Debug;
 use std::sync::{Arc, LazyLock};
 
 use dashmap::DashMap;
@@ -35,80 +34,16 @@ use parquet::schema::types::ColumnPath;
 
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::table::config::{EncryptionConfig, EncryptionExt as _};
+use crate::writer::writer_factory::DefaultWriterPropertiesFactory;
 
 use delta_kernel::table_configuration::TableConfiguration;
 
-// ---------------------------------------------------------------------------
-// WriterPropertiesFactory — async, path-aware factory
-// ---------------------------------------------------------------------------
-
-/// Async factory for creating per-file [`WriterProperties`].
-///
-/// The async signature allows implementations to fetch per-file encryption keys from a
-/// remote KMS based on the file path (required for AAD encryption where the file path
-/// is incorporated into the key material).
-#[async_trait]
-pub trait WriterPropertiesFactory: Send + Sync + Debug + 'static {
-    /// Returns the default compression for use when computing the file name extension.
-    /// Called synchronously before any async key fetch.
-    fn compression(&self, column_path: &ColumnPath) -> Compression;
-
-    /// Create [`WriterProperties`] for the given `file_path` and `file_schema`.
-    ///
-    /// Called once per new parquet file, immediately before the `AsyncArrowWriter` is
-    /// constructed.  The `file_path` is the object-store relative path of the file to
-    /// be written; KMS implementations that use AAD must incorporate this path into key
-    /// derivation to ensure ciphertext is bound to the correct file location.
-    async fn create_writer_properties(
-        &self,
-        file_path: &Path,
-        file_schema: &Arc<ArrowSchema>,
-    ) -> DeltaResult<WriterProperties>;
-}
-
-/// Convenience type alias.
-pub type WriterPropertiesFactoryRef = Arc<dyn WriterPropertiesFactory>;
-
-// ---------------------------------------------------------------------------
-// DefaultWriterPropertiesFactory — wraps a static WriterProperties
-// ---------------------------------------------------------------------------
-
-/// A [`WriterPropertiesFactory`] that returns the same static [`WriterProperties`] for
-/// every file (no encryption, no per-file key derivation).
-#[derive(Clone, Debug)]
-pub struct DefaultWriterPropertiesFactory {
-    writer_properties: WriterProperties,
-}
-
-impl DefaultWriterPropertiesFactory {
-    pub fn new(writer_properties: WriterProperties) -> Self {
-        Self { writer_properties }
-    }
-
-    pub fn snappy() -> Self {
-        Self::new(
-            WriterProperties::builder()
-                .set_compression(Compression::SNAPPY)
-                .set_created_by(format!("delta-rs version {}", crate::crate_version()))
-                .build(),
-        )
-    }
-}
-
-#[async_trait]
-impl WriterPropertiesFactory for DefaultWriterPropertiesFactory {
-    fn compression(&self, column_path: &ColumnPath) -> Compression {
-        self.writer_properties.compression(column_path)
-    }
-
-    async fn create_writer_properties(
-        &self,
-        _file_path: &Path,
-        _file_schema: &Arc<ArrowSchema>,
-    ) -> DeltaResult<WriterProperties> {
-        Ok(self.writer_properties.clone())
-    }
-}
+// Re-export the factory types that are defined in the non-datafusion `writer_factory` module
+// so callers can keep importing them from this module.
+pub use crate::writer::writer_factory::{
+    DefaultWriterPropertiesFactory as _DefaultFactory, WriterPropertiesFactory,
+    WriterPropertiesFactoryRef, default_writer_properties_factory, factory_from_writer_properties,
+};
 
 // ---------------------------------------------------------------------------
 // KmsWriterPropertiesFactory — fetches per-file keys from a KMS via DataFusion
@@ -212,20 +147,6 @@ impl WriterEncryptionConfig {
             factory_options,
         })
     }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Build a default [`WriterPropertiesFactoryRef`] (SNAPPY, no encryption).
-pub fn default_writer_properties_factory() -> WriterPropertiesFactoryRef {
-    Arc::new(DefaultWriterPropertiesFactory::snappy())
-}
-
-/// Wrap a static [`WriterProperties`] in a factory.
-pub fn factory_from_writer_properties(wp: WriterProperties) -> WriterPropertiesFactoryRef {
-    Arc::new(DefaultWriterPropertiesFactory::new(wp))
 }
 
 // ---------------------------------------------------------------------------
