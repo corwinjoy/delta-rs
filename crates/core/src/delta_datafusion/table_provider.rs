@@ -180,12 +180,24 @@ impl DeltaScanConfigBuilder {
             None
         };
 
+        // Derive TableParquetOptions from delta.encryption.* table properties so the
+        // parquet reader can look up the factory by factory_id in the RuntimeEnv.
+        let table_parquet_options = {
+            use crate::table::config::EncryptionExt as _;
+            snapshot
+                .table_configuration()
+                .table_properties()
+                .encryption_config()
+                .map(|enc| enc.to_table_parquet_options())
+        };
+
         Ok(DeltaScanConfig {
             file_column_name,
             wrap_partition_values: self.wrap_partition_values.unwrap_or(true),
             enable_parquet_pushdown: self.enable_parquet_pushdown,
             schema: self.schema.clone(),
             schema_force_view_types: true,
+            table_parquet_options,
         })
     }
 }
@@ -204,6 +216,11 @@ pub struct DeltaScanConfig {
     pub schema_force_view_types: bool,
     /// Schema to read as
     pub schema: Option<SchemaRef>,
+    /// Parquet scan options derived from `delta.encryption.*` table properties.
+    /// When set, the scan configures the parquet reader to look up the decryption
+    /// factory by `factory_id` in the DataFusion `RuntimeEnv`.
+    #[serde(skip)]
+    pub table_parquet_options: Option<TableParquetOptions>,
 }
 
 impl Default for DeltaScanConfig {
@@ -221,6 +238,7 @@ impl DeltaScanConfig {
             enable_parquet_pushdown: true,
             schema_force_view_types: true,
             schema: None,
+            table_parquet_options: None,
         }
     }
 
@@ -232,6 +250,7 @@ impl DeltaScanConfig {
             enable_parquet_pushdown: config_options.execution.parquet.pushdown_filters,
             schema_force_view_types: config_options.execution.parquet.schema_force_view_types,
             schema: None,
+            table_parquet_options: None,
         }
     }
 
@@ -518,17 +537,31 @@ impl<'a> DeltaScanBuilder<'a> {
             ));
         }
 
-        let parquet_options = TableParquetOptions {
-            global: self.session.config().options().execution.parquet.clone(),
-            ..Default::default()
-        };
+        // Use encryption options from delta.encryption.* table properties when available;
+        // otherwise fall back to the session's parquet config.
+        let parquet_options =
+            config
+                .table_parquet_options
+                .clone()
+                .unwrap_or_else(|| TableParquetOptions {
+                    global: self.session.config().options().execution.parquet.clone(),
+                    ..Default::default()
+                });
 
         let partition_fields: Vec<Arc<Field>> =
             table_partition_cols.into_iter().map(Arc::new).collect();
         let table_schema = TableSchema::new(file_schema, partition_fields);
 
         let mut file_source =
-            ParquetSource::new(table_schema).with_table_parquet_options(parquet_options);
+            ParquetSource::new(table_schema).with_table_parquet_options(parquet_options.clone());
+
+        // Set encryption factory if configured via table properties.
+        if let Some(factory_id) = &parquet_options.crypto.factory_id {
+            use crate::operations::write::encryption::resolve_encryption_factory;
+            if let Some(encryption_factory) = resolve_encryption_factory(factory_id, self.session) {
+                file_source = file_source.with_encryption_factory(encryption_factory);
+            }
+        }
 
         // Sometimes (i.e Merge) we want to prune files that don't make the
         // filter and read the entire contents for files that do match the
@@ -738,6 +771,19 @@ impl TableProviderBuilder {
                 return Err(DataFusionError::Plan(format!(
                     "Provided snapshot root ({snapshot_root_redacted}) does not match provided log store root ({log_store_root_redacted})"
                 )));
+            }
+        }
+
+        // Propagate encryption options from table properties into the scan config so the
+        // "next" scan provider can configure the parquet reader for decryption.
+        if let next::SnapshotWrapper::EagerSnapshot(eager) = &snapshot {
+            use crate::table::config::EncryptionExt as _;
+            if let Some(enc) = eager
+                .table_configuration()
+                .table_properties()
+                .encryption_config()
+            {
+                config.table_parquet_options = Some(enc.to_table_parquet_options());
             }
         }
 
