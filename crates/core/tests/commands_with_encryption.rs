@@ -112,8 +112,8 @@ async fn read_table(uri: &str) -> DeltaResult<Vec<RecordBatch>> {
 /// would mean the operation wrote unencrypted parquet despite having encryption configured.
 async fn assert_all_parquets_encrypted(dir: &std::path::Path) {
     use object_store::{ObjectStore, local::LocalFileSystem, path::Path};
-    use parquet::arrow::async_reader::ParquetObjectReader;
     use parquet::arrow::ParquetRecordBatchStreamBuilder;
+    use parquet::arrow::async_reader::ParquetObjectReader;
 
     let mut parquet_files = vec![];
     fn find_parquet(d: &std::path::Path, result: &mut Vec<std::path::PathBuf>) {
@@ -141,8 +141,8 @@ async fn assert_all_parquets_encrypted(dir: &std::path::Path) {
         let rel = abs_path.strip_prefix(dir).unwrap();
         let object_path = Path::parse(rel.to_string_lossy().as_ref()).unwrap();
         let meta = store.head(&object_path).await.unwrap();
-        let reader = ParquetObjectReader::new(store.clone(), object_path.clone())
-            .with_file_size(meta.size);
+        let reader =
+            ParquetObjectReader::new(store.clone(), object_path.clone()).with_file_size(meta.size);
         let result = ParquetRecordBatchStreamBuilder::new(reader).await;
         assert!(
             result.is_err(),
@@ -152,7 +152,6 @@ async fn assert_all_parquets_encrypted(dir: &std::path::Path) {
         );
     }
 }
-
 
 #[tokio::test]
 async fn test_encrypted_create_and_read() -> DeltaResult<()> {
@@ -314,76 +313,10 @@ paste! {
 /// failed to propagate.
 #[tokio::test]
 async fn test_parquet_files_are_physically_encrypted() -> DeltaResult<()> {
-    use object_store::{ObjectStore, local::LocalFileSystem, path::Path};
-    use parquet::arrow::async_reader::ParquetObjectReader;
-    use parquet::arrow::ParquetRecordBatchStreamBuilder;
-    use std::path::PathBuf;
-
     let kms_id = register_fresh_factory();
     let dir = TempDir::new()?;
     let uri = dir.path().to_str().unwrap();
     create_encrypted_table(uri, "test", &kms_id).await?;
-
-    // Walk the table directory and collect all .parquet files.
-    let parquet_files: Vec<PathBuf> = std::fs::read_dir(dir.path())
-        .expect("read dir")
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.extension().and_then(|s| s.to_str()) == Some("parquet")
-                || p.to_string_lossy().contains(".parquet")
-        })
-        .collect();
-
-    // Also search recursively for parquet files.
-    let mut all_parquet = vec![];
-    fn find_parquet(dir: &std::path::Path, result: &mut Vec<PathBuf>) {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    find_parquet(&path, result);
-                } else if path.to_string_lossy().contains(".parquet") {
-                    result.push(path);
-                }
-            }
-        }
-    }
-    find_parquet(dir.path(), &mut all_parquet);
-
-    assert!(
-        !all_parquet.is_empty(),
-        "Expected at least one parquet file in the table directory"
-    );
-
-    // For each parquet file, try to open it WITHOUT decryption properties.
-    // This must fail with an encrypted-footer error, proving the file is encrypted.
-    let store = Arc::new(LocalFileSystem::new_with_prefix(dir.path()).unwrap());
-
-    for abs_path in &all_parquet {
-        let rel = abs_path.strip_prefix(dir.path()).unwrap();
-        let object_path = Path::parse(rel.to_string_lossy().as_ref()).unwrap();
-
-        let meta = store.head(&object_path).await.unwrap();
-        let reader = ParquetObjectReader::new(store.clone(), object_path.clone())
-            .with_file_size(meta.size);
-
-        // Build without any decryption properties — this should fail.
-        let result = ParquetRecordBatchStreamBuilder::new(reader).await;
-
-        assert!(
-            result.is_err(),
-            "Expected parquet reader to fail for encrypted file {:?} (no decryption properties), \
-             but it succeeded — files may be written unencrypted!",
-            rel
-        );
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("encrypted") || err_msg.contains("decrypt") || err_msg.contains("key"),
-            "Error for {:?} should mention encryption, got: {err_msg}",
-            rel
-        );
-    }
-
+    assert_all_parquets_encrypted(dir.path()).await;
     Ok(())
 }

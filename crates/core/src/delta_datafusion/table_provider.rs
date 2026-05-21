@@ -554,19 +554,13 @@ impl<'a> DeltaScanBuilder<'a> {
             table_partition_cols.into_iter().map(Arc::new).collect();
         let table_schema = TableSchema::new(file_schema, partition_fields);
 
+        let factory_id = parquet_options.crypto.factory_id.clone();
         let mut file_source =
-            ParquetSource::new(table_schema).with_table_parquet_options(parquet_options.clone());
+            ParquetSource::new(table_schema).with_table_parquet_options(parquet_options);
 
-        // Set encryption factory if configured via table properties.
-        if let Some(factory_id) = &parquet_options.crypto.factory_id {
-            use crate::operations::write::encryption::resolve_encryption_factory;
-            let encryption_factory =
-                resolve_encryption_factory(factory_id, self.session).ok_or_else(|| {
-                    DeltaTableError::Generic(format!(
-                        "No EncryptionFactory registered for kms.id '{factory_id}'. \
-                     Register one via `deltalake_core::operations::write::encryption::register_encryption_factory`."
-                    ))
-                })?;
+        if let Some(factory_id) = &factory_id {
+            use crate::operations::write::encryption::resolve_encryption_factory_or_err;
+            let encryption_factory = resolve_encryption_factory_or_err(factory_id, self.session)?;
             file_source = file_source.with_encryption_factory(encryption_factory);
         }
 

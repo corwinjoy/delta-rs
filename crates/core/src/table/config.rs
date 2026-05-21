@@ -482,12 +482,22 @@ mod tests {
 // EncryptionConfig — parsed from delta.encryption.* table properties
 // ---------------------------------------------------------------------------
 
-/// Delta table property key prefix for encryption configuration.
+/// Delta table property keys for encryption configuration.
 pub const ENCRYPTION_KMS_ID_PROP: &str = "delta.encryption.kms.id";
 pub const ENCRYPTION_KMS_CONFIGURATION_PROP: &str = "delta.encryption.kms.configuration";
 pub const ENCRYPTION_FOOTER_KEY_PROP: &str = "delta.encryption.footer.key";
 pub const ENCRYPTION_PLAINTEXT_FOOTER_PROP: &str = "delta.encryption.plaintext.footer";
 pub const ENCRYPTION_COLUMN_KEYS_PROP: &str = "delta.encryption.column.keys";
+
+/// Key names forwarded to [`EncryptionFactoryOptions`] (suffix after `delta.encryption.` stripped).
+#[cfg(feature = "datafusion")]
+pub(crate) const FACTORY_OPT_KMS_CONFIGURATION: &str = "kms.configuration";
+#[cfg(feature = "datafusion")]
+pub(crate) const FACTORY_OPT_FOOTER_KEY: &str = "footer.key";
+#[cfg(feature = "datafusion")]
+pub(crate) const FACTORY_OPT_PLAINTEXT_FOOTER: &str = "plaintext.footer";
+#[cfg(feature = "datafusion")]
+pub(crate) const FACTORY_OPT_COLUMN_KEYS: &str = "column.keys";
 
 /// Parquet encryption configuration derived from `delta.encryption.*` table properties.
 ///
@@ -600,25 +610,22 @@ impl EncryptionConfig {
         opts
     }
 
-    /// Build [`EncryptionFactoryOptions`] from the KMS configuration string.
+    /// Build [`EncryptionFactoryOptions`] forwarded to the registered factory.
     #[cfg(feature = "datafusion")]
     pub fn factory_options(&self) -> EncryptionFactoryOptions {
         let mut opts = EncryptionFactoryOptions::default();
         if let Some(cfg) = &self.kms_configuration {
             opts.options
-                .insert("kms.configuration".to_string(), cfg.clone());
+                .insert(FACTORY_OPT_KMS_CONFIGURATION.to_string(), cfg.clone());
         }
         opts.options
-            .insert("footer.key".to_string(), self.footer_key.clone());
+            .insert(FACTORY_OPT_FOOTER_KEY.to_string(), self.footer_key.clone());
         opts.options.insert(
-            "plaintext.footer".to_string(),
+            FACTORY_OPT_PLAINTEXT_FOOTER.to_string(),
             self.plaintext_footer.to_string(),
         );
-        // Forward column key assignments so the factory knows which master key IDs to
-        // use for which columns.  Serialised in the same format as the table property:
-        // "keyId:col1,col2;keyId2:col3".
         if !self.column_keys.is_empty() {
-            // Build a reverse map: key_id → Vec<col_name>
+            // Invert col→key_id into key_id→[cols] to reconstruct the wire format.
             let mut by_key: std::collections::HashMap<&str, Vec<&str>> =
                 std::collections::HashMap::new();
             for (col, key_id) in &self.column_keys {
@@ -632,7 +639,8 @@ impl EncryptionConfig {
                 .map(|(key_id, cols)| format!("{}:{}", key_id, cols.join(",")))
                 .collect::<Vec<_>>()
                 .join(";");
-            opts.options.insert("column.keys".to_string(), encoded);
+            opts.options
+                .insert(FACTORY_OPT_COLUMN_KEYS.to_string(), encoded);
         }
         opts
     }

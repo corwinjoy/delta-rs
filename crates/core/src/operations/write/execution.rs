@@ -582,13 +582,9 @@ pub(crate) async fn write_exec_plan(
     write_as_cdc: bool,
 ) -> DeltaResult<(Vec<Action>, WriteExecutionPlanMetrics)> {
     let stats_config = WriterStatsConfig::from_config(table_config);
-    // Derive the writer factory from table encryption properties.  Propagate errors so
-    // that a misconfigured table (encryption set but factory not registered) fails
-    // explicitly rather than silently writing unencrypted data.
     let writer_factory = match WriterEncryptionConfig::from_config(table_config, session) {
         Ok(enc) if enc.factory.is_some() => enc.factory,
         Ok(_) => {
-            // No encryption properties — fall back to the session's parquet config.
             let wp = session
                 .config_options()
                 .execution
@@ -597,7 +593,7 @@ pub(crate) async fn write_exec_plan(
                 .build();
             Some(factory_from_writer_properties(wp))
         }
-        Err(e) => return Err(e), // Encryption configured but factory not registered.
+        Err(e) => return Err(e),
     };
     let object_store = log_store.object_store(operation_id);
     let partition_columns = table_config.metadata().partition_columns().clone();
@@ -807,7 +803,6 @@ async fn write_data_plan(
     writer_factory: Option<WriterPropertiesFactoryRef>,
     writer_stats_config: WriterStatsConfig,
 ) -> DeltaResult<(Vec<Action>, WriteExecutionPlanMetrics)> {
-    // When no explicit factory is provided fall back to the session's parquet config.
     let writer_factory = if let Some(f) = writer_factory {
         Some(f)
     } else {

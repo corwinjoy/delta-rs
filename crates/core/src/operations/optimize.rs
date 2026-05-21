@@ -359,25 +359,35 @@ impl<'a> std::future::IntoFuture for OptimizeBuilder<'a> {
             )?;
 
             // Derive the writer factory: explicit caller override > table encryption properties > default.
-            let writer_factory: WriterPropertiesFactoryRef = if let Some(wp) =
-                this.writer_properties
-            {
-                factory_from_writer_properties(wp)
+            // Track whether encryption is active so we can pass `read_session` without a second check.
+            let (writer_factory, is_encrypted): (WriterPropertiesFactoryRef, bool) =
+                if let Some(wp) = this.writer_properties {
+                    (factory_from_writer_properties(wp), false)
+                } else {
+                    use super::write::encryption::WriterEncryptionConfig;
+                    match WriterEncryptionConfig::from_config(
+                        snapshot.table_configuration(),
+                        &session,
+                    ) {
+                        Ok(enc) if enc.factory.is_some() => (enc.factory.unwrap(), true),
+                        Ok(_) => (
+                            factory_from_writer_properties(
+                                WriterProperties::builder()
+                                    .set_compression(Compression::ZSTD(
+                                        ZstdLevel::try_new(4).unwrap(),
+                                    ))
+                                    .set_created_by(format!("delta-rs version {}", crate_version()))
+                                    .build(),
+                            ),
+                            false,
+                        ),
+                        Err(e) => return Err(e),
+                    }
+                };
+            let read_session = if is_encrypted {
+                Some(session.clone())
             } else {
-                use super::write::encryption::WriterEncryptionConfig;
-                // Propagate errors: if the table has encryption configured but the factory
-                // is missing, fail explicitly rather than silently writing unencrypted files.
-                match WriterEncryptionConfig::from_config(snapshot.table_configuration(), &session)
-                {
-                    Ok(enc) if enc.factory.is_some() => enc.factory.unwrap(),
-                    Ok(_) => factory_from_writer_properties(
-                        WriterProperties::builder()
-                            .set_compression(Compression::ZSTD(ZstdLevel::try_new(4).unwrap()))
-                            .set_created_by(format!("delta-rs version {}", crate_version()))
-                            .build(),
-                    ),
-                    Err(e) => return Err(e),
-                }
+                None
             };
 
             let plan = create_merge_plan(
@@ -388,6 +398,7 @@ impl<'a> std::future::IntoFuture for OptimizeBuilder<'a> {
                 this.target_size.to_owned(),
                 writer_factory,
                 session,
+                read_session,
             )
             .await?;
 
@@ -543,7 +554,6 @@ impl MergePlan {
         F: Future<Output = Result<ParquetReadStream, DeltaTableError>> + Send + 'static,
     {
         debug!("Rewriting files in partition: {partition_values:?}");
-        // First, initialize metrics
         let mut partial_actions = files
             .iter()
             .map(|file_meta| {
@@ -569,7 +579,6 @@ impl MergePlan {
             num_batches: 0,
         };
 
-        // Next, initialize the writer
         let writer_config = PartitionWriterConfig::try_new(
             task_parameters.file_schema.clone(),
             partition_values.clone(),
@@ -705,15 +714,11 @@ impl MergePlan {
         info!("starting optimize execution");
         let object_store = log_store.object_store(Some(operation_id));
 
-        // For compact on encrypted tables, use DataFusion scan so the registered
-        // EncryptionFactory can decrypt parquet footers.  Non-encrypted tables use
-        // the faster raw parquet reader path.
         let compact_read_session = self.read_session.take().map(|s| {
             use datafusion::execution::context::SessionContext;
             Arc::new(SessionContext::new_with_state(s))
         });
         let compact_table_root = snapshot.table_configuration().table_root().clone();
-        // Pre-clone task_parameters so the compact closure can use it without moving `self`.
         let compact_task_parameters = self.task_parameters.clone();
         let log_store_for_compact = log_store.clone();
 
@@ -735,7 +740,6 @@ impl MergePlan {
                         'static,
                         Result<ParquetReadStream, DeltaTableError>,
                     > = if let Some(ctx) = compact_read_session.clone() {
-                        // Encrypted table: use DataFusion scan so the EncryptionFactory can decrypt.
                         Box::pin(Self::read_compact_encrypted(
                             files.clone(),
                             snapshot.clone(),
@@ -744,7 +748,6 @@ impl MergePlan {
                             compact_table_root.clone(),
                         ))
                     } else {
-                        // Non-encrypted table: fast raw parquet reader.
                         let object_store_ref = object_store.clone();
                         let files_for_stream = files.clone();
                         Box::pin(async move {
@@ -928,19 +931,10 @@ pub async fn create_merge_plan(
     target_size: Option<NonZeroU64>,
     writer_factory: WriterPropertiesFactoryRef,
     session: SessionState,
+    read_session: Option<SessionState>,
 ) -> Result<MergePlan, DeltaTableError> {
     let target_size = target_size.unwrap_or_else(|| snapshot.table_properties().target_file_size());
     let partitions_keys = snapshot.metadata().partition_columns();
-
-    // Capture read_session BEFORE moving `session` into build_zorder_plan.
-    let read_session = {
-        use crate::table::config::EncryptionExt as _;
-        if snapshot.table_properties().encryption_config().is_some() {
-            Some(session.clone())
-        } else {
-            None
-        }
-    };
 
     let (operations, metrics) = match optimize_type {
         OptimizeType::Compact => {
@@ -991,8 +985,6 @@ pub async fn create_merge_plan(
                 .map(|v| v.iter().map(|v| v.to_string()).collect::<Vec<String>>()),
         }),
         read_table_version: snapshot.version(),
-        // Session for DataFusion-based compact reads on encrypted tables (captured before
-        // `session` was potentially moved into `build_zorder_plan`).
         read_session,
     })
 }

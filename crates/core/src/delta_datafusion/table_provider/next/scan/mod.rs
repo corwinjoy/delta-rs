@@ -483,19 +483,11 @@ async fn get_read_plan(
             .with_table_parquet_options(pq_options.clone())
             .with_parquet_file_reader_factory(reader_factory);
 
-        // Wire up the decryption factory when the table has encryption configured.
-        // Check the session's RuntimeEnv first, then the global process-wide registry
-        // (needed because operations create internal sessions without user-registered factories).
         if let Some(factory_id) = &pq_options.crypto.factory_id {
-            use crate::operations::write::encryption::resolve_encryption_factory;
-            if let Some(encryption_factory) = resolve_encryption_factory(factory_id, state) {
-                file_source = file_source.with_encryption_factory(encryption_factory);
-            } else {
-                return Err(datafusion::error::DataFusionError::Internal(format!(
-                    "No EncryptionFactory registered for kms.id '{factory_id}'. \
-                     Register one via `deltalake_core::operations::write::encryption::register_encryption_factory`."
-                )));
-            }
+            use crate::operations::write::encryption::resolve_encryption_factory_or_err;
+            let encryption_factory = resolve_encryption_factory_or_err(factory_id, state)
+                .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+            file_source = file_source.with_encryption_factory(encryption_factory);
         }
 
         // TODO(roeap); we might be able to also push selection vectors into the read plan

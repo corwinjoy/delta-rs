@@ -18,7 +18,6 @@
 //!    **with the actual file path** so that the factory can derive the encryption key
 //!    from the path (AAD — Additional Authenticated Data).
 
-use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::{Arc, LazyLock};
 
@@ -31,7 +30,6 @@ use datafusion::config::EncryptionFactoryOptions;
 use datafusion::execution::parquet_encryption::EncryptionFactory;
 use object_store::path::Path;
 use parquet::basic::Compression;
-use parquet::encryption::encrypt::FileEncryptionProperties;
 use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
 use parquet::schema::types::ColumnPath;
 
@@ -173,41 +171,15 @@ impl WriterEncryptionConfig {
     /// Resolve from a [`TableConfiguration`] (used in `write_exec_plan` which receives
     /// `table_config: &TableConfiguration` directly).
     pub fn from_config(config: &TableConfiguration, session: &dyn Session) -> DeltaResult<Self> {
-        Self::from_encryption_config(config.table_properties().encryption_config(), session)
-    }
-
-    fn from_encryption_config(
-        enc: Option<EncryptionConfig>,
-        session: &dyn Session,
-    ) -> DeltaResult<Self> {
-        let Some(enc) = enc else {
+        let Some(enc) = config.table_properties().encryption_config() else {
             return Ok(Self { factory: None });
         };
-
         // Check the session's RuntimeEnv first, then the global process-wide registry.
         // The global registry is needed because operations create their own internal sessions
         // that don't inherit the user's session factory registrations.
-        let df_factory = resolve_encryption_factory(&enc.kms_id, session).ok_or_else(|| {
-            DeltaTableError::Generic(format!(
-                "No EncryptionFactory registered for kms.id '{}'.  \
-                 Register one via `deltalake_core::operations::write::encryption::register_encryption_factory`.",
-                enc.kms_id
-            ))
-        })?;
-
-        let factory_options = enc.factory_options();
-
-        let base_properties = WriterProperties::builder()
-            .set_compression(Compression::SNAPPY)
-            .set_created_by(format!("delta-rs version {}", crate::crate_version()))
-            .build();
-
+        let df_factory = resolve_encryption_factory_or_err(&enc.kms_id, session)?;
         Ok(Self {
-            factory: Some(Self::build_factory(
-                base_properties,
-                df_factory,
-                factory_options,
-            )),
+            factory: Some(Self::build_factory(df_factory, enc.factory_options())),
         })
     }
 
@@ -219,32 +191,21 @@ impl WriterEncryptionConfig {
         let Some(enc) = enc else {
             return Ok(Self { factory: None });
         };
-        let df_factory = get_encryption_factory(&enc.kms_id).ok_or_else(|| {
-            DeltaTableError::Generic(format!(
-                "No EncryptionFactory registered for kms.id '{}'.  \
-                 Register one via `deltalake_core::operations::write::encryption::register_encryption_factory`.",
-                enc.kms_id
-            ))
-        })?;
-        let factory_options = enc.factory_options();
-        let base_properties = WriterProperties::builder()
-            .set_compression(Compression::SNAPPY)
-            .set_created_by(format!("delta-rs version {}", crate::crate_version()))
-            .build();
+        let df_factory = get_encryption_factory(&enc.kms_id)
+            .ok_or_else(|| unregistered_factory_error(&enc.kms_id))?;
         Ok(Self {
-            factory: Some(Self::build_factory(
-                base_properties,
-                df_factory,
-                factory_options,
-            )),
+            factory: Some(Self::build_factory(df_factory, enc.factory_options())),
         })
     }
 
     fn build_factory(
-        base_properties: WriterProperties,
         encryption_factory: Arc<dyn EncryptionFactory>,
         factory_options: EncryptionFactoryOptions,
     ) -> WriterPropertiesFactoryRef {
+        let base_properties = WriterProperties::builder()
+            .set_compression(Compression::SNAPPY)
+            .set_created_by(format!("delta-rs version {}", crate::crate_version()))
+            .build();
         Arc::new(KmsWriterPropertiesFactory {
             base_properties,
             encryption_factory,
@@ -314,4 +275,20 @@ pub fn resolve_encryption_factory(
         .parquet_encryption_factory(id)
         .ok()
         .or_else(|| get_encryption_factory(id))
+}
+
+/// Build the standard "factory not registered" error for a given `kms.id`.
+pub(crate) fn unregistered_factory_error(id: &str) -> DeltaTableError {
+    DeltaTableError::Generic(format!(
+        "No EncryptionFactory registered for kms.id '{id}'. \
+         Register one via `deltalake_core::operations::write::encryption::register_encryption_factory`."
+    ))
+}
+
+/// Resolve an [`EncryptionFactory`] or return a descriptive error.
+pub fn resolve_encryption_factory_or_err(
+    id: &str,
+    session: &dyn datafusion::catalog::Session,
+) -> DeltaResult<Arc<dyn EncryptionFactory>> {
+    resolve_encryption_factory(id, session).ok_or_else(|| unregistered_factory_error(id))
 }

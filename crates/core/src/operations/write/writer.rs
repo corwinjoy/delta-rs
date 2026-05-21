@@ -173,27 +173,6 @@ impl WriterConfig {
         }
     }
 
-    /// Create with explicit static `WriterProperties` (legacy helper).
-    pub fn new_with_properties(
-        table_schema: ArrowSchemaRef,
-        partition_columns: Vec<String>,
-        writer_properties: Option<WriterProperties>,
-        target_file_size: Option<NonZeroU64>,
-        write_batch_size: Option<usize>,
-        num_indexed_cols: DataSkippingNumIndexedCols,
-        stats_columns: Option<Vec<String>>,
-    ) -> Self {
-        Self::new(
-            table_schema,
-            partition_columns,
-            writer_properties.map(factory_from_writer_properties),
-            target_file_size,
-            write_batch_size,
-            num_indexed_cols,
-            stats_columns,
-        )
-    }
-
     /// Schema of files written to disk
     pub fn file_schema(&self) -> ArrowSchemaRef {
         arrow_schema_without_partitions(&self.table_schema, &self.partition_columns)
