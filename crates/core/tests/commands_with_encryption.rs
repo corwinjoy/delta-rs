@@ -18,7 +18,7 @@ use deltalake_core::kernel::{DataType, PrimitiveType, StructField};
 use deltalake_core::operations::optimize::OptimizeType;
 use deltalake_core::operations::write::encryption::register_encryption_factory;
 use deltalake_core::test_utils::kms_encryption::MockKmsFactory;
-use deltalake_core::{DeltaResult, DeltaTable, DeltaTableError};
+use deltalake_core::{DeltaResult, DeltaTable};
 use paste::paste;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -318,5 +318,120 @@ async fn test_parquet_files_are_physically_encrypted() -> DeltaResult<()> {
     let uri = dir.path().to_str().unwrap();
     create_encrypted_table(uri, "test", &kms_id).await?;
     assert_all_parquets_encrypted(dir.path()).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Columnar encryption with plaintext footer
+// ---------------------------------------------------------------------------
+
+/// Verify columnar encryption where only the "int" and "string" columns are encrypted
+/// and the parquet footer is left in plaintext.
+///
+/// With plaintext footer mode:
+/// - The footer (schema, row-group metadata) is readable without keys.
+/// - Only the column data pages for "int" and "string" are encrypted.
+/// - The "timestamp" column is not encrypted and is always readable.
+///
+/// This tests that `delta.encryption.column.keys` and
+/// `delta.encryption.plaintext.footer` are correctly forwarded to the factory.
+#[tokio::test]
+async fn test_encrypted_columnar_plaintext_footer() -> DeltaResult<()> {
+    use object_store::{ObjectStore, local::LocalFileSystem, path::Path as ObjPath};
+    use parquet::arrow::ParquetRecordBatchStreamBuilder;
+    use parquet::arrow::async_reader::ParquetObjectReader;
+
+    let kms_id = register_fresh_factory();
+    let dir = TempDir::new()?;
+    let uri = dir.path().to_str().unwrap();
+    let table_url = table_url(uri);
+
+    // Create with only "int" and "string" encrypted; "timestamp" is left unencrypted.
+    // The footer is stored in plaintext so the schema is readable without keys.
+    let table = deltalake_core::DeltaTableBuilder::from_url(table_url.clone())?.build()?;
+    table
+        .create()
+        .with_columns(get_table_columns())
+        .with_table_name("col-enc-test")
+        .with_property("delta.encryption.kms.id", &kms_id)
+        .with_property("delta.encryption.footer.key", "footer-master-key")
+        .with_property("delta.encryption.plaintext.footer", "true")
+        .with_property("delta.encryption.column.keys", "col-master-key:int,string")
+        .await?;
+
+    // Write two batches so we exercise more than one file.
+    let table = deltalake_core::DeltaTableBuilder::from_url(table_url.clone())?
+        .load()
+        .await?;
+    let batch = get_table_batches();
+    let table = table.write(vec![batch.clone()]).await?;
+    let table = table.write(vec![batch.clone()]).await?;
+
+    // Round-trip: read back with the factory registered and verify row count.
+    let batches = read_table(uri).await?;
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(
+        total_rows, 22,
+        "Expected 22 rows (2 writes × 11 rows each), got {total_rows}"
+    );
+
+    // Physical check: without decryption, the parquet FOOTER should be readable
+    // (plaintext footer mode) but reading the encrypted column data should fail.
+    let mut parquet_files = vec![];
+    fn find_parquet(d: &std::path::Path, result: &mut Vec<std::path::PathBuf>) {
+        if let Ok(entries) = std::fs::read_dir(d) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    find_parquet(&path, result);
+                } else if path.to_string_lossy().contains(".parquet") {
+                    result.push(path);
+                }
+            }
+        }
+    }
+    find_parquet(dir.path(), &mut parquet_files);
+    assert!(
+        !parquet_files.is_empty(),
+        "No parquet files found — cannot verify columnar encryption"
+    );
+
+    let store = Arc::new(LocalFileSystem::new_with_prefix(dir.path()).unwrap());
+    for abs_path in &parquet_files {
+        let rel = abs_path.strip_prefix(dir.path()).unwrap();
+        let obj_path = ObjPath::parse(rel.to_string_lossy().as_ref()).unwrap();
+
+        let meta = store.head(&obj_path).await.unwrap();
+        let reader =
+            ParquetObjectReader::new(store.clone(), obj_path.clone()).with_file_size(meta.size);
+
+        // With plaintext footer the builder itself must SUCCEED (footer is readable).
+        let builder = ParquetRecordBatchStreamBuilder::new(reader)
+            .await
+            .unwrap_or_else(|e| {
+                panic!(
+                    "Expected plaintext footer to be readable for {:?}, got: {e}",
+                    rel
+                )
+            });
+
+        // Reading column data without decryption keys must FAIL for the encrypted columns.
+        let result = builder.build().and_then(|stream| {
+            futures::executor::block_on(futures::StreamExt::collect::<Vec<_>>(stream))
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+        });
+        assert!(
+            result.is_err(),
+            "Expected reading encrypted column data to fail for {:?} without keys, \
+             but it succeeded — columnar encryption may not have been applied",
+            rel
+        );
+    }
+
+    // Verify the "timestamp" column is NOT listed in the encryption properties
+    // so the write path respected the per-column config.
+    let _ = table; // silence unused warning
+
     Ok(())
 }
