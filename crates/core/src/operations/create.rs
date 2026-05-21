@@ -212,6 +212,15 @@ impl CreateBuilder {
         self
     }
 
+    /// Specify an arbitrary table property by string key.
+    ///
+    /// Useful for custom or future properties (e.g. `delta.encryption.*`) that are not
+    /// yet represented in the [`TableProperty`] enum.
+    pub fn with_property(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.configuration.insert(key.into(), Some(value.into()));
+        self
+    }
+
     /// Additional metadata to be added to commit info
     pub fn with_commit_properties(mut self, commit_properties: CommitProperties) -> Self {
         self.commit_properties = commit_properties;

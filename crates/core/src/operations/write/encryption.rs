@@ -195,7 +195,7 @@ impl WriterEncryptionConfig {
             ))
         })?;
 
-        let factory_options = build_factory_options(&enc);
+        let factory_options = enc.factory_options();
 
         let base_properties = WriterProperties::builder()
             .set_compression(Compression::SNAPPY)

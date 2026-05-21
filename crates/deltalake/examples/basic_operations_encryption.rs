@@ -71,7 +71,7 @@ async fn table_from_uri(uri: &str) -> DeltaTable {
 async fn read(uri: &str) -> Vec<RecordBatch> {
     let table = table_from_uri(uri).await;
     let ctx = SessionContext::new();
-    ctx.register_table("t", Arc::new(table.scan_table().build().await.unwrap()))
+    ctx.register_table("t", table.table_provider().await.unwrap())
         .unwrap();
     ctx.sql("SELECT * FROM t ORDER BY int")
         .await
