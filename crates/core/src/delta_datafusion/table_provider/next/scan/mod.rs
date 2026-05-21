@@ -467,6 +467,17 @@ async fn get_read_plan(
     let full_read_schema = Arc::new(full_read_schema.finish());
     let full_read_df_schema = full_read_schema.clone().to_dfschema()?;
 
+    // Resolve the encryption factory once — it is the same for every object-store group.
+    let maybe_encryption_factory = if let Some(factory_id) = &pq_options.crypto.factory_id {
+        use crate::operations::write::encryption::resolve_encryption_factory_or_err;
+        Some(
+            resolve_encryption_factory_or_err(factory_id, state)
+                .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?,
+        )
+    } else {
+        None
+    };
+
     for (store_url, files) in files_by_store.into_iter() {
         let reader_factory = Arc::new(CachedParquetFileReaderFactory::new(
             state.runtime_env().object_store(&store_url)?,
@@ -483,11 +494,8 @@ async fn get_read_plan(
             .with_table_parquet_options(pq_options.clone())
             .with_parquet_file_reader_factory(reader_factory);
 
-        if let Some(factory_id) = &pq_options.crypto.factory_id {
-            use crate::operations::write::encryption::resolve_encryption_factory_or_err;
-            let encryption_factory = resolve_encryption_factory_or_err(factory_id, state)
-                .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
-            file_source = file_source.with_encryption_factory(encryption_factory);
+        if let Some(factory) = &maybe_encryption_factory {
+            file_source = file_source.with_encryption_factory(factory.clone());
         }
 
         // TODO(roeap); we might be able to also push selection vectors into the read plan

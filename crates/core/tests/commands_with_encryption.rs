@@ -106,6 +106,20 @@ async fn read_table(uri: &str) -> DeltaResult<Vec<RecordBatch>> {
     Ok(batches)
 }
 
+/// Recursively collect all `.parquet` files under `dir`.
+fn find_parquet(d: &std::path::Path, result: &mut Vec<std::path::PathBuf>) {
+    if let Ok(entries) = std::fs::read_dir(d) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                find_parquet(&path, result);
+            } else if path.extension().and_then(|s| s.to_str()) == Some("parquet") {
+                result.push(path);
+            }
+        }
+    }
+}
+
 /// Walk `dir` and assert that every `.parquet` file has an encrypted footer.
 /// Fails with a clear message if any file can be read without decryption — which
 /// would mean the operation wrote unencrypted parquet despite having encryption configured.
@@ -115,18 +129,6 @@ async fn assert_all_parquets_encrypted(dir: &std::path::Path) {
     use parquet::arrow::async_reader::ParquetObjectReader;
 
     let mut parquet_files = vec![];
-    fn find_parquet(d: &std::path::Path, result: &mut Vec<std::path::PathBuf>) {
-        if let Ok(entries) = std::fs::read_dir(d) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    find_parquet(&path, result);
-                } else if path.extension().and_then(|s| s.to_str()) == Some("parquet") {
-                    result.push(path);
-                }
-            }
-        }
-    }
     find_parquet(dir, &mut parquet_files);
 
     assert!(
@@ -374,18 +376,6 @@ async fn test_encrypted_columnar_plaintext_footer() -> DeltaResult<()> {
     // Physical check: without decryption, the parquet FOOTER should be readable
     // (plaintext footer mode) but reading the encrypted column data should fail.
     let mut parquet_files = vec![];
-    fn find_parquet(d: &std::path::Path, result: &mut Vec<std::path::PathBuf>) {
-        if let Ok(entries) = std::fs::read_dir(d) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    find_parquet(&path, result);
-                } else if path.extension().and_then(|s| s.to_str()) == Some("parquet") {
-                    result.push(path);
-                }
-            }
-        }
-    }
     find_parquet(dir.path(), &mut parquet_files);
     assert!(
         !parquet_files.is_empty(),

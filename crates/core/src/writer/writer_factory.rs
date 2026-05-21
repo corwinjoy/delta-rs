@@ -57,13 +57,17 @@ impl DefaultWriterPropertiesFactory {
     }
 
     pub fn snappy() -> Self {
-        Self::new(
-            WriterProperties::builder()
-                .set_compression(Compression::SNAPPY)
-                .set_created_by(format!("delta-rs version {}", crate_version()))
-                .build(),
-        )
+        Self::new(snappy_writer_properties())
     }
+}
+
+/// Build the standard delta-rs base [`WriterProperties`]: SNAPPY compression with
+/// the delta-rs `created_by` tag. Used as the base for both plain and encrypted writers.
+pub fn snappy_writer_properties() -> WriterProperties {
+    WriterProperties::builder()
+        .set_compression(Compression::SNAPPY)
+        .set_created_by(format!("delta-rs version {}", crate_version()))
+        .build()
 }
 
 #[async_trait]

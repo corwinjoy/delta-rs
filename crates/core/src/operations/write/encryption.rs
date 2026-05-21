@@ -34,15 +34,13 @@ use parquet::schema::types::ColumnPath;
 
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::table::config::EncryptionConfig;
-use crate::writer::writer_factory::DefaultWriterPropertiesFactory;
-
 use delta_kernel::table_configuration::TableConfiguration;
 
 // Re-export the factory types that are defined in the non-datafusion `writer_factory` module
 // so callers can keep importing them from this module.
 pub use crate::writer::writer_factory::{
-    DefaultWriterPropertiesFactory as _DefaultFactory, WriterPropertiesFactory,
-    WriterPropertiesFactoryRef, default_writer_properties_factory, factory_from_writer_properties,
+    WriterPropertiesFactory, WriterPropertiesFactoryRef, default_writer_properties_factory,
+    factory_from_writer_properties, snappy_writer_properties,
 };
 
 // ---------------------------------------------------------------------------
@@ -139,12 +137,8 @@ impl WriterEncryptionConfig {
         encryption_factory: Arc<dyn EncryptionFactory>,
         factory_options: EncryptionFactoryOptions,
     ) -> WriterPropertiesFactoryRef {
-        let base_properties = WriterProperties::builder()
-            .set_compression(Compression::SNAPPY)
-            .set_created_by(format!("delta-rs version {}", crate::crate_version()))
-            .build();
         Arc::new(KmsWriterPropertiesFactory {
-            base_properties,
+            base_properties: snappy_writer_properties(),
             encryption_factory,
             factory_options,
         })
