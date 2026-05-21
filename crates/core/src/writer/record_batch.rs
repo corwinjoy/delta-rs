@@ -38,7 +38,7 @@ use crate::kernel::{Action, Add, PartitionsExt, scalars::ScalarExt};
 use crate::kernel::{MetadataExt as _, Version};
 use crate::logstore::ObjectStoreRetryExt;
 use crate::operations::write::encryption::{
-    WriterPropertiesFactoryRef, default_writer_properties_factory,
+    WriterEncryptionConfig, WriterPropertiesFactoryRef, default_writer_properties_factory,
 };
 use crate::table::builder::DeltaTableBuilder;
 use crate::table::config::{DEFAULT_NUM_INDEX_COLS, EncryptionExt as _};
@@ -78,16 +78,15 @@ impl RecordBatchWriter {
             .with_storage_options(storage_options.unwrap_or_default())
             .build()?;
         // Derive factory from delta.encryption.* table properties.
-        let writer_properties_factory = delta_table
-            .snapshot()
-            .ok()
-            .and_then(|s| {
-                s.snapshot()
-                    .table_configuration()
-                    .table_properties()
-                    .encryption_config()
-                    .map(|_| default_writer_properties_factory())
-            })
+        let enc_config = delta_table.snapshot().ok().and_then(|s| {
+            s.snapshot()
+                .table_configuration()
+                .table_properties()
+                .encryption_config()
+        });
+        let writer_properties_factory = WriterEncryptionConfig::from_global_registry(enc_config)
+            .unwrap_or_default()
+            .factory
             .unwrap_or_else(default_writer_properties_factory);
 
         // if metadata fails to load, use an empty hashmap and default values for num_indexed_cols and stats_columns
@@ -141,13 +140,14 @@ impl RecordBatchWriter {
         let arrow_schema_ref = Arc::new(arrow_schema);
         let partition_columns = metadata.partition_columns().clone();
 
-        let writer_properties_factory = table
+        let enc_config = table
             .snapshot()?
             .snapshot()
             .table_configuration()
             .table_properties()
-            .encryption_config()
-            .map(|_| default_writer_properties_factory())
+            .encryption_config();
+        let writer_properties_factory = WriterEncryptionConfig::from_global_registry(enc_config)?
+            .factory
             .unwrap_or_else(default_writer_properties_factory);
         let configuration = table.snapshot()?.metadata().configuration().clone();
 

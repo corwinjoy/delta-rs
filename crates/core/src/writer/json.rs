@@ -30,7 +30,7 @@ use crate::errors::DeltaTableError;
 use crate::kernel::{Add, PartitionsExt, scalars::ScalarExt};
 use crate::logstore::ObjectStoreRetryExt;
 use crate::operations::write::encryption::{
-    WriterPropertiesFactoryRef, default_writer_properties_factory,
+    WriterEncryptionConfig, WriterPropertiesFactoryRef, default_writer_properties_factory,
 };
 use crate::table::builder::DeltaTableBuilder;
 use crate::table::config::{EncryptionExt as _, TablePropertiesExt as _};
@@ -206,18 +206,15 @@ impl JsonWriter {
             .with_storage_options(storage_options.unwrap_or_default())
             .load()
             .await?;
-        // Derive factory from delta.encryption.* table properties; fall back to SNAPPY default.
-        let writer_properties_factory = table
+        // Derive factory from delta.encryption.* table properties using the global registry.
+        let enc_config = table
             .snapshot()?
             .snapshot()
             .table_configuration()
             .table_properties()
-            .encryption_config()
-            .map(|_| {
-                // KMS encryption requires async factory — use session-based factory.
-                // For now fall back to default; full KMS support via session registration.
-                default_writer_properties_factory()
-            })
+            .encryption_config();
+        let writer_properties_factory = WriterEncryptionConfig::from_global_registry(enc_config)?
+            .factory
             .unwrap_or_else(default_writer_properties_factory);
 
         Ok(Self {
@@ -233,13 +230,14 @@ impl JsonWriter {
     pub fn for_table(table: &DeltaTable) -> Result<JsonWriter, DeltaTableError> {
         let metadata = table.snapshot()?.metadata();
         let partition_columns = metadata.partition_columns().clone();
-        let writer_properties_factory = table
+        let enc_config = table
             .snapshot()?
             .snapshot()
             .table_configuration()
             .table_properties()
-            .encryption_config()
-            .map(|_| default_writer_properties_factory())
+            .encryption_config();
+        let writer_properties_factory = WriterEncryptionConfig::from_global_registry(enc_config)?
+            .factory
             .unwrap_or_else(default_writer_properties_factory);
 
         Ok(Self {

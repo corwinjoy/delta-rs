@@ -530,16 +530,20 @@ impl EncryptionConfig {
     /// Parse encryption configuration from a table's `unknown_properties`.
     ///
     /// Returns `None` if `delta.encryption.kms.id` is not set.
+    ///
+    /// Returns `None` also if `delta.encryption.footer.key` is absent — both are required
+    /// for a valid encryption configuration.
     pub fn from_properties(props: &TableProperties) -> Option<Self> {
         let kms_id = props
             .unknown_properties
             .get(ENCRYPTION_KMS_ID_PROP)?
             .clone();
+        // footer.key is required when kms.id is set.
         let footer_key = props
             .unknown_properties
             .get(ENCRYPTION_FOOTER_KEY_PROP)
-            .cloned()
-            .unwrap_or_default();
+            .filter(|v| !v.is_empty())
+            .cloned()?;
 
         let kms_configuration = props
             .unknown_properties
@@ -606,6 +610,30 @@ impl EncryptionConfig {
         }
         opts.options
             .insert("footer.key".to_string(), self.footer_key.clone());
+        opts.options.insert(
+            "plaintext.footer".to_string(),
+            self.plaintext_footer.to_string(),
+        );
+        // Forward column key assignments so the factory knows which master key IDs to
+        // use for which columns.  Serialised in the same format as the table property:
+        // "keyId:col1,col2;keyId2:col3".
+        if !self.column_keys.is_empty() {
+            // Build a reverse map: key_id → Vec<col_name>
+            let mut by_key: std::collections::HashMap<&str, Vec<&str>> =
+                std::collections::HashMap::new();
+            for (col, key_id) in &self.column_keys {
+                by_key
+                    .entry(key_id.as_str())
+                    .or_default()
+                    .push(col.as_str());
+            }
+            let encoded = by_key
+                .iter()
+                .map(|(key_id, cols)| format!("{}:{}", key_id, cols.join(",")))
+                .collect::<Vec<_>>()
+                .join(";");
+            opts.options.insert("column.keys".to_string(), encoded);
+        }
         opts
     }
 }

@@ -1,3 +1,4 @@
+#![cfg(feature = "datafusion")]
 //! Integration tests for Parquet encryption via `delta.encryption.*` table properties.
 //!
 //! Encryption is configured by setting Delta table properties at table creation time.
@@ -10,7 +11,6 @@ use arrow::{
     record_batch::RecordBatch,
 };
 use datafusion::{
-    assert_batches_sorted_eq,
     logical_expr::{col, lit},
     prelude::SessionContext,
 };
@@ -19,11 +19,11 @@ use deltalake_core::operations::optimize::OptimizeType;
 use deltalake_core::operations::write::encryption::register_encryption_factory;
 use deltalake_core::test_utils::kms_encryption::MockKmsFactory;
 use deltalake_core::{DeltaResult, DeltaTable, DeltaTableError};
+use paste::paste;
 use std::sync::Arc;
 use tempfile::TempDir;
 use url::Url;
-
-const TEST_KMS_ID: &str = "test-kms-for-integration-tests";
+use uuid::Uuid;
 
 fn get_table_columns() -> Vec<StructField> {
     vec![
@@ -60,23 +60,31 @@ fn get_table_batches() -> RecordBatch {
     .unwrap()
 }
 
-fn ensure_factory_registered() -> Arc<MockKmsFactory> {
+/// Register a fresh factory with a unique ID to prevent test interference.
+/// Each test gets its own `MockKmsFactory` instance so keys from one test
+/// cannot be mistaken for keys from another.
+fn register_fresh_factory() -> String {
+    let kms_id = format!("test-kms-{}", Uuid::new_v4());
     let factory = Arc::new(MockKmsFactory::new());
-    register_encryption_factory(TEST_KMS_ID, factory.clone());
-    factory
+    register_encryption_factory(&kms_id, factory);
+    kms_id
 }
 
 fn table_url(uri: &str) -> Url {
     Url::parse(&format!("file://{}", uri)).unwrap()
 }
 
-async fn create_encrypted_table(uri: &str, table_name: &str) -> DeltaResult<DeltaTable> {
+async fn create_encrypted_table(
+    uri: &str,
+    table_name: &str,
+    kms_id: &str,
+) -> DeltaResult<DeltaTable> {
     let table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?.build()?;
     table
         .create()
         .with_columns(get_table_columns())
         .with_table_name(table_name)
-        .with_property("delta.encryption.kms.id", TEST_KMS_ID)
+        .with_property("delta.encryption.kms.id", kms_id)
         .with_property("delta.encryption.footer.key", "test-footer-key")
         .await?;
 
@@ -101,10 +109,10 @@ async fn read_table(uri: &str) -> DeltaResult<Vec<RecordBatch>> {
 
 #[tokio::test]
 async fn test_encrypted_create_and_read() -> DeltaResult<()> {
-    ensure_factory_registered();
+    let kms_id = register_fresh_factory();
     let dir = TempDir::new()?;
     let uri = dir.path().to_str().unwrap();
-    create_encrypted_table(uri, "test").await?;
+    create_encrypted_table(uri, "test", &kms_id).await?;
     let batches = read_table(uri).await?;
     assert!(!batches.is_empty());
     Ok(())
@@ -112,10 +120,10 @@ async fn test_encrypted_create_and_read() -> DeltaResult<()> {
 
 #[tokio::test]
 async fn test_encrypted_optimize_compact() -> DeltaResult<()> {
-    ensure_factory_registered();
+    let kms_id = register_fresh_factory();
     let dir = TempDir::new()?;
     let uri = dir.path().to_str().unwrap();
-    create_encrypted_table(uri, "test").await?;
+    create_encrypted_table(uri, "test", &kms_id).await?;
 
     let table: DeltaTable = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
         .load()
@@ -132,10 +140,10 @@ async fn test_encrypted_optimize_compact() -> DeltaResult<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_encrypted_optimize_zorder() -> DeltaResult<()> {
-    ensure_factory_registered();
+    let kms_id = register_fresh_factory();
     let dir = TempDir::new()?;
     let uri = dir.path().to_str().unwrap();
-    create_encrypted_table(uri, "test").await?;
+    create_encrypted_table(uri, "test", &kms_id).await?;
 
     let table: DeltaTable = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
         .load()
@@ -152,10 +160,10 @@ async fn test_encrypted_optimize_zorder() -> DeltaResult<()> {
 
 #[tokio::test]
 async fn test_encrypted_delete() -> DeltaResult<()> {
-    ensure_factory_registered();
+    let kms_id = register_fresh_factory();
     let dir = TempDir::new()?;
     let uri = dir.path().to_str().unwrap();
-    create_encrypted_table(uri, "test").await?;
+    create_encrypted_table(uri, "test", &kms_id).await?;
 
     let table: DeltaTable = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
         .load()
@@ -169,10 +177,10 @@ async fn test_encrypted_delete() -> DeltaResult<()> {
 
 #[tokio::test]
 async fn test_encrypted_update() -> DeltaResult<()> {
-    ensure_factory_registered();
+    let kms_id = register_fresh_factory();
     let dir = TempDir::new()?;
     let uri = dir.path().to_str().unwrap();
-    create_encrypted_table(uri, "test").await?;
+    create_encrypted_table(uri, "test", &kms_id).await?;
 
     let table: DeltaTable = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
         .load()
@@ -186,4 +194,57 @@ async fn test_encrypted_update() -> DeltaResult<()> {
     let batches = read_table(uri).await?;
     assert!(!batches.is_empty());
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Negative test: missing factory must produce a clear error
+// ---------------------------------------------------------------------------
+
+/// Guards against silent encryption skip: verifies that an unregistered kms.id
+/// returns an explicit error rather than silently writing/reading unencrypted data.
+#[tokio::test]
+async fn test_missing_factory_returns_error() {
+    use deltalake_core::operations::write::encryption::{
+        WriterEncryptionConfig, get_encryption_factory,
+    };
+    use deltalake_core::table::config::EncryptionConfig;
+
+    let impossible_kms = format!("never-registered-{}", Uuid::new_v4());
+    assert!(
+        get_encryption_factory(&impossible_kms).is_none(),
+        "Factory should not be registered"
+    );
+
+    // WriterEncryptionConfig must error when kms.id is set but factory is absent.
+    let fake_enc = EncryptionConfig {
+        kms_id: impossible_kms.clone(),
+        kms_configuration: None,
+        footer_key: "key".to_string(),
+        plaintext_footer: false,
+        column_keys: std::collections::HashMap::new(),
+    };
+    let result = WriterEncryptionConfig::from_global_registry(Some(fake_enc));
+    assert!(result.is_err(), "Expected error for unregistered kms.id");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains(&impossible_kms),
+        "Error should mention the kms_id, got: {err_msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Paste-based test matrix for the positive path
+// ---------------------------------------------------------------------------
+
+paste! {
+    #[tokio::test]
+    async fn test_matrix_create_and_read() -> DeltaResult<()> {
+        let kms_id = register_fresh_factory();
+        let dir = TempDir::new()?;
+        let uri = dir.path().to_str().unwrap();
+        create_encrypted_table(uri, "test", &kms_id).await?;
+        let batches = read_table(uri).await?;
+        assert!(!batches.is_empty(), "Table should have rows after create_and_read");
+        Ok(())
+    }
 }

@@ -365,18 +365,18 @@ impl<'a> std::future::IntoFuture for OptimizeBuilder<'a> {
                 factory_from_writer_properties(wp)
             } else {
                 use super::write::encryption::WriterEncryptionConfig;
-                if let Ok(enc) =
-                    WriterEncryptionConfig::from_config(snapshot.table_configuration(), &session)
-                    && enc.factory.is_some()
+                // Propagate errors: if the table has encryption configured but the factory
+                // is missing, fail explicitly rather than silently writing unencrypted files.
+                match WriterEncryptionConfig::from_config(snapshot.table_configuration(), &session)
                 {
-                    enc.factory.unwrap()
-                } else {
-                    factory_from_writer_properties(
+                    Ok(enc) if enc.factory.is_some() => enc.factory.unwrap(),
+                    Ok(_) => factory_from_writer_properties(
                         WriterProperties::builder()
                             .set_compression(Compression::ZSTD(ZstdLevel::try_new(4).unwrap()))
                             .set_created_by(format!("delta-rs version {}", crate_version()))
                             .build(),
-                    )
+                    ),
+                    Err(e) => return Err(e),
                 }
             };
 
@@ -625,6 +625,34 @@ impl MergePlan {
         Ok((partial_actions, partial_metrics))
     }
 
+    /// DataFusion-based compact read used when the table has encryption configured.
+    /// Uses `DeltaScanNext` so the registered `EncryptionFactory` can decrypt parquet footers.
+    async fn read_compact_encrypted(
+        files: MergeBin,
+        snapshot: EagerSnapshot,
+        ctx: Arc<datafusion::execution::context::SessionContext>,
+        log_store: LogStoreRef,
+        table_root: url::Url,
+    ) -> Result<ParquetReadStream, DeltaTableError> {
+        use crate::delta_datafusion::{DeltaScanConfigBuilder, DeltaScanNext, FileSelection};
+        let scan_config = DeltaScanConfigBuilder::default()
+            .with_file_column(false)
+            .build(&snapshot)?;
+        let selection = FileSelection::from_adds(files.files.iter().cloned(), &table_root)?;
+        let provider = Arc::new(
+            DeltaScanNext::new(snapshot, scan_config)?
+                .with_log_store(log_store)
+                .with_file_selection(selection),
+        ) as Arc<dyn datafusion::catalog::TableProvider>;
+        let stream = ctx
+            .read_table(provider)?
+            .execute_stream()
+            .await?
+            .map_err(|e| ParquetError::General(format!("Compact scan failed: {e}")))
+            .boxed();
+        Ok(stream)
+    }
+
     /// Datafusion-based z-order read.
     async fn read_zorder(
         files: MergeBin,
@@ -707,43 +735,17 @@ impl MergePlan {
                         'static,
                         Result<ParquetReadStream, DeltaTableError>,
                     > = if let Some(ctx) = compact_read_session.clone() {
-                        // Encrypted table: use DataFusion scan for decryption.
-                        use crate::delta_datafusion::{
-                            DeltaScanConfigBuilder, DeltaScanNext, FileSelection,
-                        };
-                        let scan_config = DeltaScanConfigBuilder::default()
-                            .with_file_column(false)
-                            .build(snapshot)
-                            .unwrap_or_default();
-                        let root = compact_table_root.clone();
-                        let ls = log_store_for_compact.clone();
-                        let files2 = files.clone();
-                        // Clone the snapshot so the async block owns it (needed for 'static bound).
-                        let snapshot_owned = snapshot.clone();
-                        Box::pin(async move {
-                            let selection =
-                                FileSelection::from_adds(files2.files.iter().cloned(), &root)?;
-                            let provider = Arc::new(
-                                DeltaScanNext::new(snapshot_owned, scan_config)?
-                                    .with_log_store(ls)
-                                    .with_file_selection(selection),
-                            )
-                                as Arc<dyn datafusion::catalog::TableProvider>;
-                            let df = ctx.read_table(provider)?;
-                            let stream = df
-                                .execute_stream()
-                                .await?
-                                .map_err(|e| {
-                                    ParquetError::General(format!("Compact scan failed: {e}"))
-                                })
-                                .boxed();
-                            Ok(stream)
-                        })
+                        // Encrypted table: use DataFusion scan so the EncryptionFactory can decrypt.
+                        Box::pin(Self::read_compact_encrypted(
+                            files.clone(),
+                            snapshot.clone(),
+                            ctx,
+                            log_store_for_compact.clone(),
+                            compact_table_root.clone(),
+                        ))
                     } else {
                         // Non-encrypted table: fast raw parquet reader.
                         let object_store_ref = object_store.clone();
-                        // Clone files here so the async move doesn't consume `files`,
-                        // which is still needed by `rewrite_files` below.
                         let files_for_stream = files.clone();
                         Box::pin(async move {
                             let stream: ParquetReadStream = futures::stream::iter(files_for_stream)

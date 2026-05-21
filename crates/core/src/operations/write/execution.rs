@@ -582,13 +582,13 @@ pub(crate) async fn write_exec_plan(
     write_as_cdc: bool,
 ) -> DeltaResult<(Vec<Action>, WriteExecutionPlanMetrics)> {
     let stats_config = WriterStatsConfig::from_config(table_config);
-    // Derive the writer factory from table encryption properties, falling back to
-    // the session's parquet config when the table has no encryption configured.
-    let enc_config = WriterEncryptionConfig::from_config(table_config, session);
-    let writer_factory = match enc_config {
+    // Derive the writer factory from table encryption properties.  Propagate errors so
+    // that a misconfigured table (encryption set but factory not registered) fails
+    // explicitly rather than silently writing unencrypted data.
+    let writer_factory = match WriterEncryptionConfig::from_config(table_config, session) {
         Ok(enc) if enc.factory.is_some() => enc.factory,
-        _ => {
-            // No table-level encryption: use the session's parquet config.
+        Ok(_) => {
+            // No encryption properties — fall back to the session's parquet config.
             let wp = session
                 .config_options()
                 .execution
@@ -597,6 +597,7 @@ pub(crate) async fn write_exec_plan(
                 .build();
             Some(factory_from_writer_properties(wp))
         }
+        Err(e) => return Err(e), // Encryption configured but factory not registered.
     };
     let object_store = log_store.object_store(operation_id);
     let partition_columns = table_config.metadata().partition_columns().clone();
@@ -807,15 +808,17 @@ async fn write_data_plan(
     writer_stats_config: WriterStatsConfig,
 ) -> DeltaResult<(Vec<Action>, WriteExecutionPlanMetrics)> {
     // When no explicit factory is provided fall back to the session's parquet config.
-    let writer_factory = writer_factory.or_else(|| {
-        session
+    let writer_factory = if let Some(f) = writer_factory {
+        Some(f)
+    } else {
+        let wp = session
             .config_options()
             .execution
             .parquet
-            .into_writer_properties_builder()
-            .ok()
-            .map(|b| factory_from_writer_properties(b.build()))
-    });
+            .into_writer_properties_builder()?
+            .build();
+        Some(factory_from_writer_properties(wp))
+    };
     let config = WriterConfig::new(
         plan.schema().clone(),
         partition_columns.clone(),

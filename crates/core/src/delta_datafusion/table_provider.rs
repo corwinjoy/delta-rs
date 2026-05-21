@@ -537,16 +537,18 @@ impl<'a> DeltaScanBuilder<'a> {
             ));
         }
 
-        // Use encryption options from delta.encryption.* table properties when available;
-        // otherwise fall back to the session's parquet config.
-        let parquet_options =
-            config
-                .table_parquet_options
-                .clone()
-                .unwrap_or_else(|| TableParquetOptions {
-                    global: self.session.config().options().execution.parquet.clone(),
-                    ..Default::default()
-                });
+        // Start from the session's parquet options to preserve non-crypto settings
+        // (pushdown, schema coercion, etc.), then overlay encryption crypto settings only.
+        let parquet_options = {
+            let mut opts = TableParquetOptions {
+                global: self.session.config().options().execution.parquet.clone(),
+                ..Default::default()
+            };
+            if let Some(enc_opts) = &config.table_parquet_options {
+                opts.crypto = enc_opts.crypto.clone();
+            }
+            opts
+        };
 
         let partition_fields: Vec<Arc<Field>> =
             table_partition_cols.into_iter().map(Arc::new).collect();
@@ -558,9 +560,14 @@ impl<'a> DeltaScanBuilder<'a> {
         // Set encryption factory if configured via table properties.
         if let Some(factory_id) = &parquet_options.crypto.factory_id {
             use crate::operations::write::encryption::resolve_encryption_factory;
-            if let Some(encryption_factory) = resolve_encryption_factory(factory_id, self.session) {
-                file_source = file_source.with_encryption_factory(encryption_factory);
-            }
+            let encryption_factory =
+                resolve_encryption_factory(factory_id, self.session).ok_or_else(|| {
+                    DeltaTableError::Generic(format!(
+                        "No EncryptionFactory registered for kms.id '{factory_id}'. \
+                     Register one via `deltalake_core::operations::write::encryption::register_encryption_factory`."
+                    ))
+                })?;
+            file_source = file_source.with_encryption_factory(encryption_factory);
         }
 
         // Sometimes (i.e Merge) we want to prune files that don't make the

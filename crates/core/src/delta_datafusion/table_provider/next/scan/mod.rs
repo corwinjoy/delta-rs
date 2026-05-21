@@ -452,10 +452,15 @@ async fn get_read_plan(
 ) -> Result<Arc<dyn ExecutionPlan>> {
     let mut plans = Vec::new();
 
-    // Use encryption-aware options from table properties when available.
-    let pq_options = table_parquet_options
-        .cloned()
-        .unwrap_or_else(|| state.table_options().parquet.clone());
+    // Start from the session's parquet options to preserve all non-crypto settings
+    // (pushdown, schema options, etc.), then overlay the encryption crypto settings.
+    let pq_options = {
+        let mut opts = state.table_options().parquet.clone();
+        if let Some(enc_opts) = table_parquet_options {
+            opts.crypto = enc_opts.crypto.clone();
+        }
+        opts
+    };
 
     let mut full_read_schema = SchemaBuilder::from(parquet_read_schema.as_ref().clone());
     full_read_schema.push(file_id_field.as_ref().clone().with_nullable(true));

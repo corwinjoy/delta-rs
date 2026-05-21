@@ -31,7 +31,6 @@ use datafusion::config::EncryptionFactoryOptions;
 use datafusion::execution::parquet_encryption::EncryptionFactory;
 use object_store::path::Path;
 use parquet::basic::Compression;
-#[allow(unused_imports)]
 use parquet::encryption::encrypt::FileEncryptionProperties;
 use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
 use parquet::schema::types::ColumnPath;
@@ -119,14 +118,15 @@ impl WriterPropertiesFactory for DefaultWriterPropertiesFactory {
 
 /// A [`WriterPropertiesFactory`] that derives per-file encryption keys from a KMS by
 /// delegating to the DataFusion [`EncryptionFactory`] registered in `RuntimeEnv`.
+///
+/// Key material (footer key, column keys, plaintext-footer flag) is encoded in
+/// `factory_options` and forwarded to the factory — see [`EncryptionConfig::factory_options`].
+/// The factory itself is responsible for deriving the actual per-file key material.
 #[derive(Debug)]
 struct KmsWriterPropertiesFactory {
     base_properties: WriterProperties,
     encryption_factory: Arc<dyn EncryptionFactory>,
     factory_options: EncryptionFactoryOptions,
-    footer_key: String,
-    column_keys: HashMap<String, String>, // col_name → master_key_id
-    plaintext_footer: bool,
 }
 
 #[async_trait]
@@ -161,9 +161,8 @@ impl WriterPropertiesFactory for KmsWriterPropertiesFactory {
 
 /// Encryption configuration for the write path, resolved from Delta table properties.
 ///
-/// Create via [`WriterEncryptionConfig::from_config`] or
-/// [`WriterEncryptionConfig::from_snapshot`]; then pass [`WriterEncryptionConfig::factory`]
-/// to [`WriterConfig::new`].
+/// Create via [`WriterEncryptionConfig::from_config`]; then pass
+/// [`WriterEncryptionConfig::factory`] to [`WriterConfig::new`].
 #[derive(Debug, Default)]
 pub struct WriterEncryptionConfig {
     /// `None` when the table has no encryption properties.
@@ -175,21 +174,6 @@ impl WriterEncryptionConfig {
     /// `table_config: &TableConfiguration` directly).
     pub fn from_config(config: &TableConfiguration, session: &dyn Session) -> DeltaResult<Self> {
         Self::from_encryption_config(config.table_properties().encryption_config(), session)
-    }
-
-    /// Resolve from an [`EagerSnapshot`] (used in `write_execution_plan_v2` which
-    /// receives `snapshot: Option<&EagerSnapshot>`).
-    pub fn from_snapshot(
-        snapshot: &delta_kernel::snapshot::Snapshot,
-        session: &dyn Session,
-    ) -> DeltaResult<Self> {
-        Self::from_encryption_config(
-            snapshot
-                .table_configuration()
-                .table_properties()
-                .encryption_config(),
-            session,
-        )
     }
 
     fn from_encryption_config(
@@ -218,23 +202,55 @@ impl WriterEncryptionConfig {
             .set_created_by(format!("delta-rs version {}", crate::crate_version()))
             .build();
 
-        let factory = Arc::new(KmsWriterPropertiesFactory {
-            base_properties,
-            encryption_factory: df_factory,
-            factory_options,
-            footer_key: enc.footer_key.clone(),
-            column_keys: enc.column_keys.clone(),
-            plaintext_footer: enc.plaintext_footer,
-        }) as WriterPropertiesFactoryRef;
-
         Ok(Self {
-            factory: Some(factory),
+            factory: Some(Self::build_factory(
+                base_properties,
+                df_factory,
+                factory_options,
+            )),
         })
     }
-}
 
-fn build_factory_options(enc: &EncryptionConfig) -> EncryptionFactoryOptions {
-    enc.factory_options()
+    /// Resolve using only the global registry — for legacy writers that have no DataFusion session.
+    ///
+    /// Returns `Ok(None)` when the table has no encryption properties; errors if the
+    /// table has `delta.encryption.kms.id` set but the factory is not registered.
+    pub fn from_global_registry(enc: Option<EncryptionConfig>) -> DeltaResult<Self> {
+        let Some(enc) = enc else {
+            return Ok(Self { factory: None });
+        };
+        let df_factory = get_encryption_factory(&enc.kms_id).ok_or_else(|| {
+            DeltaTableError::Generic(format!(
+                "No EncryptionFactory registered for kms.id '{}'.  \
+                 Register one via `deltalake_core::operations::write::encryption::register_encryption_factory`.",
+                enc.kms_id
+            ))
+        })?;
+        let factory_options = enc.factory_options();
+        let base_properties = WriterProperties::builder()
+            .set_compression(Compression::SNAPPY)
+            .set_created_by(format!("delta-rs version {}", crate::crate_version()))
+            .build();
+        Ok(Self {
+            factory: Some(Self::build_factory(
+                base_properties,
+                df_factory,
+                factory_options,
+            )),
+        })
+    }
+
+    fn build_factory(
+        base_properties: WriterProperties,
+        encryption_factory: Arc<dyn EncryptionFactory>,
+        factory_options: EncryptionFactoryOptions,
+    ) -> WriterPropertiesFactoryRef {
+        Arc::new(KmsWriterPropertiesFactory {
+            base_properties,
+            encryption_factory,
+            factory_options,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
