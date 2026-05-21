@@ -122,7 +122,7 @@ async fn assert_all_parquets_encrypted(dir: &std::path::Path) {
                 let path = entry.path();
                 if path.is_dir() {
                     find_parquet(&path, result);
-                } else if path.to_string_lossy().contains(".parquet") {
+                } else if path.extension().and_then(|s| s.to_str()) == Some("parquet") {
                     result.push(path);
                 }
             }
@@ -384,7 +384,7 @@ async fn test_encrypted_columnar_plaintext_footer() -> DeltaResult<()> {
                 let path = entry.path();
                 if path.is_dir() {
                     find_parquet(&path, result);
-                } else if path.to_string_lossy().contains(".parquet") {
+                } else if path.extension().and_then(|s| s.to_str()) == Some("parquet") {
                     result.push(path);
                 }
             }

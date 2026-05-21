@@ -539,10 +539,11 @@ pub struct EncryptionConfig {
 impl EncryptionConfig {
     /// Parse encryption configuration from a table's `unknown_properties`.
     ///
-    /// Returns `None` if `delta.encryption.kms.id` is not set.
+    /// Returns `None` if `delta.encryption.kms.id` is not set (unencrypted table).
+    /// Returns `None` if `delta.encryption.footer.key` is absent — both are required.
     ///
-    /// Returns `None` also if `delta.encryption.footer.key` is absent — both are required
-    /// for a valid encryption configuration.
+    /// For write paths that must fail fast on partial configuration, use
+    /// [`EncryptionConfig::try_from_properties`] instead.
     pub fn from_properties(props: &TableProperties) -> Option<Self> {
         let kms_id = props
             .unknown_properties
@@ -580,6 +581,32 @@ impl EncryptionConfig {
             plaintext_footer,
             column_keys,
         })
+    }
+
+    /// Like [`from_properties`](Self::from_properties) but returns an error when
+    /// `delta.encryption.kms.id` is set without a corresponding `delta.encryption.footer.key`.
+    /// Use this in write paths to detect partially-configured tables before writing.
+    #[cfg(feature = "datafusion")]
+    pub(crate) fn try_from_properties(
+        props: &TableProperties,
+    ) -> crate::errors::DeltaResult<Option<Self>> {
+        if props
+            .unknown_properties
+            .get(ENCRYPTION_KMS_ID_PROP)
+            .is_some()
+            && props
+                .unknown_properties
+                .get(ENCRYPTION_FOOTER_KEY_PROP)
+                .filter(|v| !v.is_empty())
+                .is_none()
+        {
+            return Err(crate::errors::DeltaTableError::Generic(format!(
+                "Table has '{}' configured but '{}' is missing or empty. \
+                 Both are required for an encrypted table.",
+                ENCRYPTION_KMS_ID_PROP, ENCRYPTION_FOOTER_KEY_PROP,
+            )));
+        }
+        Ok(Self::from_properties(props))
     }
 
     /// Parse `"keyId:col1,col2;keyId2:col3"` into `{col1: keyId, col2: keyId, col3: keyId2}`.
@@ -625,9 +652,10 @@ impl EncryptionConfig {
             self.plaintext_footer.to_string(),
         );
         if !self.column_keys.is_empty() {
-            // Invert col→key_id into key_id→[cols] to reconstruct the wire format.
-            let mut by_key: std::collections::HashMap<&str, Vec<&str>> =
-                std::collections::HashMap::new();
+            // Invert col→key_id into key_id→sorted[cols]. BTreeMap ensures the encoded
+            // string is deterministic across runs (factories may use it as a cache key).
+            let mut by_key: std::collections::BTreeMap<&str, Vec<&str>> =
+                std::collections::BTreeMap::new();
             for (col, key_id) in &self.column_keys {
                 by_key
                     .entry(key_id.as_str())
@@ -636,7 +664,11 @@ impl EncryptionConfig {
             }
             let encoded = by_key
                 .iter()
-                .map(|(key_id, cols)| format!("{}:{}", key_id, cols.join(",")))
+                .map(|(key_id, cols)| {
+                    let mut sorted_cols = cols.clone();
+                    sorted_cols.sort_unstable();
+                    format!("{}:{}", key_id, sorted_cols.join(","))
+                })
                 .collect::<Vec<_>>()
                 .join(";");
             opts.options

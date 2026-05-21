@@ -87,8 +87,8 @@ impl RecordBatchWriter {
                     .table_properties()
                     .encryption_config()
             });
-            WriterEncryptionConfig::from_global_registry(enc_config)
-                .unwrap_or_default()
+            // Propagate the error if kms.id is configured but the factory is not registered.
+            WriterEncryptionConfig::from_global_registry(enc_config)?
                 .factory
                 .unwrap_or_else(default_writer_properties_factory)
         };

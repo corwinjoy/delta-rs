@@ -531,18 +531,22 @@ pub(crate) async fn write_execution_plan_v2(
 
     let plan = DataValidationExec::try_new_with_predicates(session, plan, validations)?;
 
-    // Resolve the writer factory:
-    // 1. An explicit WriterProperties from the caller takes priority (e.g. user called with_writer_properties).
-    // 2. Encryption properties from the table (delta.encryption.* table properties) are used next.
-    // 3. Fall back to the session's parquet config.
-    let writer_factory = if let Some(wp) = writer_properties {
-        Some(factory_from_writer_properties(wp))
-    } else {
+    // Resolve the writer factory. Table encryption always takes precedence to prevent
+    // accidental plaintext writes: even when the caller supplies WriterProperties, the
+    // encrypted factory is used so files are always encrypted for encrypted tables.
+    // An unencrypted caller override is honoured only for truly unencrypted tables.
+    let writer_factory = {
         let enc = snapshot
             .map(|s| WriterEncryptionConfig::from_config(s.table_configuration(), session))
             .transpose()?
             .unwrap_or_default();
-        enc.factory
+        if enc.factory.is_some() {
+            enc.factory
+        } else if let Some(wp) = writer_properties {
+            Some(factory_from_writer_properties(wp))
+        } else {
+            None
+        }
     };
 
     if !contains_cdc {

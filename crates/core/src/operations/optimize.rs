@@ -358,19 +358,30 @@ impl<'a> std::future::IntoFuture for OptimizeBuilder<'a> {
                 },
             )?;
 
-            // Derive the writer factory: explicit caller override > table encryption properties > default.
-            // Track whether encryption is active so we can pass `read_session` without a second check.
-            let (writer_factory, is_encrypted): (WriterPropertiesFactoryRef, bool) =
-                if let Some(wp) = this.writer_properties {
-                    (factory_from_writer_properties(wp), false)
-                } else {
-                    use super::write::encryption::WriterEncryptionConfig;
-                    match WriterEncryptionConfig::from_config(
-                        snapshot.table_configuration(),
-                        &session,
-                    ) {
-                        Ok(enc) if enc.factory.is_some() => (enc.factory.unwrap(), true),
-                        Ok(_) => (
+            // Derive is_encrypted from table properties so that read_session is always set
+            // for encrypted tables, even when the caller supplies a writer_properties override.
+            // Without this, the compact path's raw parquet reader cannot decrypt footer pages.
+            let is_encrypted = {
+                use crate::table::config::EncryptionExt as _;
+                snapshot.table_properties().encryption_config().is_some()
+            };
+            let read_session = if is_encrypted {
+                Some(session.clone())
+            } else {
+                None
+            };
+
+            // Derive the writer factory: table encryption always wins to prevent
+            // accidental plaintext compact output; fall back to caller override or default.
+            let writer_factory: WriterPropertiesFactoryRef = {
+                use super::write::encryption::WriterEncryptionConfig;
+                match WriterEncryptionConfig::from_config(snapshot.table_configuration(), &session)
+                {
+                    Ok(enc) if enc.factory.is_some() => enc.factory.unwrap(),
+                    Ok(_) => {
+                        if let Some(wp) = this.writer_properties {
+                            factory_from_writer_properties(wp)
+                        } else {
                             factory_from_writer_properties(
                                 WriterProperties::builder()
                                     .set_compression(Compression::ZSTD(
@@ -378,16 +389,11 @@ impl<'a> std::future::IntoFuture for OptimizeBuilder<'a> {
                                     ))
                                     .set_created_by(format!("delta-rs version {}", crate_version()))
                                     .build(),
-                            ),
-                            false,
-                        ),
-                        Err(e) => return Err(e),
+                            )
+                        }
                     }
-                };
-            let read_session = if is_encrypted {
-                Some(session.clone())
-            } else {
-                None
+                    Err(e) => return Err(e),
+                }
             };
 
             let plan = create_merge_plan(

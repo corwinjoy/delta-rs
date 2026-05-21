@@ -106,7 +106,9 @@ impl WriterEncryptionConfig {
     /// Resolve from a [`TableConfiguration`] (used in `write_exec_plan` which receives
     /// `table_config: &TableConfiguration` directly).
     pub fn from_config(config: &TableConfiguration, session: &dyn Session) -> DeltaResult<Self> {
-        let Some(enc) = config.table_properties().encryption_config() else {
+        // try_from_properties errors when kms.id is set but footer.key is missing,
+        // preventing silent plaintext writes on partially-configured tables.
+        let Some(enc) = EncryptionConfig::try_from_properties(config.table_properties())? else {
             return Ok(Self { factory: None });
         };
         // Check the session's RuntimeEnv first, then the global process-wide registry.

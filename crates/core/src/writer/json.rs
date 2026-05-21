@@ -366,6 +366,8 @@ impl DeltaWriter<Vec<Value>> for JsonWriter {
                     collect_partial_write_failure(&mut partial_writes, result)?;
                 }
                 None => {
+                    // schema is the actual file schema (partitions removed) — the one
+                    // the Parquet writer uses, so the factory sees the correct columns.
                     let schema = arrow_schema_without_partitions(&arrow_schema, &partition_columns);
                     // Compute the file path BEFORE creating the writer so the factory can
                     // incorporate it into the encryption key (required for AAD encryption).
@@ -384,7 +386,7 @@ impl DeltaWriter<Vec<Value>> for JsonWriter {
                     let path = next_data_path(&prefix, 0, &uuid, &dummy_props);
                     let writer_properties = self
                         .writer_properties_factory
-                        .create_writer_properties(&path, &arrow_schema)
+                        .create_writer_properties(&path, &schema)
                         .await?;
                     let mut writer = DataArrowWriter::new(schema, writer_properties, path)?;
                     let result = writer
