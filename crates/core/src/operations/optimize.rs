@@ -47,6 +47,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as DeErr
 use tracing::*;
 use uuid::Uuid;
 
+use super::write::encryption::{WriterPropertiesFactoryRef, factory_from_writer_properties};
 use super::write::writer::{PartitionWriter, PartitionWriterConfig};
 use super::{CustomExecuteHandler, Operation};
 use crate::delta_datafusion::{
@@ -58,13 +59,11 @@ use crate::kernel::transaction::{CommitBuilder, CommitProperties, DEFAULT_RETRIE
 use crate::kernel::{Action, Add, DataType, PartitionsExt, Remove, StructType, Version};
 use crate::kernel::{EagerSnapshot, resolve_snapshot};
 use crate::logstore::{LogStore, LogStoreRef, ObjectStoreRef};
-use crate::operations::write::encryption::factory_from_writer_properties;
-use crate::parquet_utils::default_writer_properties;
 use crate::protocol::DeltaOperation;
 use crate::table::config::TablePropertiesExt as _;
 use crate::table::state::DeltaTableState;
 use crate::writer::utils::arrow_schema_without_partitions;
-use crate::{DeltaTable, ObjectMeta, PartitionFilter, to_kernel_predicate};
+use crate::{DeltaTable, ObjectMeta, PartitionFilter, crate_version, to_kernel_predicate};
 
 /// Planner used by optimize.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -425,9 +424,6 @@ impl<'a> std::future::IntoFuture for OptimizeBuilder<'a> {
             let operation_id = this.get_operation_id();
             this.pre_execute(operation_id).await?;
 
-            let writer_properties = this.writer_properties.unwrap_or_else(|| {
-                default_writer_properties(Compression::ZSTD(ZstdLevel::try_new(4).unwrap()))
-            });
             let (session, _) = resolve_session_state(
                 this.session.as_deref(),
                 this.session_fallback_policy,
@@ -438,13 +434,39 @@ impl<'a> std::future::IntoFuture for OptimizeBuilder<'a> {
                     cdc: false,
                 },
             )?;
+
+            // Derive the writer factory: table encryption always wins to prevent
+            // accidental plaintext compact output; fall back to caller override or default.
+            let writer_factory: WriterPropertiesFactoryRef = {
+                use super::write::encryption::WriterEncryptionConfig;
+                match WriterEncryptionConfig::from_config(snapshot.table_configuration(), &session)
+                {
+                    Ok(enc) if enc.factory.is_some() => enc.factory.unwrap(),
+                    Ok(_) => {
+                        if let Some(wp) = this.writer_properties {
+                            factory_from_writer_properties(wp)
+                        } else {
+                            factory_from_writer_properties(
+                                WriterProperties::builder()
+                                    .set_compression(Compression::ZSTD(
+                                        ZstdLevel::try_new(4).unwrap(),
+                                    ))
+                                    .set_created_by(format!("delta-rs version {}", crate_version()))
+                                    .build(),
+                            )
+                        }
+                    }
+                    Err(e) => return Err(e),
+                }
+            };
+
             let plan = create_merge_plan(
                 &this.log_store,
                 this.optimize_type,
                 &snapshot,
                 this.filters,
                 this.target_size.to_owned(),
-                writer_properties,
+                writer_factory,
                 session,
             )
             .await?;
@@ -595,8 +617,8 @@ impl PlannerStats {
 pub struct MergeTaskParameters {
     /// Schema of written files
     file_schema: SchemaRef,
-    /// Properties passed to parquet writer
-    writer_properties: WriterProperties,
+    /// Factory for creating per-file WriterProperties (supports KMS encryption / AAD).
+    writer_properties_factory: WriterPropertiesFactoryRef,
     /// Input parameters for the optimize operation
     input_parameters: OptimizeInput,
     /// Num index cols to collect stats for
@@ -624,12 +646,13 @@ impl SelectedFileScanFactory {
         read_operation_id: Option<Uuid>,
     ) -> Result<Self, DeltaTableError> {
         Ok(Self {
-            snapshot: snapshot.clone(),
             log_store,
             // Mirror the caller's DataFusion session flags so rewrite scans keep
             // the same parquet/view type behavior as the rest of optimize.
             scan_config: DeltaScanConfig::new_from_session(session)
-                .with_schema(snapshot.input_schema()),
+                .with_schema(snapshot.input_schema())
+                .with_encryption_from_snapshot(snapshot)?,
+            snapshot: snapshot.clone(),
             read_operation_id,
         })
     }
@@ -687,11 +710,10 @@ impl MergePlan {
             num_batches: 0,
         };
 
-        // Next, initialize the writer
         let writer_config = PartitionWriterConfig::try_new(
             task_parameters.file_schema.clone(),
             partition_values.clone(),
-            Some(factory_from_writer_properties(task_parameters.writer_properties.clone())),
+            Some(task_parameters.writer_properties_factory.clone()),
             // Since we know the total size of the bin, we can set the target file size to None.
             if ignore_target_size {
                 None
@@ -1009,7 +1031,7 @@ pub async fn create_merge_plan(
     snapshot: &EagerSnapshot,
     filters: &[PartitionFilter],
     target_size: Option<NonZeroU64>,
-    writer_properties: WriterProperties,
+    writer_factory: WriterPropertiesFactoryRef,
     session: SessionState,
 ) -> Result<MergePlan, DeltaTableError> {
     let target_size = target_size.unwrap_or_else(|| snapshot.table_properties().target_file_size());
@@ -1055,7 +1077,7 @@ pub async fn create_merge_plan(
         planner_stats,
         task_parameters: Arc::new(MergeTaskParameters {
             file_schema,
-            writer_properties,
+            writer_properties_factory: writer_factory,
             input_parameters,
             num_indexed_cols: snapshot.table_properties().num_indexed_cols(),
             stats_columns: snapshot
