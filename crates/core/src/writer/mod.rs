@@ -44,7 +44,6 @@ pub(crate) fn ensure_legacy_writer_supports_table(
             operation,
         ));
     }
-
     Ok(())
 }
 

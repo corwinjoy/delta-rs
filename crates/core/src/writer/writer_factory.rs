@@ -26,6 +26,17 @@ pub trait WriterPropertiesFactory: Send + Sync + Debug + 'static {
     /// before any properties are created.
     fn compression(&self, column_path: &ColumnPath) -> Compression;
 
+    /// The row-group row limit of the base properties, if any; the writer slices batches
+    /// at row-group boundaries before any properties are created.
+    fn max_row_group_row_count(&self) -> Option<usize> {
+        None
+    }
+
+    /// The row-group byte limit of the base properties, if any.
+    fn max_row_group_bytes(&self) -> Option<usize> {
+        None
+    }
+
     /// The [`WriterProperties`] for a new file, called once just before it is opened.
     /// Implementations using AAD must derive keys from `file_path`.
     async fn create_writer_properties(
@@ -66,6 +77,14 @@ pub fn snappy_writer_properties() -> WriterProperties {
 impl WriterPropertiesFactory for DefaultWriterPropertiesFactory {
     fn compression(&self, column_path: &ColumnPath) -> Compression {
         self.writer_properties.compression(column_path)
+    }
+
+    fn max_row_group_row_count(&self) -> Option<usize> {
+        self.writer_properties.max_row_group_row_count()
+    }
+
+    fn max_row_group_bytes(&self) -> Option<usize> {
+        self.writer_properties.max_row_group_bytes()
     }
 
     async fn create_writer_properties(

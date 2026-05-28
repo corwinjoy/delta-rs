@@ -10,7 +10,6 @@ use delta_kernel::expressions::Scalar;
 use delta_kernel::table_properties::DataSkippingNumIndexedCols;
 use indexmap::IndexMap;
 use object_store::path::Path;
-use parquet::basic::Compression;
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::properties::WriterProperties;
 use tokio::task::JoinSet;
@@ -22,9 +21,11 @@ use crate::datafile::DataFileWriter;
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::kernel::{Add, PartitionsExt};
 use crate::logstore::ObjectStoreRef;
-use crate::parquet_utils::default_writer_properties;
 use crate::writer::stats::create_add;
 use crate::writer::utils::next_data_path;
+use crate::writer::writer_factory::{
+    WriterPropertiesFactoryRef, default_writer_properties_factory,
+};
 
 pub(super) const DEFAULT_WRITE_BATCH_SIZE: usize = 1024;
 const DEFAULT_MAX_CONCURRENCY_TASKS: usize = 10;
@@ -61,8 +62,8 @@ pub struct PartitionWriterConfig {
     prefix: Path,
     /// Values for all partition columns
     partition_values: IndexMap<String, Scalar>,
-    /// Properties passed to underlying parquet writer
-    pub(super) writer_properties: WriterProperties,
+    /// Factory for creating per-file WriterProperties (supports async KMS key derivation / AAD).
+    pub(super) writer_properties_factory: WriterPropertiesFactoryRef,
     /// Size above which we will write a buffered parquet file to disk.
     /// If None, the writer will not create a new file until the writer is closed.
     target_file_size: Option<NonZeroU64>,
@@ -81,11 +82,13 @@ pub struct PartitionWriterConfig {
 }
 
 impl PartitionWriterConfig {
-    /// Create a new instance of [PartitionWriterConfig]
+    /// Create a new instance of [PartitionWriterConfig].
+    ///
+    /// Pass `writer_properties_factory: None` to use the default SNAPPY factory (no encryption).
     pub fn try_new(
         file_schema: ArrowSchemaRef,
         partition_values: IndexMap<String, Scalar>,
-        writer_properties: Option<WriterProperties>,
+        writer_properties_factory: Option<WriterPropertiesFactoryRef>,
         target_file_size: Option<NonZeroU64>,
         write_batch_size: Option<usize>,
         max_concurrency_tasks: Option<usize>,
@@ -95,8 +98,8 @@ impl PartitionWriterConfig {
             Some(prefix) => prefix,
             None => Path::parse(partition_values.hive_partition_path())?,
         };
-        let writer_properties =
-            writer_properties.unwrap_or_else(|| default_writer_properties(Compression::SNAPPY));
+        let writer_properties_factory =
+            writer_properties_factory.unwrap_or_else(default_writer_properties_factory);
         if write_batch_size == Some(0) {
             return Err(DeltaTableError::generic(
                 "write_batch_size must be greater than 0",
@@ -108,13 +111,24 @@ impl PartitionWriterConfig {
             file_schema,
             prefix,
             partition_values,
-            writer_properties,
+            writer_properties_factory,
             target_file_size,
             write_batch_size,
             max_concurrency_tasks: max_concurrency_tasks.unwrap_or_else(get_max_concurrency_tasks),
             roll_on_row_group_boundary: roll_on_row_group_boundary_default(),
             upload_budget: UploadBudget::for_write(target_file_size),
         })
+    }
+
+    /// Properties carrying only the factory's default compression, which is all
+    /// [`next_data_path`] needs to choose the file extension.
+    fn path_properties(&self) -> WriterProperties {
+        let compression = self
+            .writer_properties_factory
+            .compression(&parquet::schema::types::ColumnPath::new(Vec::new()));
+        WriterProperties::builder()
+            .set_compression(compression)
+            .build()
     }
 
     /// Draw on `budget` instead of the fresh one [`Self::try_new`] makes, so
@@ -173,7 +187,7 @@ impl PartitionWriter {
         stats_columns: Option<Vec<String>>,
     ) -> DeltaResult<Self> {
         let writer_id = uuid::Uuid::new_v4();
-        let first_path = next_data_path(&config.prefix, 0, &writer_id, &config.writer_properties);
+        let first_path = next_data_path(&config.prefix, 0, &writer_id, &config.path_properties());
         let writer = Self::create_writer(object_store.clone(), first_path.clone(), &config);
 
         Ok(Self {
@@ -211,7 +225,7 @@ impl PartitionWriter {
             &self.config.prefix,
             self.part_counter,
             &self.writer_id,
-            &self.config.writer_properties,
+            &self.config.path_properties(),
         )
     }
 
@@ -251,15 +265,11 @@ impl PartitionWriter {
         if !self.config.roll_on_row_group_boundary {
             return None;
         }
-        if self
-            .config
-            .writer_properties
-            .max_row_group_bytes()
-            .is_some()
-        {
+        let factory = &self.config.writer_properties_factory;
+        if factory.max_row_group_bytes().is_some() {
             return None;
         }
-        let max_rows = self.config.writer_properties.max_row_group_row_count()?;
+        let max_rows = factory.max_row_group_row_count()?;
         Some(max_rows - (self.writer.in_progress_rows() % max_rows))
     }
 
@@ -290,7 +300,7 @@ impl PartitionWriter {
             // row group in memory first.
             let step = self
                 .config
-                .writer_properties
+                .writer_properties_factory
                 .max_row_group_row_count()
                 .unwrap_or(self.config.write_batch_size)
                 .max(1);
@@ -425,10 +435,11 @@ impl DataFileWriter for PartitionWriter {
 mod tests {
     use super::*;
     use crate::DeltaTableBuilder;
-    use crate::datafile::writer::test_utils::assert_default_created_by;
+    use crate::datafile::writer::test_utils::assert_default_writer_properties;
     use crate::logstore::tests::flatten_list_stream as list;
     use crate::table::config::DEFAULT_NUM_INDEX_COLS;
     use crate::writer::test_utils::get_record_batch;
+    use crate::writer::writer_factory::factory_from_writer_properties;
     use arrow::array::{Int32Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
     use object_store::ObjectStoreExt as _;
@@ -468,7 +479,7 @@ mod tests {
         let mut config = PartitionWriterConfig::try_new(
             batch.schema(),
             IndexMap::new(),
-            writer_properties,
+            writer_properties.map(factory_from_writer_properties),
             target_file_size,
             write_batch_size,
             None,
@@ -512,13 +523,13 @@ mod tests {
         let batch = RecordBatch::try_new(schema, vec![values(), values()]).unwrap();
 
         let props = WriterProperties::builder()
-            .set_compression(Compression::UNCOMPRESSED)
+            .set_compression(parquet::basic::Compression::UNCOMPRESSED)
             .set_dictionary_enabled(false)
             .build();
         let config = PartitionWriterConfig::try_new(
             batch.schema(),
             IndexMap::new(),
-            Some(props),
+            Some(factory_from_writer_properties(props)),
             None,
             None,
             None,
@@ -540,24 +551,25 @@ mod tests {
         writer.abort().await.unwrap();
     }
 
-    #[test]
-    fn test_partition_writer_config_defaults_include_delta_rs_created_by() {
+    #[tokio::test]
+    async fn test_partition_writer_config_defaults_include_delta_rs_created_by() {
         let schema = Arc::new(ArrowSchema::new(vec![Field::new(
             "id",
             DataType::Int32,
             true,
         )]));
-        let config =
-            PartitionWriterConfig::try_new(schema, IndexMap::new(), None, None, None, None, None)
-                .unwrap();
+        let config = PartitionWriterConfig::try_new(
+            schema.clone(),
+            IndexMap::new(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
-        assert_default_created_by(&config.writer_properties);
-        assert_eq!(
-            config
-                .writer_properties
-                .compression(&ColumnPath::from("id")),
-            Compression::SNAPPY
-        );
+        assert_default_writer_properties(&config.writer_properties_factory, &schema).await;
     }
 
     #[tokio::test]
@@ -646,7 +658,7 @@ mod tests {
         let config = PartitionWriterConfig::try_new(
             batch.schema(),
             IndexMap::new(),
-            Some(properties),
+            Some(factory_from_writer_properties(properties)),
             Some(NonZeroU64::new(10_000).unwrap()),
             Some(700),
             None,

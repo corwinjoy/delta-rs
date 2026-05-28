@@ -153,6 +153,12 @@ impl LazyArrowWriter {
     pub(super) async fn write_batch(&mut self, batch: &RecordBatch) -> DeltaResult<()> {
         match self {
             LazyArrowWriter::Initialized(path, object_store, config) => {
+                // Call the factory with the actual file path so that KMS implementations
+                // can incorporate the path into AAD encryption key derivation.
+                let writer_properties = config
+                    .writer_properties_factory
+                    .create_writer_properties(path, &config.file_schema)
+                    .await?;
                 let writer = ParquetObjectWriter(
                     BufWriter::with_capacity(
                         Arc::clone(object_store),
@@ -164,7 +170,7 @@ impl LazyArrowWriter {
                 let mut arrow_writer = AsyncArrowWriter::try_new(
                     writer,
                     config.file_schema.clone(),
-                    Some(config.writer_properties.clone()),
+                    Some(writer_properties),
                 )?;
                 // A large first batch can complete row groups and start a multipart
                 // upload before this call returns. On failure, `self` is still
