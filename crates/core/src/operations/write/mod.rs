@@ -66,6 +66,7 @@ use crate::protocol::{DeltaOperation, SaveMode};
 
 /// Configuration types controlling how data and statistics are written.
 pub mod configs;
+pub mod encryption;
 pub(crate) mod execution;
 pub(crate) mod generated_columns;
 pub(crate) mod metrics;

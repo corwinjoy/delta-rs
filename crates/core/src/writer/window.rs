@@ -48,7 +48,11 @@ impl SinkFactory {
         let config = WriterConfig::new(
             schema,
             self.partition_columns.clone(),
-            Some(self.writer_properties.clone()),
+            Some(
+                crate::writer::writer_factory::factory_from_writer_properties(
+                    self.writer_properties.clone(),
+                ),
+            ),
             self.target_file_size,
             None,
             self.num_indexed_cols,

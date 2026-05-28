@@ -489,11 +489,15 @@ mod tests {
 // EncryptionConfig — parsed from delta.encryption.* table properties
 // ---------------------------------------------------------------------------
 
-/// Delta table property keys for encryption configuration.
+/// Table property naming the KMS / encryption factory to use (`delta.encryption.kms.id`).
 pub const ENCRYPTION_KMS_ID_PROP: &str = "delta.encryption.kms.id";
+/// Table property holding opaque KMS configuration (`delta.encryption.kms.configuration`).
 pub const ENCRYPTION_KMS_CONFIGURATION_PROP: &str = "delta.encryption.kms.configuration";
+/// Table property naming the footer key (`delta.encryption.footer.key`).
 pub const ENCRYPTION_FOOTER_KEY_PROP: &str = "delta.encryption.footer.key";
+/// Table property controlling plaintext footers (`delta.encryption.plaintext.footer`).
 pub const ENCRYPTION_PLAINTEXT_FOOTER_PROP: &str = "delta.encryption.plaintext.footer";
+/// Table property mapping column-key names to columns (`delta.encryption.column.keys`).
 pub const ENCRYPTION_COLUMN_KEYS_PROP: &str = "delta.encryption.column.keys";
 
 /// Key names forwarded to [`EncryptionFactoryOptions`] (suffix after `delta.encryption.` stripped).
@@ -690,6 +694,7 @@ impl EncryptionConfig {
 
 /// Extension method for conveniently reading encryption config from any `TableProperties`.
 pub trait EncryptionExt {
+    /// Parse the `delta.encryption.*` properties, returning `None` when unconfigured.
     fn encryption_config(&self) -> Option<EncryptionConfig>;
 }
 
@@ -752,18 +757,36 @@ mod encryption_tests {
         let props = props_with(&[
             (ENCRYPTION_KMS_ID_PROP, "prod-kms"),
             (ENCRYPTION_FOOTER_KEY_PROP, "fk"),
-            ("delta.encryption.kms.configuration", r#"{"endpoint":"kms.example.com"}"#),
+            (
+                "delta.encryption.kms.configuration",
+                r#"{"endpoint":"kms.example.com"}"#,
+            ),
             (ENCRYPTION_PLAINTEXT_FOOTER_PROP, "true"),
             (ENCRYPTION_COLUMN_KEYS_PROP, "keyA:col1,col2;keyB:col3"),
         ]);
         let enc = EncryptionConfig::from_properties(&props).expect("should parse");
         assert_eq!(enc.kms_id, "prod-kms");
         assert_eq!(enc.footer_key, "fk");
-        assert_eq!(enc.kms_configuration.as_deref(), Some(r#"{"endpoint":"kms.example.com"}"#));
+        assert_eq!(
+            enc.kms_configuration.as_deref(),
+            Some(r#"{"endpoint":"kms.example.com"}"#)
+        );
         assert!(enc.plaintext_footer);
-        let key_a: Vec<&str> = enc.column_keys.get("keyA").unwrap().iter().map(|s| s.as_str()).collect();
+        let key_a: Vec<&str> = enc
+            .column_keys
+            .get("keyA")
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
         assert_eq!(key_a, ["col1", "col2"]);
-        let key_b: Vec<&str> = enc.column_keys.get("keyB").unwrap().iter().map(|s| s.as_str()).collect();
+        let key_b: Vec<&str> = enc
+            .column_keys
+            .get("keyB")
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
         assert_eq!(key_b, ["col3"]);
     }
 
@@ -785,7 +808,11 @@ mod encryption_tests {
             (ENCRYPTION_KMS_ID_PROP, "kms"),
             (ENCRYPTION_FOOTER_KEY_PROP, "fk"),
         ]);
-        assert!(EncryptionConfig::try_from_properties(&props).unwrap().is_some());
+        assert!(
+            EncryptionConfig::try_from_properties(&props)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -797,16 +824,31 @@ mod encryption_tests {
     #[test]
     fn parse_column_keys_multiple_segments() {
         let result = EncryptionConfig::parse_column_keys(Some("k1:a,b;k2:c"));
-        let k1: Vec<&str> = result.get("k1").unwrap().iter().map(|s| s.as_str()).collect();
+        let k1: Vec<&str> = result
+            .get("k1")
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
         assert_eq!(k1, ["a", "b"]);
-        let k2: Vec<&str> = result.get("k2").unwrap().iter().map(|s| s.as_str()).collect();
+        let k2: Vec<&str> = result
+            .get("k2")
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
         assert_eq!(k2, ["c"]);
     }
 
     #[test]
     fn parse_column_keys_trims_whitespace() {
         let result = EncryptionConfig::parse_column_keys(Some(" k1 : col1 , col2 "));
-        let k1: Vec<&str> = result.get("k1").unwrap().iter().map(|s| s.as_str()).collect();
+        let k1: Vec<&str> = result
+            .get("k1")
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
         assert_eq!(k1, ["col1", "col2"]);
     }
 }

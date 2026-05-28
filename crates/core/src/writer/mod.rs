@@ -20,6 +20,7 @@ pub mod record_batch;
 pub(crate) mod stats;
 pub mod utils;
 pub(crate) mod window;
+pub mod writer_factory;
 
 #[cfg(test)]
 pub mod test_utils;
@@ -42,7 +43,6 @@ pub(crate) fn ensure_legacy_writer_supports_table(
             operation,
         ));
     }
-
     Ok(())
 }
 
