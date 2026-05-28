@@ -21,6 +21,7 @@ use deltalake_core::logstore::{
 use deltalake_core::operations::optimize::{
     MetricDetails, Metrics, OptimizeType, PlannerStrategy, create_merge_plan,
 };
+use deltalake_core::operations::write::encryption::factory_from_writer_properties;
 use deltalake_core::protocol::DeltaOperation;
 use deltalake_core::test_utils::TestTables;
 use deltalake_core::writer::{DeltaWriter, RecordBatchWriter};
@@ -693,7 +694,7 @@ async fn test_optimize_selected_file_scans_register_operation_scoped_log_store()
         tracked_table.snapshot()?.snapshot(),
         &[],
         Some(NonZeroU64::new(1_000_000).unwrap()),
-        WriterProperties::builder().build(),
+        factory_from_writer_properties(WriterProperties::builder().build()),
         df_context.state(),
     )
     .await?;
@@ -845,7 +846,7 @@ async fn test_conflict_for_remove_actions() -> Result<(), Box<dyn Error>> {
         dt.snapshot()?.snapshot(),
         &filter,
         None,
-        WriterProperties::builder().build(),
+        factory_from_writer_properties(WriterProperties::builder().build()),
         df_context.state(),
     )
     .await?;
@@ -912,7 +913,7 @@ async fn test_no_conflict_for_append_actions() -> Result<(), Box<dyn Error>> {
         dt.snapshot()?.snapshot(),
         &filter,
         None,
-        WriterProperties::builder().build(),
+        factory_from_writer_properties(WriterProperties::builder().build()),
         df_context.state(),
     )
     .await?;
@@ -976,7 +977,7 @@ async fn test_commit_interval() -> Result<(), Box<dyn Error>> {
         dt.snapshot()?.snapshot(),
         &[],
         None,
-        WriterProperties::builder().build(),
+        factory_from_writer_properties(WriterProperties::builder().build()),
         context.state(),
     )
     .await?;
