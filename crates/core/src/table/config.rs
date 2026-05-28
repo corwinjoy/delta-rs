@@ -1,9 +1,12 @@
 //! Delta Table configuration
+use std::collections::HashMap;
 use std::num::{NonZero, NonZeroU64};
 use std::str::FromStr;
 use std::sync::LazyLock;
 use std::time::Duration;
 
+#[cfg(feature = "datafusion")]
+use datafusion::config::{EncryptionFactoryOptions, TableParquetOptions};
 use delta_kernel::table_properties::{DataSkippingNumIndexedCols, IsolationLevel, TableProperties};
 
 use super::Constraint;
@@ -472,5 +475,331 @@ mod tests {
                 "interval 'interval -25 hours' cannot be negative".to_string()
             )
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EncryptionConfig — parsed from delta.encryption.* table properties
+// ---------------------------------------------------------------------------
+
+/// Delta table property keys for encryption configuration.
+pub const ENCRYPTION_KMS_ID_PROP: &str = "delta.encryption.kms.id";
+pub const ENCRYPTION_KMS_CONFIGURATION_PROP: &str = "delta.encryption.kms.configuration";
+pub const ENCRYPTION_FOOTER_KEY_PROP: &str = "delta.encryption.footer.key";
+pub const ENCRYPTION_PLAINTEXT_FOOTER_PROP: &str = "delta.encryption.plaintext.footer";
+pub const ENCRYPTION_COLUMN_KEYS_PROP: &str = "delta.encryption.column.keys";
+
+/// Key names forwarded to [`EncryptionFactoryOptions`] (suffix after `delta.encryption.` stripped).
+#[cfg(feature = "datafusion")]
+pub(crate) const FACTORY_OPT_KMS_CONFIGURATION: &str = "kms.configuration";
+#[cfg(feature = "datafusion")]
+pub(crate) const FACTORY_OPT_FOOTER_KEY: &str = "footer.key";
+#[cfg(feature = "datafusion")]
+pub(crate) const FACTORY_OPT_PLAINTEXT_FOOTER: &str = "plaintext.footer";
+#[cfg(feature = "datafusion")]
+pub(crate) const FACTORY_OPT_COLUMN_KEYS: &str = "column.keys";
+
+/// Parquet encryption configuration derived from `delta.encryption.*` table properties.
+///
+/// These properties are stored in the Delta log metadata and are automatically applied to
+/// all read and write operations — no per-operation configuration is needed.
+///
+/// # Protocol
+/// Tables using encryption require Reader Version 3, Writer Version 7, and the
+/// `parquetEncryption` writer feature.
+///
+/// # Registering a KMS client
+/// Before operating on an encrypted table, register an [`EncryptionFactory`] whose ID
+/// matches `delta.encryption.kms.id` with DataFusion's `RuntimeEnv`:
+///
+/// ```rust,ignore
+/// session.runtime_env().register_parquet_encryption_factory("my-kms", factory);
+/// ```
+///
+/// [`EncryptionFactory`]: datafusion::execution::parquet_encryption::EncryptionFactory
+#[derive(Debug, Clone)]
+pub struct EncryptionConfig {
+    /// Identifies the `EncryptionFactory` registered in DataFusion's `RuntimeEnv`.
+    /// Corresponds to `delta.encryption.kms.id`.
+    pub kms_id: String,
+    /// Opaque KMS-specific configuration string (e.g. JSON) forwarded to the factory.
+    /// Corresponds to `delta.encryption.kms.configuration`.
+    pub kms_configuration: Option<String>,
+    /// Master key identifier for footer encryption.
+    /// Corresponds to `delta.encryption.footer.key`.
+    pub footer_key: String,
+    /// If `true` the parquet footer is left unencrypted (plaintext footer mode).
+    /// Defaults to `false`. Corresponds to `delta.encryption.plaintext.footer`.
+    pub plaintext_footer: bool,
+    /// Per-column encryption: map from master key identifier → list of column names.
+    /// Stored in the natural wire format (`keyId → [col1, col2]`) so serialisation is
+    /// a direct forward pass with no inversion.
+    /// Corresponds to `delta.encryption.column.keys` with format `keyId:col1,col2;keyId2:col3`.
+    pub column_keys: HashMap<String, Vec<String>>,
+}
+
+impl EncryptionConfig {
+    /// Parse encryption configuration from a table's `unknown_properties`.
+    ///
+    /// Returns `None` if `delta.encryption.kms.id` is not set (unencrypted table).
+    /// Returns `None` if `delta.encryption.footer.key` is absent — both are required.
+    ///
+    /// For write paths that must fail fast on partial configuration, use
+    /// [`EncryptionConfig::try_from_properties`] instead.
+    pub fn from_properties(props: &TableProperties) -> Option<Self> {
+        let kms_id = props
+            .unknown_properties
+            .get(ENCRYPTION_KMS_ID_PROP)?
+            .clone();
+        // footer.key is required when kms.id is set.
+        let footer_key = props
+            .unknown_properties
+            .get(ENCRYPTION_FOOTER_KEY_PROP)
+            .filter(|v| !v.is_empty())
+            .cloned()?;
+
+        let kms_configuration = props
+            .unknown_properties
+            .get(ENCRYPTION_KMS_CONFIGURATION_PROP)
+            .cloned();
+
+        let plaintext_footer = props
+            .unknown_properties
+            .get(ENCRYPTION_PLAINTEXT_FOOTER_PROP)
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(false);
+
+        let column_keys = Self::parse_column_keys(
+            props
+                .unknown_properties
+                .get(ENCRYPTION_COLUMN_KEYS_PROP)
+                .map(|s| s.as_str()),
+        );
+
+        Some(Self {
+            kms_id,
+            kms_configuration,
+            footer_key,
+            plaintext_footer,
+            column_keys,
+        })
+    }
+
+    /// Like [`from_properties`](Self::from_properties) but returns an error when
+    /// `delta.encryption.kms.id` is set without a corresponding `delta.encryption.footer.key`.
+    /// Use this in write paths to detect partially-configured tables before writing.
+    #[cfg(feature = "datafusion")]
+    pub(crate) fn try_from_properties(
+        props: &TableProperties,
+    ) -> crate::errors::DeltaResult<Option<Self>> {
+        if props
+            .unknown_properties
+            .get(ENCRYPTION_KMS_ID_PROP)
+            .is_some()
+            && props
+                .unknown_properties
+                .get(ENCRYPTION_FOOTER_KEY_PROP)
+                .filter(|v| !v.is_empty())
+                .is_none()
+        {
+            return Err(crate::errors::DeltaTableError::Generic(format!(
+                "Table has '{}' configured but '{}' is missing or empty. \
+                 Both are required for an encrypted table.",
+                ENCRYPTION_KMS_ID_PROP, ENCRYPTION_FOOTER_KEY_PROP,
+            )));
+        }
+        Ok(Self::from_properties(props))
+    }
+
+    /// Parse `"keyId:col1,col2;keyId2:col3"` into `{keyId: [col1, col2], keyId2: [col3]}`.
+    fn parse_column_keys(value: Option<&str>) -> HashMap<String, Vec<String>> {
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        let Some(value) = value else { return map };
+        for segment in value.split(';') {
+            let segment = segment.trim();
+            if let Some((key_id, cols)) = segment.split_once(':') {
+                let key_id = key_id.trim().to_string();
+                let cols: Vec<String> = cols
+                    .split(',')
+                    .map(|c| c.trim().to_string())
+                    .filter(|c| !c.is_empty())
+                    .collect();
+                if !cols.is_empty() {
+                    map.entry(key_id).or_default().extend(cols);
+                }
+            }
+        }
+        map
+    }
+
+    /// Build a [`TableParquetOptions`] that tells DataFusion's parquet scan to look up the
+    /// decryption factory by [`kms_id`](EncryptionConfig::kms_id) in the `RuntimeEnv`.
+    #[cfg(feature = "datafusion")]
+    pub fn to_table_parquet_options(&self) -> TableParquetOptions {
+        let mut opts = TableParquetOptions::default();
+        opts.crypto.factory_id = Some(self.kms_id.clone());
+        opts.crypto.factory_options = self.factory_options();
+        opts
+    }
+
+    /// Build [`EncryptionFactoryOptions`] forwarded to the registered factory.
+    #[cfg(feature = "datafusion")]
+    pub fn factory_options(&self) -> EncryptionFactoryOptions {
+        let mut opts = EncryptionFactoryOptions::default();
+        if let Some(cfg) = &self.kms_configuration {
+            opts.options
+                .insert(FACTORY_OPT_KMS_CONFIGURATION.to_string(), cfg.clone());
+        }
+        opts.options
+            .insert(FACTORY_OPT_FOOTER_KEY.to_string(), self.footer_key.clone());
+        opts.options.insert(
+            FACTORY_OPT_PLAINTEXT_FOOTER.to_string(),
+            self.plaintext_footer.to_string(),
+        );
+        if !self.column_keys.is_empty() {
+            // Serialise key_id→[cols] in sorted order so the string is deterministic
+            // across runs (factories may use it as a cache key).
+            let mut sorted_keys: Vec<(&str, &Vec<String>)> = self
+                .column_keys
+                .iter()
+                .map(|(k, v)| (k.as_str(), v))
+                .collect();
+            sorted_keys.sort_unstable_by_key(|(k, _)| *k);
+            let encoded = sorted_keys
+                .iter()
+                .map(|(key_id, cols)| {
+                    let mut sorted_cols: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
+                    sorted_cols.sort_unstable();
+                    format!("{}:{}", key_id, sorted_cols.join(","))
+                })
+                .collect::<Vec<_>>()
+                .join(";");
+            opts.options
+                .insert(FACTORY_OPT_COLUMN_KEYS.to_string(), encoded);
+        }
+        opts
+    }
+}
+
+/// Extension method for conveniently reading encryption config from any `TableProperties`.
+pub trait EncryptionExt {
+    fn encryption_config(&self) -> Option<EncryptionConfig>;
+}
+
+impl EncryptionExt for TableProperties {
+    fn encryption_config(&self) -> Option<EncryptionConfig> {
+        EncryptionConfig::from_properties(self)
+    }
+}
+
+#[cfg(test)]
+mod encryption_tests {
+    use std::collections::HashMap;
+
+    use delta_kernel::table_properties::TableProperties;
+
+    use super::{
+        ENCRYPTION_COLUMN_KEYS_PROP, ENCRYPTION_FOOTER_KEY_PROP, ENCRYPTION_KMS_ID_PROP,
+        ENCRYPTION_PLAINTEXT_FOOTER_PROP, EncryptionConfig,
+    };
+
+    fn props_with(entries: &[(&str, &str)]) -> TableProperties {
+        let mut unknown: HashMap<String, String> = HashMap::new();
+        for (k, v) in entries {
+            unknown.insert(k.to_string(), v.to_string());
+        }
+        TableProperties {
+            unknown_properties: unknown,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn from_properties_returns_none_without_kms_id() {
+        let props = props_with(&[(ENCRYPTION_FOOTER_KEY_PROP, "footer-key")]);
+        assert!(EncryptionConfig::from_properties(&props).is_none());
+    }
+
+    #[test]
+    fn from_properties_returns_none_when_footer_key_absent() {
+        let props = props_with(&[(ENCRYPTION_KMS_ID_PROP, "my-kms")]);
+        assert!(EncryptionConfig::from_properties(&props).is_none());
+    }
+
+    #[test]
+    fn from_properties_minimal_required_fields() {
+        let props = props_with(&[
+            (ENCRYPTION_KMS_ID_PROP, "my-kms"),
+            (ENCRYPTION_FOOTER_KEY_PROP, "footer-key"),
+        ]);
+        let enc = EncryptionConfig::from_properties(&props).expect("should parse");
+        assert_eq!(enc.kms_id, "my-kms");
+        assert_eq!(enc.footer_key, "footer-key");
+        assert!(enc.kms_configuration.is_none());
+        assert!(!enc.plaintext_footer);
+        assert!(enc.column_keys.is_empty());
+    }
+
+    #[test]
+    fn from_properties_all_fields() {
+        let props = props_with(&[
+            (ENCRYPTION_KMS_ID_PROP, "prod-kms"),
+            (ENCRYPTION_FOOTER_KEY_PROP, "fk"),
+            ("delta.encryption.kms.configuration", r#"{"endpoint":"kms.example.com"}"#),
+            (ENCRYPTION_PLAINTEXT_FOOTER_PROP, "true"),
+            (ENCRYPTION_COLUMN_KEYS_PROP, "keyA:col1,col2;keyB:col3"),
+        ]);
+        let enc = EncryptionConfig::from_properties(&props).expect("should parse");
+        assert_eq!(enc.kms_id, "prod-kms");
+        assert_eq!(enc.footer_key, "fk");
+        assert_eq!(enc.kms_configuration.as_deref(), Some(r#"{"endpoint":"kms.example.com"}"#));
+        assert!(enc.plaintext_footer);
+        let key_a: Vec<&str> = enc.column_keys.get("keyA").unwrap().iter().map(|s| s.as_str()).collect();
+        assert_eq!(key_a, ["col1", "col2"]);
+        let key_b: Vec<&str> = enc.column_keys.get("keyB").unwrap().iter().map(|s| s.as_str()).collect();
+        assert_eq!(key_b, ["col3"]);
+    }
+
+    #[cfg(feature = "datafusion")]
+    #[test]
+    fn try_from_properties_errors_when_footer_key_missing() {
+        let props = props_with(&[(ENCRYPTION_KMS_ID_PROP, "my-kms")]);
+        let result = EncryptionConfig::try_from_properties(&props);
+        assert!(result.is_err(), "should error when footer.key is absent");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains(ENCRYPTION_KMS_ID_PROP));
+        assert!(msg.contains(ENCRYPTION_FOOTER_KEY_PROP));
+    }
+
+    #[cfg(feature = "datafusion")]
+    #[test]
+    fn try_from_properties_succeeds_when_fully_configured() {
+        let props = props_with(&[
+            (ENCRYPTION_KMS_ID_PROP, "kms"),
+            (ENCRYPTION_FOOTER_KEY_PROP, "fk"),
+        ]);
+        assert!(EncryptionConfig::try_from_properties(&props).unwrap().is_some());
+    }
+
+    #[test]
+    fn parse_column_keys_empty_input() {
+        let result = EncryptionConfig::parse_column_keys(None);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_column_keys_multiple_segments() {
+        let result = EncryptionConfig::parse_column_keys(Some("k1:a,b;k2:c"));
+        let k1: Vec<&str> = result.get("k1").unwrap().iter().map(|s| s.as_str()).collect();
+        assert_eq!(k1, ["a", "b"]);
+        let k2: Vec<&str> = result.get("k2").unwrap().iter().map(|s| s.as_str()).collect();
+        assert_eq!(k2, ["c"]);
+    }
+
+    #[test]
+    fn parse_column_keys_trims_whitespace() {
+        let result = EncryptionConfig::parse_column_keys(Some(" k1 : col1 , col2 "));
+        let k1: Vec<&str> = result.get("k1").unwrap().iter().map(|s| s.as_str()).collect();
+        assert_eq!(k1, ["col1", "col2"]);
     }
 }
