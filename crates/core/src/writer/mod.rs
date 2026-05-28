@@ -19,6 +19,7 @@ pub mod json;
 pub mod record_batch;
 pub(crate) mod stats;
 pub mod utils;
+pub mod writer_factory;
 
 #[cfg(test)]
 pub mod test_utils;
@@ -35,7 +36,6 @@ pub(crate) fn ensure_legacy_writer_supports_table(
     {
         return Err(unsupported_column_mapping_write(operation));
     }
-
     Ok(())
 }
 

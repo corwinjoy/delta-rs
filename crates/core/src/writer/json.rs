@@ -171,7 +171,7 @@ async fn flush_batches_to_store(writer: &mut JsonWriter) -> Result<Vec<Add>, Del
 
     use crate::kernel::Action;
     use crate::operations::write::configs::WriterStatsConfig;
-    use crate::operations::write::execution::{default_writer_properties, write_execution_plan};
+    use crate::operations::write::execution::write_data_plan;
 
     let batches = std::mem::take(&mut writer.batches);
     if batches.is_empty() {
@@ -193,15 +193,14 @@ async fn flush_batches_to_store(writer: &mut JsonWriter) -> Result<Vec<Add>, Del
     let table_config = state.snapshot().table_configuration();
     let stats_config = WriterStatsConfig::from_config(table_config);
 
-    let actions = write_execution_plan(
-        None,
+    let (actions, _) = write_data_plan(
         &ctx.state(),
         exec,
         writer.partition_columns.clone(),
         writer.table.object_store(),
         None,
         None,
-        Some(default_writer_properties()),
+        None,
         stats_config,
     )
     .await?;

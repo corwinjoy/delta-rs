@@ -58,6 +58,7 @@ use crate::kernel::transaction::{CommitBuilder, CommitProperties, DEFAULT_RETRIE
 use crate::kernel::{Action, Add, DataType, PartitionsExt, Remove, StructType, Version};
 use crate::kernel::{EagerSnapshot, resolve_snapshot};
 use crate::logstore::{LogStore, LogStoreRef, ObjectStoreRef};
+use crate::operations::write::encryption::factory_from_writer_properties;
 use crate::parquet_utils::default_writer_properties;
 use crate::protocol::DeltaOperation;
 use crate::table::config::TablePropertiesExt as _;
@@ -690,7 +691,7 @@ impl MergePlan {
         let writer_config = PartitionWriterConfig::try_new(
             task_parameters.file_schema.clone(),
             partition_values.clone(),
-            Some(task_parameters.writer_properties.clone()),
+            Some(factory_from_writer_properties(task_parameters.writer_properties.clone())),
             // Since we know the total size of the bin, we can set the target file size to None.
             if ignore_target_size {
                 None

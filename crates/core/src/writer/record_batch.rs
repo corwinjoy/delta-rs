@@ -356,7 +356,8 @@ async fn flush_batches(writer: &mut RecordBatchWriter) -> Result<Vec<Add>, Delta
 
     use crate::kernel::Action;
     use crate::operations::write::configs::WriterStatsConfig;
-    use crate::operations::write::execution::write_execution_plan;
+    use crate::operations::write::execution::write_data_plan;
+    use crate::writer::writer_factory::factory_from_writer_properties;
 
     let batches = std::mem::take(&mut writer.batches);
     if batches.is_empty() {
@@ -377,15 +378,14 @@ async fn flush_batches(writer: &mut RecordBatchWriter) -> Result<Vec<Add>, Delta
     let stats_config =
         WriterStatsConfig::new(writer.num_indexed_cols, writer.stats_columns.clone());
 
-    let actions = write_execution_plan(
-        None,
+    let (actions, _) = write_data_plan(
         &ctx.state(),
         exec,
         writer.partition_columns.clone(),
         writer.storage.clone(),
         None,
         None,
-        Some(writer.writer_properties.clone()),
+        Some(factory_from_writer_properties(writer.writer_properties.clone())),
         stats_config,
     )
     .await?;
