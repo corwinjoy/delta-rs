@@ -6,7 +6,7 @@ use arrow::datatypes::{Schema, SchemaRef};
 use datafusion::catalog::TableProvider;
 use datafusion::common::tree_node::TreeNode;
 use datafusion::common::{DFSchemaRef, Result, Statistics};
-use datafusion::config::ConfigOptions;
+use datafusion::config::{ConfigOptions, TableParquetOptions};
 use datafusion::error::DataFusionError;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::logical_expr::simplify::SimplifyContext;
@@ -68,6 +68,22 @@ pub(crate) fn resolve_file_column_name(
             Ok(name)
         }
     }
+}
+
+/// Derive [`TableParquetOptions`] from `delta.encryption.*` table properties.
+fn parquet_options_from_table_config(
+    config: &delta_kernel::table_configuration::TableConfiguration,
+) -> crate::DeltaResult<Option<TableParquetOptions>> {
+    Ok(
+        crate::table::config::EncryptionConfig::try_from_properties(config.table_properties())?
+            .map(|enc| enc.to_table_parquet_options()),
+    )
+}
+
+fn parquet_options_from_snapshot(
+    snapshot: &next::SnapshotWrapper,
+) -> crate::DeltaResult<Option<TableParquetOptions>> {
+    parquet_options_from_table_config(snapshot.table_configuration())
 }
 
 #[derive(Debug, Clone)]
@@ -151,12 +167,15 @@ impl DeltaScanConfigBuilder {
             None
         };
 
+        let table_parquet_options = parquet_options_from_table_config(snapshot.table_configuration())?;
+
         Ok(DeltaScanConfig {
             file_column_name,
             wrap_partition_values: self.wrap_partition_values.unwrap_or(true),
             enable_parquet_pushdown: self.enable_parquet_pushdown,
             schema: self.schema.clone(),
             schema_force_view_types: true,
+            table_parquet_options,
         })
     }
 }
@@ -175,6 +194,11 @@ pub struct DeltaScanConfig {
     pub schema_force_view_types: bool,
     /// Schema to read as
     pub schema: Option<SchemaRef>,
+    /// Parquet scan options derived from `delta.encryption.*` table properties.
+    /// When set, the scan configures the parquet reader to look up the decryption
+    /// factory by `factory_id` in the DataFusion `RuntimeEnv`.
+    #[serde(skip)]
+    pub table_parquet_options: Option<TableParquetOptions>,
 }
 
 impl Default for DeltaScanConfig {
@@ -192,6 +216,7 @@ impl DeltaScanConfig {
             enable_parquet_pushdown: true,
             schema_force_view_types: true,
             schema: None,
+            table_parquet_options: None,
         }
     }
 
@@ -203,6 +228,7 @@ impl DeltaScanConfig {
             enable_parquet_pushdown: config_options.execution.parquet.pushdown_filters,
             schema_force_view_types: config_options.execution.parquet.schema_force_view_types,
             schema: None,
+            table_parquet_options: None,
         }
     }
 
@@ -231,6 +257,15 @@ impl DeltaScanConfig {
     pub fn with_schema(mut self, schema: SchemaRef) -> Self {
         self.schema = Some(schema);
         self
+    }
+
+    /// Apply encryption parquet options derived from the table's `delta.encryption.*` properties.
+    pub fn with_encryption_from_snapshot(
+        mut self,
+        snapshot: &EagerSnapshot,
+    ) -> crate::DeltaResult<Self> {
+        self.table_parquet_options = parquet_options_from_table_config(snapshot.table_configuration())?;
+        Ok(self)
     }
 }
 
@@ -405,6 +440,9 @@ impl TableProviderBuilder {
             }
         }
 
+        config.table_parquet_options = parquet_options_from_snapshot(&snapshot)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+
         let mut provider = next::DeltaScan::new(snapshot, config)?;
         if let Some(row_index_column) = row_index_column {
             provider = provider.with_row_index_column(row_index_column)?;
@@ -445,7 +483,7 @@ impl DeltaTable {
     pub fn table_provider(&self) -> TableProviderBuilder {
         let mut builder = TableProviderBuilder::new().with_log_store(self.log_store());
         if let Ok(state) = self.snapshot() {
-            builder = builder.with_snapshot(state.snapshot().snapshot().clone());
+            builder = builder.with_eager_snapshot(state.snapshot().clone());
         }
         builder
     }
