@@ -47,6 +47,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as DeErr
 use tracing::*;
 use uuid::Uuid;
 
+use super::write::encryption::{WriterPropertiesFactoryRef, factory_from_writer_properties};
 use super::{CustomExecuteHandler, Operation};
 use crate::datafile::writer::{PartitionWriter, PartitionWriterConfig};
 use crate::delta_datafusion::{
@@ -58,7 +59,6 @@ use crate::kernel::transaction::{CommitBuilder, CommitProperties, DEFAULT_RETRIE
 use crate::kernel::{Action, Add, DataType, PartitionsExt, Remove, StructType, Version};
 use crate::kernel::{EagerSnapshot, resolve_snapshot};
 use crate::logstore::{LogStore, LogStoreRef, ObjectStoreRef};
-use crate::operations::write::encryption::factory_from_writer_properties;
 use crate::parquet_utils::default_writer_properties;
 use crate::protocol::DeltaOperation;
 use crate::table::config::TablePropertiesExt as _;
@@ -611,7 +611,7 @@ pub struct MergeTaskParameters {
     /// Schema of written files
     file_schema: SchemaRef,
     /// Factory for creating per-file WriterProperties (supports KMS encryption / AAD).
-    writer_properties_factory: crate::operations::write::encryption::WriterPropertiesFactoryRef,
+    writer_properties_factory: WriterPropertiesFactoryRef,
     /// Input parameters for the optimize operation
     input_parameters: OptimizeInput,
     /// Num index cols to collect stats for
@@ -639,12 +639,13 @@ impl SelectedFileScanFactory {
         read_operation_id: Option<Uuid>,
     ) -> Result<Self, DeltaTableError> {
         Ok(Self {
-            snapshot: snapshot.clone(),
             log_store,
             // Mirror the caller's DataFusion session flags so rewrite scans keep
             // the same parquet/view type behavior as the rest of optimize.
             scan_config: DeltaScanConfig::new_from_session(session)
-                .with_schema(snapshot.input_schema()),
+                .with_schema(snapshot.input_schema())
+                .with_encryption_from_snapshot(snapshot)?,
+            snapshot: snapshot.clone(),
             read_operation_id,
         })
     }
@@ -702,7 +703,6 @@ impl MergePlan {
             num_batches: 0,
         };
 
-        // Next, initialize the writer
         let writer_config = PartitionWriterConfig::try_new(
             task_parameters.file_schema.clone(),
             partition_values.clone(),
@@ -1025,7 +1025,7 @@ pub async fn create_merge_plan(
     snapshot: &EagerSnapshot,
     filters: &[PartitionFilter],
     target_size: Option<NonZeroU64>,
-    writer_properties_factory: crate::operations::write::encryption::WriterPropertiesFactoryRef,
+    writer_properties_factory: WriterPropertiesFactoryRef,
     session: SessionState,
 ) -> Result<MergePlan, DeltaTableError> {
     let target_size = target_size.unwrap_or_else(|| snapshot.table_properties().target_file_size());
