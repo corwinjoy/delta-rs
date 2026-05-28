@@ -34,6 +34,7 @@ use datafusion::{
         ColumnStatistics, HashMap, Result, Statistics, ToDFSchema, internal_datafusion_err,
         plan_err, stats::Precision,
     },
+    config::TableParquetOptions,
     datasource::physical_plan::{
         ParquetSource,
         parquet::{CachedParquetFileReaderFactory, metadata::DFParquetMetadata},
@@ -209,7 +210,15 @@ pub(super) async fn execution_plan(
         ))
     });
 
-    get_data_scan_plan(session, scan_plan, replayed, limit, file_pruner).await
+    get_data_scan_plan(
+        session,
+        scan_plan,
+        replayed,
+        limit,
+        file_pruner,
+        config.table_parquet_options.as_ref(),
+    )
+    .await
 }
 
 /// Load deletion-vector keep masks for the selected files.
@@ -545,6 +554,7 @@ async fn get_data_scan_plan(
     replayed: ReplayedScanFiles,
     limit: Option<usize>,
     file_pruner: Option<Arc<RuntimeScanFilePruner>>,
+    table_parquet_options: Option<&TableParquetOptions>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
     let ReplayedScanFiles {
         files,
@@ -719,6 +729,7 @@ async fn get_data_scan_plan(
         &file_id_field,
         predicate,
         file_pruner.as_ref().map(|pruner| pruner.predicate()),
+        table_parquet_options,
     )
     .await?;
     let pq_plan = if has_deletion_vectors && pq_plan.properties().partitioning.partition_count() > 1
@@ -927,6 +938,7 @@ async fn get_read_plan(
     // rows, and the deletion vector of a file must see all rows of that file. This predicate is
     // always set, because it keeps or removes a file with all its rows.
     file_predicate: Option<Arc<dyn PhysicalExpr>>,
+    table_parquet_options: Option<&TableParquetOptions>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
     let mut plans = Vec::new();
 
@@ -937,13 +949,32 @@ async fn get_read_plan(
     let parquet_read_schema = Arc::new(relax_schema_nested_nullability(parquet_read_schema));
     let parquet_read_schema = &parquet_read_schema;
 
-    let pq_options = crate::datafile::ReaderProperties::default().to_table_parquet_options(state);
+    // Start from the Delta reader defaults (the session's parquet settings), then
+    // overlay the crypto settings derived from `delta.encryption.*` table properties.
+    let pq_options = {
+        let mut opts = crate::datafile::ReaderProperties::default().to_table_parquet_options(state);
+        if let Some(enc_opts) = table_parquet_options {
+            opts.crypto = enc_opts.crypto.clone();
+        }
+        opts
+    };
 
     let mut full_read_schema = SchemaBuilder::from(parquet_read_schema.as_ref().clone());
     full_read_schema.push(file_id_field.as_ref().clone().with_nullable(true));
     let full_read_schema = Arc::new(full_read_schema.finish());
     let parquet_predicate_df_schema = parquet_predicate_schema.clone().to_dfschema()?;
     let adapter_factory = Arc::new(DeltaPhysicalExprAdapterFactory);
+
+    // Resolve the encryption factory once — it is the same for every object-store group.
+    let maybe_encryption_factory = if let Some(factory_id) = &pq_options.crypto.factory_id {
+        use crate::operations::write::encryption::resolve_encryption_factory_or_err;
+        Some(
+            resolve_encryption_factory_or_err(factory_id, state)
+                .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?,
+        )
+    } else {
+        None
+    };
 
     for (store_url, files, has_deletion_vectors, scan_cache) in files_by_store.into_iter() {
         let store = state.runtime_env().object_store(&store_url)?;
@@ -970,6 +1001,10 @@ async fn get_read_plan(
         let mut file_source = ParquetSource::new(table_schema)
             .with_table_parquet_options(pq_options.clone())
             .with_parquet_file_reader_factory(reader_factory);
+
+        if let Some(factory) = &maybe_encryption_factory {
+            file_source = file_source.with_encryption_factory(factory.clone());
+        }
 
         // TODO(roeap); we might be able to also push selection vectors into the read plan
         // by creating parquet access plans. However we need to make sure this does not
@@ -1702,6 +1737,7 @@ mod tests {
             &file_id_field,
             None,
             None,
+            None,
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -1724,6 +1760,7 @@ mod tests {
             &parquet_predicate_schema,
             Some(1),
             &file_id_field,
+            None,
             None,
             None,
         )
@@ -1753,6 +1790,7 @@ mod tests {
             &parquet_predicate_schema_extended,
             Some(1),
             &file_id_field,
+            None,
             None,
             None,
         )
@@ -1830,6 +1868,7 @@ mod tests {
             &file_id_field,
             None,
             None,
+            None,
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -1867,6 +1906,7 @@ mod tests {
             &parquet_predicate_schema_extended,
             None,
             &file_id_field,
+            None,
             None,
             None,
         )
@@ -2057,6 +2097,7 @@ mod tests {
             &file_id_field,
             None,
             None,
+            None,
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -2122,6 +2163,7 @@ mod tests {
             &file_id_field,
             Some(&predicate),
             None,
+            None,
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -2185,6 +2227,7 @@ mod tests {
             None,
             &file_id_field,
             Some(&predicate),
+            None,
             None,
         )
         .await?;
@@ -2263,6 +2306,7 @@ mod tests {
             &file_id_field,
             Some(&predicate),
             None,
+            None,
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -2336,6 +2380,7 @@ mod tests {
             None,
             &file_id_field,
             Some(&predicate),
+            None,
             None,
         )
         .await?;
@@ -2411,6 +2456,7 @@ mod tests {
             None,
             &file_id_field,
             Some(&predicate),
+            None,
             None,
         )
         .await?;
@@ -2498,6 +2544,7 @@ mod tests {
             None,
             &file_id_field,
             Some(&predicate),
+            None,
             None,
         )
         .await?;

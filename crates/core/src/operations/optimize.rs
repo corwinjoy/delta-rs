@@ -45,6 +45,7 @@ use parquet::file::properties::WriterProperties;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as DeError};
 use tracing::*;
 
+use super::write::encryption::{WriterPropertiesFactoryRef, factory_from_writer_properties};
 use crate::datafile::writer::{PartitionWriter, PartitionWriterConfig, UploadBudget};
 use crate::delta_datafusion::{
     DeltaScanConfig, DeltaScanNext, SessionFallbackPolicy, SessionResolveContext,
@@ -56,7 +57,6 @@ use crate::kernel::{Action, Add, DataType, PartitionsExt, Remove, StructType, Ve
 use crate::kernel::{EagerSnapshot, resolve_snapshot};
 use crate::logstore::with_operation;
 use crate::logstore::{LogStore, LogStoreRef, ObjectStoreRef};
-use crate::operations::write::encryption::factory_from_writer_properties;
 use crate::parquet_utils::default_writer_properties;
 use crate::protocol::DeltaOperation;
 use crate::table::config::TablePropertiesExt as _;
@@ -600,7 +600,7 @@ pub struct MergeTaskParameters {
     /// Schema of written files
     file_schema: SchemaRef,
     /// Factory for creating per-file WriterProperties (supports KMS encryption / AAD).
-    writer_properties_factory: crate::operations::write::encryption::WriterPropertiesFactoryRef,
+    writer_properties_factory: WriterPropertiesFactoryRef,
     /// Input parameters for the optimize operation
     input_parameters: OptimizeInput,
     /// Num index cols to collect stats for
@@ -678,7 +678,6 @@ impl MergePlan {
             num_batches: 0,
         };
 
-        // Next, initialize the writer
         let writer_config = PartitionWriterConfig::try_new(
             task_parameters.file_schema.clone(),
             partition_values.clone(),
@@ -998,7 +997,7 @@ pub async fn create_merge_plan(
     snapshot: &EagerSnapshot,
     filters: &[FilterLiteral<'_>],
     target_size: Option<NonZeroU64>,
-    writer_properties_factory: crate::operations::write::encryption::WriterPropertiesFactoryRef,
+    writer_properties_factory: WriterPropertiesFactoryRef,
     session: SessionState,
 ) -> Result<MergePlan, DeltaTableError> {
     let target_size = target_size.unwrap_or_else(|| snapshot.table_properties().target_file_size());
@@ -1038,7 +1037,9 @@ pub async fn create_merge_plan(
         predicate: serde_json::to_string(&rendered_filters).ok(),
     };
     // Write the types the rewrite scan produces (e.g. view types), so batches need no cast
-    let scan_config = DeltaScanConfig::new_from_session(&session);
+    // Rewrite scans of an encrypted table must decrypt its files.
+    let scan_config =
+        DeltaScanConfig::new_from_session(&session).with_encryption_from_snapshot(snapshot)?;
     let file_schema = arrow_schema_without_partitions(
         &scan_config.table_schema(snapshot.table_configuration())?,
         partitions_keys,
