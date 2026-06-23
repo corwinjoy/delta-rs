@@ -19,6 +19,7 @@ use parquet::file::properties::WriterProperties;
 use tokio::task::JoinSet;
 use tracing::*;
 
+use crate::datafile::{DataFileWriter, DeltaDataWriter, RecordBatchFutureStream};
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::kernel::{Add, PartitionsExt};
 use crate::logstore::ObjectStoreRef;
@@ -305,6 +306,44 @@ impl DeltaWriter {
     }
 }
 
+impl DeltaWriter {
+    /// Drain a stream of batch futures into data files.
+    ///
+    /// Returns the new [`Add`] actions together with the time spent inside
+    /// [`write`](DeltaWriter::write) (milliseconds) and the number of rows
+    /// written. This is the single consolidated drain loop shared by the basic
+    /// [`DeltaDataWriter`] trait and the DataFusion write path; the latter uses
+    /// the returned timing/row counts for its operation metrics.
+    pub(crate) async fn drain_with_metrics(
+        mut self: Box<Self>,
+        batches: RecordBatchFutureStream,
+    ) -> DeltaResult<(Vec<Add>, u64, u64)> {
+        // Drive the batch futures with bounded concurrency, writing each
+        // resolved batch as it becomes available (the partition writers buffer
+        // and flush internally).
+        let mut buffered = batches.buffered(num_cpus::get());
+        let mut write_time_ms: u64 = 0;
+        let mut rows_written: u64 = 0;
+        while let Some(batch) = buffered.next().await {
+            let batch = batch?;
+            rows_written += batch.num_rows() as u64;
+            let wstart = std::time::Instant::now();
+            self.write(&batch).await?;
+            write_time_ms += wstart.elapsed().as_millis() as u64;
+        }
+        let adds = (*self).close().await?;
+        Ok((adds, write_time_ms, rows_written))
+    }
+}
+
+#[async_trait::async_trait]
+impl DeltaDataWriter for DeltaWriter {
+    async fn write_all(self: Box<Self>, batches: RecordBatchFutureStream) -> DeltaResult<Vec<Add>> {
+        let (adds, _, _) = self.drain_with_metrics(batches).await?;
+        Ok(adds)
+    }
+}
+
 /// Random hex (URI-safe) directory prefix of `length` chars, used to keep physical column
 /// names out of data-file paths on column-mapped tables.
 fn random_prefix(length: usize) -> String {
@@ -557,6 +596,23 @@ impl PartitionWriter {
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(adds)
+    }
+}
+
+/// [`PartitionWriter`] is the file-tier writer — the seam where parquet
+/// `WriterProperties` (and, in the future, encryption) attach. The inherent
+/// `write`/`close` methods are the implementation; this trait impl exposes them
+/// behind the [`DataFileWriter`] abstraction so the dataset writer, `optimize`,
+/// and any future encrypting writer share one contract.
+#[async_trait::async_trait]
+impl DataFileWriter for PartitionWriter {
+    async fn write(&mut self, batch: &RecordBatch) -> DeltaResult<()> {
+        // Resolves to the inherent method (inherent methods take priority).
+        PartitionWriter::write(self, batch).await
+    }
+
+    async fn close(self: Box<Self>) -> DeltaResult<Vec<Add>> {
+        PartitionWriter::close(*self).await
     }
 }
 

@@ -71,7 +71,6 @@ pub(crate) mod generated_columns;
 pub(crate) mod metrics;
 mod plan;
 pub(crate) mod schema_evolution;
-pub mod writer;
 
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum WriteError {

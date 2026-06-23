@@ -1,0 +1,172 @@
+//! DataFusion-backed extensions to the basic data-file traits.
+//!
+//! These extend the DataFusion-free waist defined in [`super`] with the
+//! advanced surface: writing the output of a DataFusion `ExecutionPlan`, and
+//! reading through the existing `DeltaScanNext` scan (predicate / projection
+//! pushdown, deletion vectors, transforms).
+//!
+//! A DataFrame is "a logical plan coupled with a session." The writer extension
+//! late-materializes such a plan into the basic record-batch waist and delegates
+//! to the basic [`DeltaDataWriter`]; the reader extension carries its own
+//! session so it can also satisfy the basic [`DeltaDataReader`] contract.
+
+use std::sync::Arc;
+
+use datafusion::catalog::{Session, TableProvider};
+use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+use datafusion::physical_plan::{
+    ExecutionPlan, SendableRecordBatchStream, execute_stream_partitioned,
+};
+use futures::stream::{StreamExt as _, select_all};
+
+use super::writer::DeltaWriter;
+use super::{BatchFuture, DeltaDataReader, DeltaDataWriter, ReadOptions, RecordBatchFutureStream};
+use crate::DeltaTable;
+use crate::errors::{DeltaResult, DeltaTableError};
+use crate::kernel::Add;
+
+/// Adapt a single DataFusion stream into the basic [`RecordBatchFutureStream`] waist.
+pub fn sendable_to_future_stream(stream: SendableRecordBatchStream) -> RecordBatchFutureStream {
+    stream
+        .map(|res| -> BatchFuture { Box::pin(async move { res.map_err(DeltaTableError::from) }) })
+        .boxed()
+}
+
+/// Adapt several DataFusion partition streams into one basic
+/// [`RecordBatchFutureStream`], polling all of them concurrently.
+pub fn sendable_streams_to_future_stream(
+    streams: Vec<SendableRecordBatchStream>,
+) -> RecordBatchFutureStream {
+    select_all(streams)
+        .map(|res| -> BatchFuture { Box::pin(async move { res.map_err(DeltaTableError::from) }) })
+        .boxed()
+}
+
+/// Options controlling a DataFusion-backed scan.
+#[derive(Debug, Default, Clone)]
+pub struct ScanOptions {
+    /// Project to this subset of (logical) column names. `None` reads all columns.
+    pub projection: Option<Vec<String>>,
+    /// Stop after returning at least this many rows. `None` reads the whole table.
+    pub limit: Option<usize>,
+}
+
+impl From<ReadOptions> for ScanOptions {
+    fn from(value: ReadOptions) -> Self {
+        Self {
+            projection: value.projection,
+            limit: value.limit,
+        }
+    }
+}
+
+/// DataFusion extension to [`DeltaDataWriter`]: write the output of an execution plan.
+#[async_trait::async_trait]
+pub trait DeltaDataWriterExt {
+    /// Execute `plan` against `session` and write its output through the basic
+    /// writer, returning the uncommitted [`Add`] actions.
+    ///
+    /// The plan is expected to already contain validation / repartitioning /
+    /// column-mapping / CDC nodes as required; this only late-materializes it
+    /// into record-batch streams and drains them through the basic writer.
+    async fn write_plan(
+        self: Box<Self>,
+        session: &dyn Session,
+        plan: Arc<dyn ExecutionPlan>,
+    ) -> DeltaResult<Vec<Add>>;
+}
+
+#[async_trait::async_trait]
+impl DeltaDataWriterExt for DeltaWriter {
+    async fn write_plan(
+        self: Box<Self>,
+        session: &dyn Session,
+        plan: Arc<dyn ExecutionPlan>,
+    ) -> DeltaResult<Vec<Add>> {
+        let streams = execute_stream_partitioned(plan, session.task_ctx())?;
+        self.write_all(sendable_streams_to_future_stream(streams))
+            .await
+    }
+}
+
+/// DataFusion extension to [`DeltaDataReader`]: a full scan with pushdown.
+#[async_trait::async_trait]
+pub trait DeltaDataReaderExt: DeltaDataReader {
+    /// Scan the table through the DataFusion `DeltaScanNext` provider, returning
+    /// a coalesced single-partition stream.
+    async fn scan(
+        &self,
+        session: &dyn Session,
+        options: ScanOptions,
+    ) -> DeltaResult<SendableRecordBatchStream>;
+}
+
+/// A DataFusion-backed reader wrapping the existing `DeltaScanNext` table provider.
+///
+/// It carries its own session so it can also satisfy the DataFusion-free
+/// [`DeltaDataReader`] contract — a DataFrame is a plan coupled with a session.
+pub struct DataFusionDataReader {
+    provider: Arc<dyn TableProvider>,
+    session: Arc<dyn Session>,
+}
+
+impl DataFusionDataReader {
+    /// Create a reader from an already-built table provider and session.
+    pub fn new(provider: Arc<dyn TableProvider>, session: Arc<dyn Session>) -> Self {
+        Self { provider, session }
+    }
+
+    /// Build a reader for `table`, registering the table's object store with
+    /// `session` (idempotent) and resolving the `DeltaScanNext` provider.
+    pub async fn try_new(table: &DeltaTable, session: Arc<dyn Session>) -> DeltaResult<Self> {
+        table.update_datafusion_session(session.as_ref())?;
+        let provider = table.table_provider().await?;
+        Ok(Self::new(provider, session))
+    }
+
+    /// Resolve logical projection column names against the provider schema.
+    fn projection_indices(&self, options: &ScanOptions) -> DeltaResult<Option<Vec<usize>>> {
+        let schema = self.provider.schema();
+        options
+            .projection
+            .as_ref()
+            .map(|cols| {
+                cols.iter()
+                    .map(|col| {
+                        schema
+                            .column_with_name(col)
+                            .map(|(idx, _)| idx)
+                            .ok_or_else(|| DeltaTableError::SchemaMismatch {
+                                msg: format!("Column '{col}' does not exist in table schema."),
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()
+    }
+}
+
+#[async_trait::async_trait]
+impl DeltaDataReaderExt for DataFusionDataReader {
+    async fn scan(
+        &self,
+        session: &dyn Session,
+        options: ScanOptions,
+    ) -> DeltaResult<SendableRecordBatchStream> {
+        let projection = self.projection_indices(&options)?;
+        let scan_plan = self
+            .provider
+            .scan(session, projection.as_ref(), &[], options.limit)
+            .await?;
+        let plan = CoalescePartitionsExec::new(scan_plan);
+        Ok(plan.execute(0, session.task_ctx())?)
+    }
+}
+
+#[async_trait::async_trait]
+impl DeltaDataReader for DataFusionDataReader {
+    async fn read(&self, options: ReadOptions) -> DeltaResult<RecordBatchFutureStream> {
+        let stream = self.scan(self.session.as_ref(), options.into()).await?;
+        Ok(sendable_to_future_stream(stream))
+    }
+}
