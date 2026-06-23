@@ -4,7 +4,6 @@ use arrow::{datatypes::FieldRef, datatypes::SchemaRef, error::ArrowError};
 use async_trait::async_trait;
 use object_store::Error as ObjectStoreError;
 use parquet::errors::ParquetError;
-use serde_json::Value;
 
 use crate::DeltaTable;
 use crate::errors::{ColumnMappingOperation, DeltaTableError};
@@ -62,15 +61,6 @@ pub(crate) enum DeltaWriterError {
     /// An Arrow RecordBatch could not be created from the JSON buffer.
     #[error("Arrow RecordBatch created from JSON buffer is a None value")]
     EmptyRecordBatch,
-
-    /// Indicates that a partial write was performed and error records were discarded.
-    #[error("Failed to write some values to parquet. Sample error: {sample_error}.")]
-    PartialParquetWrite {
-        /// Vec of tuples where the first element of each tuple is the skipped value and the second element is the [`ParquetError`] associated with it.
-        skipped_values: Vec<(Value, ParquetError)>,
-        /// A sample [`ParquetError`] representing the overall partial write.
-        sample_error: ParquetError,
-    },
 
     /// Serialization of delta log statistics failed.
     #[error("Failed to write statistics value {debug_value} with logical type {logical_type:?}")]
