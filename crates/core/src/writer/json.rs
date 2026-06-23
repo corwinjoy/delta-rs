@@ -5,7 +5,9 @@ use std::sync::Arc;
 use arrow::datatypes::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef};
 use arrow::record_batch::*;
 use delta_kernel::engine::arrow_conversion::TryIntoArrow as _;
+#[cfg(test)]
 use delta_kernel::expressions::Scalar;
+#[cfg(test)]
 use indexmap::IndexMap;
 use itertools::Itertools;
 use parquet::{arrow::ArrowWriter, errors::ParquetError, file::properties::WriterProperties};
@@ -19,7 +21,9 @@ use crate::DeltaTable;
 use crate::datafile::writer::{DeltaWriter as DataFileDeltaWriter, WriterConfig};
 use crate::datafile::{DeltaDataWriter as _, batches_to_future_stream};
 use crate::errors::DeltaTableError;
-use crate::kernel::{Add, scalars::ScalarExt};
+use crate::kernel::Add;
+#[cfg(test)]
+use crate::kernel::scalars::ScalarExt;
 use crate::parquet_utils::default_writer_properties;
 use crate::table::builder::DeltaTableBuilder;
 use crate::table::config::TablePropertiesExt as _;
@@ -40,8 +44,8 @@ pub struct JsonWriter {
     buffer: Vec<RecordBatch>,
 }
 
-/// Trial-encode a record batch to parquet in memory, returning any [`ParquetError`].
-/// Used to detect records that cannot be encoded so they can be quarantined before buffering.
+/// Trial-encode a batch to in-memory parquet to detect records that can't be
+/// encoded (so they can be quarantined).
 fn trial_encode(
     record_batch: &RecordBatch,
     arrow_schema: Arc<ArrowSchema>,
@@ -150,10 +154,9 @@ impl DeltaWriter<Vec<Value>> for JsonWriter {
         self.write_with_mode(values, WriteMode::Default).await
     }
 
-    /// Decodes the JSON values into a record batch and buffers it. Bad records
-    /// (those that fail parquet encoding) are quarantined and reported, while the
-    /// good records are still buffered. Partitioning and the actual parquet write
-    /// happen at flush via the dataset writer.
+    /// Decode the JSON values into a batch and buffer it; records that fail
+    /// parquet encoding are quarantined and reported. Partitioning/writing happen
+    /// at flush via the dataset writer.
     async fn write_with_mode(
         &mut self,
         values: Vec<Value>,
@@ -200,18 +203,7 @@ impl DeltaWriter<Vec<Value>> for JsonWriter {
                     bad.len()
                 );
                 Err(DeltaWriterError::PartialParquetWrite {
-                    sample_error: match &parquet_error {
-                        ParquetError::General(msg) => ParquetError::General(msg.to_owned()),
-                        ParquetError::ArrowError(msg) => ParquetError::ArrowError(msg.to_owned()),
-                        ParquetError::EOF(msg) => ParquetError::EOF(msg.to_owned()),
-                        ParquetError::External(err) => ParquetError::General(err.to_string()),
-                        ParquetError::IndexOutOfBound(u, v) => {
-                            ParquetError::IndexOutOfBound(u.to_owned(), v.to_owned())
-                        }
-                        ParquetError::NYI(msg) => ParquetError::NYI(msg.to_owned()),
-                        // ParquetError is non exhaustive, so have a fallback
-                        e => ParquetError::General(e.to_string()),
-                    },
+                    sample_error: parquet_error,
                     skipped_values: bad,
                 }
                 .into())
@@ -281,9 +273,8 @@ fn quarantine_failed_parquet_rows(
     Ok((good, bad))
 }
 
-/// Extract partition scalar values from a record batch. Retained for unit-test
-/// coverage (partition handling now lives in the dataset writer).
-#[allow(dead_code)]
+/// Extract partition scalar values from a record batch (test-only).
+#[cfg(test)]
 fn extract_partition_values(
     partition_cols: &[String],
     record_batch: &RecordBatch,

@@ -307,13 +307,8 @@ impl DeltaWriter {
 }
 
 impl DeltaWriter {
-    /// Drain a stream of batch futures into data files.
-    ///
-    /// Returns the new [`Add`] actions together with the time spent inside
-    /// [`write`](DeltaWriter::write) (milliseconds) and the number of rows
-    /// written. This is the single consolidated drain loop shared by the basic
-    /// [`DeltaDataWriter`] trait and the DataFusion write path; the latter uses
-    /// the returned timing/row counts for its operation metrics.
+    /// Drain the batch-future stream into data files, returning the [`Add`]
+    /// actions, write time (ms), and rows written (the latter two for metrics).
     pub(crate) async fn drain_with_metrics(
         mut self: Box<Self>,
         batches: RecordBatchFutureStream,
@@ -473,7 +468,7 @@ impl PartitionWriter {
     ) -> DeltaResult<Self> {
         let writer_id = uuid::Uuid::new_v4();
         let first_path = next_data_path(&config.prefix, 0, &writer_id, &config.writer_properties);
-        let writer = Self::create_writer(object_store.clone(), first_path.clone(), &config)?;
+        let writer = Self::create_writer(object_store.clone(), first_path.clone(), &config);
 
         Ok(Self {
             object_store,
@@ -491,9 +486,8 @@ impl PartitionWriter {
         object_store: ObjectStoreRef,
         path: Path,
         config: &PartitionWriterConfig,
-    ) -> DeltaResult<LazyArrowWriter> {
-        let state = LazyArrowWriter::Initialized(path, object_store.clone(), config.clone());
-        Ok(state)
+    ) -> LazyArrowWriter {
+        LazyArrowWriter::Initialized(path, object_store, config.clone())
     }
 
     fn next_data_path(&mut self) -> Path {
@@ -509,7 +503,7 @@ impl PartitionWriter {
 
     fn reset_writer(&mut self) -> DeltaResult<()> {
         let next_path = self.next_data_path();
-        let new_writer = Self::create_writer(self.object_store.clone(), next_path, &self.config)?;
+        let new_writer = Self::create_writer(self.object_store.clone(), next_path, &self.config);
         let state = std::mem::replace(&mut self.writer, new_writer);
 
         if let LazyArrowWriter::Writing(path, arrow_writer) = state {
@@ -599,15 +593,11 @@ impl PartitionWriter {
     }
 }
 
-/// [`PartitionWriter`] is the file-tier writer — the seam where parquet
-/// `WriterProperties` (and, in the future, encryption) attach. The inherent
-/// `write`/`close` methods are the implementation; this trait impl exposes them
-/// behind the [`DataFileWriter`] abstraction so the dataset writer, `optimize`,
-/// and any future encrypting writer share one contract.
+// Expose the inherent `write`/`close` behind the [`DataFileWriter`] trait (the
+// per-file seam). Fully-qualified calls select the inherent methods.
 #[async_trait::async_trait]
 impl DataFileWriter for PartitionWriter {
     async fn write(&mut self, batch: &RecordBatch) -> DeltaResult<()> {
-        // Resolves to the inherent method (inherent methods take priority).
         PartitionWriter::write(self, batch).await
     }
 

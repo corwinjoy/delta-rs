@@ -1,29 +1,13 @@
-//! Consolidated data-file read/write abstractions.
+//! Data-file read/write abstractions, in two tiers:
 //!
-//! These abstractions are organized into two tiers so that advanced parquet
-//! concerns — most importantly **encryption/decryption** — have a single,
-//! well-defined home: the per-file boundary, where parquet `WriterProperties` /
-//! `FileEncryptionProperties` actually attach.
-//!
-//! * **File tier** ([`DataFileWriter`], [`reader::DataFileReader`]) — the
-//!   per-file seam. A [`DataFileWriter`] owns the underlying parquet writer, so
-//!   encryption (and any other parquet-IO property) is configured here, once.
-//!   Its implementation is [`writer::PartitionWriter`].
+//! * **File tier** ([`DataFileWriter`], [`reader::DataFileReader`]) — the per-file
+//!   seam where parquet `WriterProperties`/encryption attach.
+//!   Impl: [`writer::PartitionWriter`].
 //! * **Dataset tier** ([`DeltaDataWriter`], [`DeltaDataReader`]) — composes the
-//!   file tier across a whole table: partitioning a stream of batches into many
-//!   files on write, and many files into one stream on read. Its writer
-//!   implementation is [`writer::DeltaWriter`].
+//!   file tier across a table. Impl: [`writer::DeltaWriter`].
 //!
-//! Every production write flows through a [`DataFileWriter`]: the dataset writer
-//! composes it, table-compaction (`optimize`) uses it directly, and the legacy
-//! `RecordBatchWriter`/`JsonWriter` go through the dataset writer. That single
-//! seam is what lets us set encryption in one place.
-//!
-//! Both tiers operate on the same DataFusion-free "narrow waist": a stream of
-//! futures, each yielding an Arrow [`RecordBatch`]. The DataFusion-capable
-//! surface lives in the gated [`ext`] module ([`ext::DeltaDataWriterExt`],
-//! [`ext::DeltaDataReaderExt`]) and late-materializes a `DataFrame`/`ExecutionPlan`
-//! into that waist before delegating to the basic implementation.
+//! Both tiers operate on a DataFusion-free stream of [`BatchFuture`]s. The
+//! DataFusion-capable surface lives in the gated [`ext`] module.
 
 use arrow_array::RecordBatch;
 use futures::future::BoxFuture;
@@ -41,23 +25,15 @@ pub mod ext;
 
 pub use properties::ReaderProperties;
 
-/// A future that resolves to a single [`RecordBatch`] (or an error).
-///
-/// This is the unit of late materialization: producers can hand back work that
-/// has not been executed yet, letting the consumer drive it with bounded
-/// concurrency.
+/// A future resolving to a single [`RecordBatch`] — the unit of late materialization.
 pub type BatchFuture = BoxFuture<'static, DeltaResult<RecordBatch>>;
 
-/// The narrow waist: a stream of [`BatchFuture`]s.
-///
-/// Draining it with bounded concurrency (e.g. [`futures::StreamExt::buffered`])
-/// yields parallel data-file reads and writes.
+/// A stream of [`BatchFuture`]s; draining it with bounded concurrency
+/// (e.g. [`futures::StreamExt::buffered`]) yields parallel reads/writes.
 pub type RecordBatchFutureStream = BoxStream<'static, BatchFuture>;
 
-/// Build a [`RecordBatchFutureStream`] from already-materialized record batches.
-///
-/// Each batch is wrapped in a ready future, so draining the stream simply yields
-/// the batches in order; useful for feeding buffered batches into a writer.
+/// Build a [`RecordBatchFutureStream`] from already-materialized record batches
+/// (each wrapped in a ready future).
 pub fn batches_to_future_stream(batches: Vec<RecordBatch>) -> RecordBatchFutureStream {
     futures::stream::iter(
         batches
@@ -67,15 +43,9 @@ pub fn batches_to_future_stream(batches: Vec<RecordBatch>) -> RecordBatchFutureS
     .boxed()
 }
 
-/// File tier: a writer for a single Delta data file (or a small set of size-split
-/// files for one partition).
-///
-/// This is the per-file seam where parquet `WriterProperties` — including, in the
-/// future, `FileEncryptionProperties` — attach. Its implementation,
-/// [`writer::PartitionWriter`], owns the underlying parquet writer. The dataset
-/// writer ([`DeltaWriter`]) composes one of these per partition; table compaction
-/// (`optimize`) uses one directly. Setting encryption on the configuration handed
-/// to the implementation therefore covers every production write.
+/// File tier: writes a single Delta data file (or size-split set for one
+/// partition). The per-file seam where parquet `WriterProperties`/encryption
+/// attach. Impl: [`writer::PartitionWriter`].
 #[async_trait::async_trait]
 pub trait DataFileWriter: Send {
     /// Buffer a record batch, writing to one or more parquet files as needed.
@@ -87,12 +57,8 @@ pub trait DataFileWriter: Send {
     async fn close(self: Box<Self>) -> DeltaResult<Vec<Add>>;
 }
 
-/// Options controlling a basic (DataFusion-free) read.
-///
-/// Richer predicate/projection pushdown is the responsibility of the
-/// DataFusion extension trait ([`ext::DeltaDataReaderExt`]); the basic reader
-/// only supports column projection and a row limit, plus the file skipping that
-/// `delta-kernel` performs from log statistics.
+/// Options for a basic (DataFusion-free) read. Richer predicate/projection
+/// pushdown is the DataFusion extension's job ([`ext::DeltaDataReaderExt`]).
 #[derive(Debug, Default, Clone)]
 pub struct ReadOptions {
     /// Project to this subset of (logical) column names. `None` reads all columns.
@@ -115,34 +81,20 @@ impl ReadOptions {
     }
 }
 
-/// Dataset tier: a DataFusion-free writer that consumes a stream of record
-/// batches and produces the data files for a whole table write.
-///
-/// The implementation ([`writer::DeltaWriter`]) partitions the stream by the
-/// table's partition columns and composes a [`DataFileWriter`] per partition, so
-/// all of its files inherit whatever parquet/encryption properties the file tier
-/// is configured with.
-///
-/// Batches handed to [`write_all`](DeltaDataWriter::write_all) must already
-/// conform to the table schema and satisfy any table constraints / invariants /
-/// generated-column expressions. In the DataFusion write path that validation is
-/// performed upstream as an `ExecutionPlan` node; callers using the basic path
-/// directly are responsible for their own validation.
+/// Dataset tier: a DataFusion-free writer that drains a batch stream into a
+/// table's data files (partitioning and composing a [`DataFileWriter`] per
+/// partition). Batches must already conform to the table schema and constraints
+/// (callers on the basic path validate themselves).
 #[async_trait::async_trait]
 pub trait DeltaDataWriter: Send {
-    /// Drain the batch-future stream into parquet data files, returning the
-    /// uncommitted [`Add`] actions. The returned actions still need to be
-    /// committed via a transaction.
+    /// Drain the batch-future stream into data files, returning the uncommitted
+    /// [`Add`] actions (still to be committed via a transaction).
     async fn write_all(self: Box<Self>, batches: RecordBatchFutureStream) -> DeltaResult<Vec<Add>>;
 }
 
-/// Dataset tier: a DataFusion-free reader that produces record batches for a
-/// whole table read.
-///
-/// Implementations compose the file tier ([`reader::DataFileReader`]) across the
-/// table's data files and apply deletion vectors, partition value injection, and
-/// column-mapping transforms so the emitted batches are in the table's logical
-/// schema.
+/// Dataset tier: a DataFusion-free reader that composes the file tier
+/// ([`reader::DataFileReader`]) across a table's data files, applying deletion
+/// vectors, partition values, and column-mapping transforms.
 #[async_trait::async_trait]
 pub trait DeltaDataReader: Send + Sync {
     /// Read the selected data as a stream of batch futures.

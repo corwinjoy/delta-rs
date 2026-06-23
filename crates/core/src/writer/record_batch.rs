@@ -20,13 +20,14 @@ use object_store::ObjectStore;
 use parquet::file::properties::WriterProperties;
 use tracing::log::*;
 
+#[cfg(test)]
 use super::utils::arrow_schema_without_partitions;
 use super::{DeltaWriter, DeltaWriterError, WriteMode, ensure_legacy_writer_supports_table};
 use crate::DeltaTable;
 use crate::datafile::writer::{DeltaWriter as DataFileDeltaWriter, WriterConfig};
 use crate::datafile::{DeltaDataWriter as _, batches_to_future_stream};
 use crate::errors::DeltaTableError;
-use crate::kernel::schema::cast::normalize_for_delta;
+use crate::kernel::schema::cast::{cast_record_batch, normalize_for_delta};
 use crate::kernel::schema::merge_arrow_schema;
 use crate::kernel::transaction::CommitProperties;
 use crate::kernel::{Action, Add, scalars::ScalarExt};
@@ -230,10 +231,8 @@ impl RecordBatchWriter {
         self
     }
 
-    /// Partition a batch by the table's partition columns. Retained as a thin
-    /// wrapper over the shared [`divide_by_partition_values`] free function
-    /// (now invoked from the dataset writer) for direct unit-test coverage.
-    #[allow(dead_code)]
+    /// Test-only wrapper over the shared [`divide_by_partition_values`] free function.
+    #[cfg(test)]
     fn divide_by_partition_values(
         &mut self,
         values: &RecordBatch,
@@ -273,7 +272,7 @@ impl DeltaWriter<RecordBatch> for RecordBatchWriter {
         let values = if values.schema() != self.arrow_schema_ref {
             let normalized = normalize_for_delta(&values.schema());
             if normalized != values.schema() {
-                crate::kernel::schema::cast::cast_record_batch(&values, normalized, true, false)?
+                cast_record_batch(&values, normalized, true, false)?
             } else {
                 values
             }
@@ -290,8 +289,8 @@ impl DeltaWriter<RecordBatch> for RecordBatchWriter {
                         values.schema().clone(),
                         true,
                     )?;
-                    // Upgrade previously-buffered batches to the merged schema so the eventual
-                    // parquet files are written with a single, consistent schema.
+                    // Upgrade previously-buffered batches to the merged schema so the
+                    // parquet files share one consistent schema.
                     if merged != self.arrow_schema_ref {
                         self.buffer = self
                             .buffer
@@ -372,8 +371,9 @@ pub struct PartitionResult {
     pub record_batch: RecordBatch,
 }
 
-/// Project `batch` onto `schema`, null-filling fields that are absent from the batch.
-/// Columns that are present are carried over unchanged (the merged schema is type-compatible).
+/// Project `batch` onto `schema`, null-filling absent fields. Present columns are
+/// carried over unchanged (and so must already match), which makes a column-type
+/// change across a schema merge a hard error rather than a silent cast.
 fn conform_to_schema(
     batch: &RecordBatch,
     schema: &ArrowSchemaRef,

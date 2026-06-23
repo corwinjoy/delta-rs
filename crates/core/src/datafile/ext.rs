@@ -1,14 +1,7 @@
-//! DataFusion-backed extensions to the basic data-file traits.
-//!
-//! These extend the DataFusion-free waist defined in [`super`] with the
-//! advanced surface: writing the output of a DataFusion `ExecutionPlan`, and
-//! reading through the existing `DeltaScanNext` scan (predicate / projection
-//! pushdown, deletion vectors, transforms).
-//!
-//! A DataFrame is "a logical plan coupled with a session." The writer extension
-//! late-materializes such a plan into the basic record-batch waist and delegates
-//! to the basic [`DeltaDataWriter`]; the reader extension carries its own
-//! session so it can also satisfy the basic [`DeltaDataReader`] contract.
+//! DataFusion-backed extensions to the basic data-file traits: write an
+//! `ExecutionPlan`'s output, and read through `DeltaScanNext` (pushdown,
+//! deletion vectors, transforms). The writer extension late-materializes a plan
+//! into the basic record-batch stream and delegates to [`DeltaDataWriter`].
 
 use std::sync::Arc;
 
@@ -63,12 +56,8 @@ impl From<ReadOptions> for ScanOptions {
 /// DataFusion extension to [`DeltaDataWriter`]: write the output of an execution plan.
 #[async_trait::async_trait]
 pub trait DeltaDataWriterExt {
-    /// Execute `plan` against `session` and write its output through the basic
-    /// writer, returning the uncommitted [`Add`] actions.
-    ///
-    /// The plan is expected to already contain validation / repartitioning /
-    /// column-mapping / CDC nodes as required; this only late-materializes it
-    /// into record-batch streams and drains them through the basic writer.
+    /// Execute `plan` (already containing any validation/repartition/CDC nodes)
+    /// against `session` and write its output through the basic writer.
     async fn write_plan(
         self: Box<Self>,
         session: &dyn Session,
@@ -101,10 +90,8 @@ pub trait DeltaDataReaderExt: DeltaDataReader {
     ) -> DeltaResult<SendableRecordBatchStream>;
 }
 
-/// A DataFusion-backed reader wrapping the existing `DeltaScanNext` table provider.
-///
-/// It carries its own session so it can also satisfy the DataFusion-free
-/// [`DeltaDataReader`] contract — a DataFrame is a plan coupled with a session.
+/// A DataFusion-backed reader wrapping the existing `DeltaScanNext` provider.
+/// It carries its own session so it can also satisfy [`DeltaDataReader`].
 pub struct DataFusionDataReader {
     provider: Arc<dyn TableProvider>,
     session: Arc<dyn Session>,
