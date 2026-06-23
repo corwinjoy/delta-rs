@@ -200,8 +200,13 @@ impl RecordBatchWriter {
         }
     }
 
-    /// Returns the approximate in-memory size of the buffered record batches.
-    /// This may be used by the caller to decide when to finalize the file write.
+    /// Approximate in-memory (uncompressed Arrow) size of the buffered batches.
+    ///
+    /// Note: this is the size of the buffered, not-yet-encoded record batches.
+    /// Older versions reported the size of the encoded (compressed) parquet
+    /// buffer instead, because the writer encoded incrementally; the writer now
+    /// buffers batches and encodes once at flush. Callers tuning a flush cadence
+    /// against a target file size should account for compression.
     pub fn buffer_len(&self) -> usize {
         self.buffer
             .iter()
@@ -289,16 +294,12 @@ impl DeltaWriter<RecordBatch> for RecordBatchWriter {
                         values.schema().clone(),
                         true,
                     )?;
-                    // Upgrade previously-buffered batches to the merged schema so the
-                    // parquet files share one consistent schema.
-                    if merged != self.arrow_schema_ref {
-                        self.buffer = self
-                            .buffer
-                            .iter()
-                            .map(|batch| conform_to_schema(batch, &merged))
-                            .collect::<Result<Vec<_>, _>>()?;
-                        self.arrow_schema_ref = merged;
-                    }
+                    self.arrow_schema_ref = merged;
+                    // Conform only the incoming batch: this validates it against the
+                    // merged schema (a column-type change errors here, at write time).
+                    // Previously-buffered batches are left as-is and conformed to the
+                    // final schema once at flush, avoiding an O(n^2) rebuild of the
+                    // whole buffer on every widening write.
                     self.buffer
                         .push(conform_to_schema(&values, &self.arrow_schema_ref)?);
                 }
@@ -320,6 +321,18 @@ impl DeltaWriter<RecordBatch> for RecordBatchWriter {
     /// resets internal state to handle another file.
     async fn flush(&mut self) -> Result<Vec<Add>, DeltaTableError> {
         let buffered = std::mem::take(&mut self.buffer);
+        // Conform any batches buffered under an earlier (pre-evolution) schema to
+        // the final schema; batches already matching it are passed through.
+        let buffered = buffered
+            .into_iter()
+            .map(|batch| {
+                if batch.schema() == self.arrow_schema_ref {
+                    Ok(batch)
+                } else {
+                    Ok(conform_to_schema(&batch, &self.arrow_schema_ref)?)
+                }
+            })
+            .collect::<Result<Vec<_>, DeltaTableError>>()?;
         let config = WriterConfig::new(
             self.arrow_schema_ref.clone(),
             self.partition_columns.clone(),
@@ -924,6 +937,55 @@ mod tests {
                 expected_columns, found_columns,
                 "The new table schema does not contain all evolved columns as expected"
             );
+        }
+
+        #[tokio::test]
+        async fn test_write_schema_evolution_multiple_buffered_batches() {
+            // Buffer several batches under different schemas before a single
+            // flush: the prior (base-schema) batches must be conformed to the
+            // merged schema at flush, not rebuilt on every widening write.
+            let table_schema = get_delta_schema();
+            let table_dir = tempfile::tempdir().unwrap();
+            let mut table = CreateBuilder::new()
+                .with_location(table_dir.path().to_str().unwrap())
+                .with_table_name("test-table")
+                .with_columns(table_schema.fields().cloned())
+                .await
+                .unwrap();
+            table.load().await.unwrap();
+
+            let mut writer = RecordBatchWriter::for_table(&table).unwrap();
+
+            // Two batches in the base schema (Default mode), buffered.
+            writer.write(get_record_batch(None, false)).await.unwrap();
+            writer.write(get_record_batch(None, false)).await.unwrap();
+
+            // A third, wider batch — buffered, not flushed between writes.
+            let wider = RecordBatch::try_new(
+                Arc::new(ArrowSchema::new(vec![
+                    Field::new("vid", DataType::Int32, true),
+                    Field::new("name", DataType::Utf8, true),
+                ])),
+                vec![
+                    Arc::new(Int32Array::from(vec![Some(1), Some(2)])),
+                    Arc::new(StringArray::from(vec![Some("a"), Some("b")])),
+                ],
+            )
+            .unwrap();
+            writer
+                .write_with_mode(wider, WriteMode::MergeSchema)
+                .await
+                .unwrap();
+            assert_eq!(writer.buffered_record_batch_count(), 3);
+
+            // A single flush conforms the two base batches to the merged schema.
+            let version = writer.flush_and_commit(&mut table).await.unwrap();
+            assert_eq!(version, 1);
+            table.load().await.unwrap();
+
+            let schema = table.snapshot().unwrap().metadata().parse_schema().unwrap();
+            let found: Vec<&String> = schema.fields().map(|f| f.name()).collect();
+            assert_eq!(found, vec!["id", "value", "modified", "vid", "name"]);
         }
 
         #[tokio::test]

@@ -17,6 +17,7 @@ use datafusion::physical_plan::{
 };
 use delta_kernel::engine::arrow_conversion::TryIntoKernel as _;
 use delta_kernel::table_configuration::TableConfiguration;
+use futures::stream::select_all;
 use futures::{StreamExt as _, TryStreamExt as _};
 use object_store::prefix::PrefixStore;
 use parquet::file::properties::WriterProperties;
@@ -26,7 +27,7 @@ use tracing::log::*;
 use uuid::Uuid;
 
 use crate::DeltaTableError;
-use crate::datafile::ext::{sendable_streams_to_future_stream, sendable_to_future_stream};
+use crate::datafile::ext::sendable_to_future_stream;
 use crate::datafile::writer::{DeltaWriter, WriterConfig};
 use crate::delta_datafusion::{
     ColumnMappingState, DataValidationExec, generated_columns_to_exprs, validation_predicates,
@@ -510,20 +511,63 @@ pub(crate) async fn write_exec_plan(
 
 /// Drain one or more streams through a single [`DeltaWriter`].
 ///
-/// The partition streams are polled concurrently via `select_all` and drained
-/// through one writer using the consolidated [`DeltaWriter::drain_with_metrics`]
-/// loop (the narrow-waist basic writer), preserving streaming backpressure. If
-/// any input stream yields an error, or the writer rejects a batch, the
-/// remaining streams are dropped as the future unwinds.
+/// A producer task polls the input streams concurrently (via `select_all`) and
+/// feeds batches over a bounded channel (capacity `channel_size()`) to the
+/// writer, so scanning/computing the input overlaps parquet encoding+upload with
+/// backpressure. If the writer rejects a batch, the producer is aborted and the
+/// remaining streams dropped; if a stream errors, that error is surfaced.
 pub(crate) async fn write_streams(
     streams: Vec<SendableRecordBatchStream>,
     object_store: ObjectStoreRef,
     config: WriterConfig,
 ) -> DeltaResult<(Vec<Add>, WriteStreamMetrics)> {
-    let batches = sendable_streams_to_future_stream(streams);
-    let writer = Box::new(DeltaWriter::new(object_store, config));
-    let (adds, write_time_ms, rows_written) = writer.drain_with_metrics(batches).await?;
+    let (tx, mut rx) = mpsc::channel::<RecordBatch>(channel_size());
 
+    let producer = tokio::spawn(async move {
+        let mut source = select_all(streams);
+        while let Some(item) = source.next().await {
+            let batch = item.map_err(DeltaTableError::from)?;
+            if tx.send(batch).await.is_err() {
+                break; // consumer (writer) is gone; stop producing
+            }
+        }
+        Ok::<(), DeltaTableError>(())
+    });
+
+    let mut writer = DeltaWriter::new(object_store, config);
+    let mut write_time_ms: u64 = 0;
+    let mut rows_written: u64 = 0;
+    let mut writer_error: Option<DeltaTableError> = None;
+    while let Some(batch) = rx.recv().await {
+        rows_written += batch.num_rows() as u64;
+        let wstart = std::time::Instant::now();
+        if let Err(e) = writer.write(&batch).await {
+            writer_error = Some(e);
+            break;
+        }
+        write_time_ms += wstart.elapsed().as_millis() as u64;
+    }
+    rx.close();
+
+    // If the writer failed, abort the producer (it may be parked on a pending
+    // source stream) and surface the writer error. Otherwise join the producer
+    // to surface any input-stream error.
+    if let Some(err) = writer_error {
+        producer.abort();
+        let _ = producer.await;
+        return Err(err);
+    }
+    match producer.await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => return Err(err),
+        Err(join_err) => {
+            return Err(DeltaTableError::Generic(format!(
+                "writer source task failed: {join_err}"
+            )));
+        }
+    }
+
+    let adds = writer.close().await?;
     Ok((
         adds,
         WriteStreamMetrics {
@@ -618,7 +662,7 @@ async fn write_data_plan(
         join_set.spawn(async move {
             let writer = Box::new(DeltaWriter::new(store, config));
             let (adds, write_ms, _rows) = writer
-                .drain_with_metrics(sendable_to_future_stream(stream))
+                .drain_with_metrics(sendable_to_future_stream(stream), channel_size())
                 .await?;
             Ok::<(Vec<Add>, u64), DeltaTableError>((adds, write_ms))
         });

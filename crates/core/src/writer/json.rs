@@ -89,8 +89,13 @@ impl JsonWriter {
         })
     }
 
-    /// Returns the approximate in-memory size of the buffered record batches.
-    /// This may be used by the caller to decide when to finalize the file write.
+    /// Approximate in-memory (uncompressed Arrow) size of the buffered batches.
+    ///
+    /// Note: this is the size of the buffered, not-yet-encoded record batches.
+    /// Older versions reported the size of the encoded (compressed) parquet
+    /// buffer instead, because the writer encoded incrementally; the writer now
+    /// buffers batches and encodes once at flush. Callers tuning a flush cadence
+    /// against a target file size should account for compression.
     pub fn buffer_len(&self) -> usize {
         self.buffer
             .iter()
@@ -144,8 +149,9 @@ impl DeltaWriter<Vec<Value>> for JsonWriter {
     /// as a `PartialParquetWrite`. That required encoding every batch twice (once
     /// to detect bad rows, once to write the file). The quarantine has been
     /// dropped: a record that decodes to valid Arrow but cannot be parquet-encoded
-    /// now surfaces its error from [`flush`](JsonWriter::flush) and fails the whole
-    /// flush rather than being skipped. JSON decode / schema errors are still
+    /// now surfaces its error from [`flush`](JsonWriter::flush) and fails the
+    /// whole flush (every batch buffered since the last flush), not just its own
+    /// write, rather than being skipped. JSON decode / schema errors are still
     /// reported here, per write.
     async fn write_with_mode(
         &mut self,
@@ -156,6 +162,10 @@ impl DeltaWriter<Vec<Value>> for JsonWriter {
             warn!(
                 "The JsonWriter does not currently support non-default write modes, falling back to default mode"
             );
+        }
+        // An empty write is a no-op (the JSON decoder yields no batch for `[]`).
+        if values.is_empty() {
+            return Ok(());
         }
         let arrow_schema = self.arrow_schema();
         let record_batch = record_batch_from_message(arrow_schema.clone(), values.as_slice())?;
@@ -264,6 +274,19 @@ mod tests {
         table.load().await.expect("Failed to load table");
         assert_eq!(table.version(), Some(0));
         table
+    }
+
+    #[tokio::test]
+    async fn test_json_write_empty_is_noop() {
+        let table_dir = tempfile::tempdir().unwrap();
+        let table = get_test_table(&table_dir).await;
+        let mut writer = JsonWriter::for_table(&table).unwrap();
+
+        // An empty write must be a no-op (not an error), and produce no files.
+        writer.write(vec![]).await.unwrap();
+        assert_eq!(writer.buffered_record_batch_count(), 0);
+        let add_actions = writer.flush().await.unwrap();
+        assert!(add_actions.is_empty());
     }
 
     #[tokio::test]

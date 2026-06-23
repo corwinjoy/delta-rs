@@ -309,14 +309,18 @@ impl DeltaWriter {
 impl DeltaWriter {
     /// Drain the batch-future stream into data files, returning the [`Add`]
     /// actions, write time (ms), and rows written (the latter two for metrics).
+    ///
+    /// `max_in_flight` bounds how many batch futures are resolved concurrently
+    /// (backpressure for streamed inputs).
     pub(crate) async fn drain_with_metrics(
         mut self: Box<Self>,
         batches: RecordBatchFutureStream,
+        max_in_flight: usize,
     ) -> DeltaResult<(Vec<Add>, u64, u64)> {
         // Drive the batch futures with bounded concurrency, writing each
         // resolved batch as it becomes available (the partition writers buffer
         // and flush internally).
-        let mut buffered = batches.buffered(num_cpus::get());
+        let mut buffered = batches.buffered(max_in_flight.max(1));
         let mut write_time_ms: u64 = 0;
         let mut rows_written: u64 = 0;
         while let Some(batch) = buffered.next().await {
@@ -334,7 +338,7 @@ impl DeltaWriter {
 #[async_trait::async_trait]
 impl DeltaDataWriter for DeltaWriter {
     async fn write_all(self: Box<Self>, batches: RecordBatchFutureStream) -> DeltaResult<Vec<Add>> {
-        let (adds, _, _) = self.drain_with_metrics(batches).await?;
+        let (adds, _, _) = self.drain_with_metrics(batches, num_cpus::get()).await?;
         Ok(adds)
     }
 }
