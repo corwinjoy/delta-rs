@@ -32,11 +32,14 @@ use futures::stream::{BoxStream, StreamExt as _};
 use crate::errors::DeltaResult;
 use crate::kernel::Add;
 
+pub mod properties;
 pub mod reader;
 pub mod writer;
 
 #[cfg(feature = "datafusion")]
 pub mod ext;
+
+pub use properties::ReaderProperties;
 
 /// A future that resolves to a single [`RecordBatch`] (or an error).
 ///
