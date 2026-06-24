@@ -46,7 +46,10 @@ fn parse_channel_size(raw: Option<&str>) -> usize {
         .unwrap_or(DEFAULT_WRITER_BATCH_CHANNEL_SIZE)
 }
 
-/// Bounded channel capacity used by the change-data fan-in writer path.
+/// In-flight batch bound for the write paths (tunable via
+/// `DELTARS_WRITER_BATCH_CHANNEL_SIZE`): the producer→writer channel capacity in
+/// `write_streams` and the change-data fan-in path, and the `buffered()`
+/// concurrency for the partitioned `drain_with_metrics` path.
 fn channel_size() -> usize {
     static CHANNEL_SIZE: OnceLock<usize> = OnceLock::new();
     *CHANNEL_SIZE.get_or_init(|| {
@@ -156,6 +159,18 @@ mod tests {
         fn schema(&self) -> Arc<ArrowSchema> {
             self.schema.clone()
         }
+    }
+
+    #[tokio::test]
+    async fn test_write_streams_empty_is_noop() {
+        // No input streams: must return an empty result rather than panic in
+        // `select_all`.
+        let config = write_streams_config(write_streams_schema());
+        let (adds, metrics) = write_streams(vec![], write_streams_object_store(), config)
+            .await
+            .unwrap();
+        assert!(adds.is_empty());
+        assert_eq!(metrics.rows_written, 0);
     }
 
     #[tokio::test]
@@ -524,6 +539,10 @@ pub(crate) async fn write_streams(
     object_store: ObjectStoreRef,
     config: WriterConfig,
 ) -> DeltaResult<(Vec<Add>, WriteStreamMetrics)> {
+    // `select_all` panics on an empty iterator; nothing to write either way.
+    if streams.is_empty() {
+        return Ok((Vec::new(), WriteStreamMetrics::default()));
+    }
     let (tx, mut rx) = mpsc::channel::<RecordBatch>(channel_size());
 
     let producer = tokio::spawn(async move {

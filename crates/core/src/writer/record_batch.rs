@@ -393,10 +393,19 @@ fn conform_to_schema(
 ) -> Result<RecordBatch, DeltaWriterError> {
     let mut cols: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
     for field in schema.fields() {
-        if let Some(column) = batch.column_by_name(field.name()) {
-            cols.push(column.clone());
-        } else {
-            cols.push(new_null_array(field.data_type(), batch.num_rows()));
+        match batch.column_by_name(field.name()) {
+            // Present column whose type matches: carried over unchanged.
+            Some(column) if column.data_type() == field.data_type() => cols.push(column.clone()),
+            // Present but the type differs — e.g. a later MergeSchema write widened
+            // this column's type while this batch was buffered under the old type.
+            // Report a clear schema mismatch rather than a low-level arrow error.
+            Some(_) => {
+                return Err(DeltaWriterError::SchemaMismatch {
+                    record_batch_schema: batch.schema(),
+                    expected_schema: schema.clone(),
+                });
+            }
+            None => cols.push(new_null_array(field.data_type(), batch.num_rows())),
         }
     }
     Ok(RecordBatch::try_new(schema.clone(), cols)?)
@@ -494,6 +503,59 @@ mod tests {
     use crate::writer::test_utils::*;
 
     use super::*;
+
+    #[test]
+    fn test_conform_to_schema_null_fills_missing_columns() {
+        use arrow_array::Int32Array;
+        use arrow_schema::{DataType, Field};
+        use std::sync::Arc;
+
+        let batch = RecordBatch::try_new(
+            Arc::new(ArrowSchema::new(vec![Field::new(
+                "a",
+                DataType::Int32,
+                true,
+            )])),
+            vec![Arc::new(Int32Array::from(vec![Some(1), Some(2)]))],
+        )
+        .unwrap();
+        let target = Arc::new(ArrowSchema::new(vec![
+            Field::new("a", DataType::Int32, true),
+            Field::new("b", DataType::Int32, true), // absent from the batch -> null-filled
+        ]));
+        let out = conform_to_schema(&batch, &target).unwrap();
+        assert_eq!(out.num_columns(), 2);
+        assert_eq!(out.column(1).null_count(), 2);
+    }
+
+    #[test]
+    fn test_conform_to_schema_type_change_reports_schema_mismatch() {
+        use arrow_array::StringArray;
+        use arrow_schema::{DataType, Field};
+        use std::sync::Arc;
+
+        let batch = RecordBatch::try_new(
+            Arc::new(ArrowSchema::new(vec![Field::new(
+                "c",
+                DataType::Utf8,
+                true,
+            )])),
+            vec![Arc::new(StringArray::from(vec![Some("x")]))],
+        )
+        .unwrap();
+        // A column present with a different (e.g. widened) type must report a
+        // clear SchemaMismatch, not a low-level arrow type-mismatch error.
+        let target = Arc::new(ArrowSchema::new(vec![Field::new(
+            "c",
+            DataType::LargeUtf8,
+            true,
+        )]));
+        let err = conform_to_schema(&batch, &target).unwrap_err();
+        assert!(
+            matches!(err, DeltaWriterError::SchemaMismatch { .. }),
+            "expected SchemaMismatch, got: {err:?}"
+        );
+    }
 
     #[tokio::test]
     async fn test_buffer_len_includes_unflushed_row_group() {
