@@ -69,6 +69,29 @@ fn get_max_concurrency_tasks() -> usize {
     })
 }
 
+const DEFAULT_WRITER_BATCH_CHANNEL_SIZE: usize = 10;
+
+fn parse_writer_batch_concurrency(raw: Option<&str>) -> usize {
+    raw.and_then(|s| s.parse::<usize>().ok())
+        .filter(|size| *size > 0)
+        .unwrap_or(DEFAULT_WRITER_BATCH_CHANNEL_SIZE)
+}
+
+/// How many record batches may be in flight on a write path. It bounds the
+/// producer→writer channel capacity in `write_streams` (and the change-data
+/// fan-in), and the `buffered()` drain depth in [`DeltaDataWriter::write_all`].
+/// Tunable via `DELTARS_WRITER_BATCH_CHANNEL_SIZE` (default 10); read once.
+pub(crate) fn writer_batch_concurrency() -> usize {
+    static CONCURRENCY: OnceLock<usize> = OnceLock::new();
+    *CONCURRENCY.get_or_init(|| {
+        parse_writer_batch_concurrency(
+            std::env::var("DELTARS_WRITER_BATCH_CHANNEL_SIZE")
+                .ok()
+                .as_deref(),
+        )
+    })
+}
+
 /// Upload a parquet file to object store and return metadata for creating an Add action
 #[instrument(skip(arrow_writer), fields(rows = 0, size = 0))]
 async fn upload_parquet_file(
@@ -343,11 +366,12 @@ impl DeltaDataWriter for DeltaWriter {
         mut self: Box<Self>,
         batches: RecordBatchFutureStream,
     ) -> DeltaResult<Vec<Add>> {
-        // Resolve up to `num_cpus` batch futures ahead and write them in input
-        // order (`buffered`, not `buffer_unordered`, so file content is
-        // deterministic). These callers wrap already-materialized batches in
-        // ready futures, so this is just a bounded drain (metrics unused).
-        let buffered = batches.buffered(num_cpus::get().max(1));
+        // Resolve up to `writer_batch_concurrency()` batch futures ahead and
+        // write them in input order (`buffered`, not `buffer_unordered`, so file
+        // content is deterministic). Today's callers wrap already-materialized
+        // batches in ready futures (so this is just a bounded drain, metrics
+        // unused), but the bound is honored for any future streaming caller.
+        let buffered = batches.buffered(writer_batch_concurrency().max(1));
         write_batches_timed(&mut self, buffered).await?;
         (*self).close().await
     }
@@ -633,6 +657,35 @@ mod tests {
     use object_store::ObjectStoreExt as _;
     use parquet::schema::types::ColumnPath;
     use std::sync::Arc;
+
+    #[test]
+    fn writer_batch_concurrency_zero_falls_back_to_default() {
+        assert_eq!(
+            parse_writer_batch_concurrency(Some("0")),
+            DEFAULT_WRITER_BATCH_CHANNEL_SIZE
+        );
+    }
+
+    #[test]
+    fn writer_batch_concurrency_positive_value_is_used() {
+        assert_eq!(parse_writer_batch_concurrency(Some("8")), 8);
+    }
+
+    #[test]
+    fn writer_batch_concurrency_invalid_value_falls_back_to_default() {
+        assert_eq!(
+            parse_writer_batch_concurrency(Some("abc")),
+            DEFAULT_WRITER_BATCH_CHANNEL_SIZE
+        );
+    }
+
+    #[test]
+    fn writer_batch_concurrency_missing_value_falls_back_to_default() {
+        assert_eq!(
+            parse_writer_batch_concurrency(None),
+            DEFAULT_WRITER_BATCH_CHANNEL_SIZE
+        );
+    }
 
     fn get_delta_writer(
         object_store: ObjectStoreRef,

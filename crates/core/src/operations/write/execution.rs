@@ -27,7 +27,9 @@ use tracing::log::*;
 use uuid::Uuid;
 
 use crate::DeltaTableError;
-use crate::datafile::writer::{DeltaWriter, WriterConfig, write_batches_timed};
+use crate::datafile::writer::{
+    DeltaWriter, WriterConfig, write_batches_timed, writer_batch_concurrency,
+};
 use crate::delta_datafusion::{
     ColumnMappingState, DataValidationExec, generated_columns_to_exprs, validation_predicates,
 };
@@ -36,28 +38,6 @@ use crate::kernel::{Action, Add, AddCDCFile, EagerSnapshot, StructType, StructTy
 use crate::logstore::{LogStore, ObjectStoreRef};
 use crate::operations::cdc::CDC_COLUMN_NAME;
 use crate::operations::write::WriterStatsConfig;
-
-const DEFAULT_WRITER_BATCH_CHANNEL_SIZE: usize = 10;
-
-fn parse_channel_size(raw: Option<&str>) -> usize {
-    raw.and_then(|s| s.parse::<usize>().ok())
-        .filter(|size| *size > 0)
-        .unwrap_or(DEFAULT_WRITER_BATCH_CHANNEL_SIZE)
-}
-
-/// Producer→writer channel capacity for the streaming write paths (tunable via
-/// `DELTARS_WRITER_BATCH_CHANNEL_SIZE`): `write_streams` (used by both the
-/// unpartitioned and per-partition writes) and the change-data fan-in path.
-fn channel_size() -> usize {
-    static CHANNEL_SIZE: OnceLock<usize> = OnceLock::new();
-    *CHANNEL_SIZE.get_or_init(|| {
-        parse_channel_size(
-            std::env::var("DELTARS_WRITER_BATCH_CHANNEL_SIZE")
-                .ok()
-                .as_deref(),
-        )
-    })
-}
 
 #[cfg(test)]
 mod tests {
@@ -79,36 +59,7 @@ mod tests {
     use futures::{Stream, stream};
     use object_store::memory::InMemory;
 
-    use super::{
-        DEFAULT_WRITER_BATCH_CHANNEL_SIZE, ObjectStoreRef, SendableRecordBatchStream, WriterConfig,
-        parse_channel_size, write_streams,
-    };
-
-    #[test]
-    fn channel_size_zero_falls_back_to_default() {
-        assert_eq!(
-            parse_channel_size(Some("0")),
-            DEFAULT_WRITER_BATCH_CHANNEL_SIZE
-        );
-    }
-
-    #[test]
-    fn channel_size_positive_value_is_used() {
-        assert_eq!(parse_channel_size(Some("8")), 8);
-    }
-
-    #[test]
-    fn channel_size_invalid_value_falls_back_to_default() {
-        assert_eq!(
-            parse_channel_size(Some("abc")),
-            DEFAULT_WRITER_BATCH_CHANNEL_SIZE
-        );
-    }
-
-    #[test]
-    fn channel_size_missing_value_falls_back_to_default() {
-        assert_eq!(parse_channel_size(None), DEFAULT_WRITER_BATCH_CHANNEL_SIZE);
-    }
+    use super::{ObjectStoreRef, SendableRecordBatchStream, WriterConfig, write_streams};
 
     fn write_streams_schema() -> Arc<ArrowSchema> {
         Arc::new(ArrowSchema::new(vec![Field::new(
@@ -528,7 +479,7 @@ pub(crate) async fn write_exec_plan(
 /// Drain one or more streams through a single [`DeltaWriter`].
 ///
 /// A producer task polls the input streams concurrently (via `select_all`) and
-/// feeds batches over a bounded channel (capacity `channel_size()`) to the
+/// feeds batches over a bounded channel (capacity `writer_batch_concurrency()`) to the
 /// writer, so scanning/computing the input overlaps parquet encoding+upload with
 /// backpressure. If the writer rejects a batch, the producer is aborted and the
 /// remaining streams dropped; if a stream errors, that error is surfaced.
@@ -541,7 +492,7 @@ pub(crate) async fn write_streams(
     if streams.is_empty() {
         return Ok((Vec::new(), WriteStreamMetrics::default()));
     }
-    let (tx, rx) = mpsc::channel::<RecordBatch>(channel_size());
+    let (tx, rx) = mpsc::channel::<RecordBatch>(writer_batch_concurrency());
 
     let producer = tokio::spawn(async move {
         let mut source = select_all(streams);
@@ -775,8 +726,8 @@ async fn write_cdc_plan(
 
     // Keep the previous single-writer fan-in path for unpartitioned tables.
     if partition_columns.is_empty() {
-        let (tx_normal, mut rx_normal) = mpsc::channel::<RecordBatch>(channel_size());
-        let (tx_cdf, mut rx_cdf) = mpsc::channel::<RecordBatch>(channel_size());
+        let (tx_normal, mut rx_normal) = mpsc::channel::<RecordBatch>(writer_batch_concurrency());
+        let (tx_cdf, mut rx_cdf) = mpsc::channel::<RecordBatch>(writer_batch_concurrency());
 
         let normal_writer_handle = tokio::task::spawn(async move {
             let mut writer = DeltaWriter::new(object_store, normal_config);
