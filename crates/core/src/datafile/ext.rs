@@ -30,6 +30,10 @@ pub fn sendable_to_future_stream(stream: SendableRecordBatchStream) -> RecordBat
 pub fn sendable_streams_to_future_stream(
     streams: Vec<SendableRecordBatchStream>,
 ) -> RecordBatchFutureStream {
+    // `select_all` panics on an empty iterator; an empty input is just an empty stream.
+    if streams.is_empty() {
+        return futures::stream::empty::<BatchFuture>().boxed();
+    }
     select_all(streams)
         .map(|res| -> BatchFuture { Box::pin(async move { res.map_err(DeltaTableError::from) }) })
         .boxed()
@@ -155,5 +159,18 @@ impl DeltaDataReader for DataFusionDataReader {
     async fn read(&self, options: ReadOptions) -> DeltaResult<RecordBatchFutureStream> {
         let stream = self.scan(self.session.as_ref(), options.into()).await?;
         Ok(sendable_to_future_stream(stream))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt as _;
+
+    #[tokio::test]
+    async fn test_sendable_streams_to_future_stream_empty_is_empty() {
+        // Empty input must not panic in `select_all`; it yields an empty stream.
+        let mut stream = sendable_streams_to_future_stream(vec![]);
+        assert!(stream.next().await.is_none());
     }
 }
