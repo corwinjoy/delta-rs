@@ -317,9 +317,10 @@ impl DeltaWriter {
         batches: RecordBatchFutureStream,
         max_in_flight: usize,
     ) -> DeltaResult<(Vec<Add>, u64, u64)> {
-        // Drive the batch futures with bounded concurrency, writing each
-        // resolved batch as it becomes available (the partition writers buffer
-        // and flush internally).
+        // Resolve up to `max_in_flight` batch futures ahead and write them in
+        // input order (`buffered`, not `buffer_unordered`, so file content is
+        // deterministic). Current callers wrap already-produced batches in ready
+        // futures, so the ordering does not cause head-of-line blocking.
         let mut buffered = batches.buffered(max_in_flight.max(1));
         let mut write_time_ms: u64 = 0;
         let mut rows_written: u64 = 0;
