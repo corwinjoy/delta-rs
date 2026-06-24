@@ -317,8 +317,8 @@ pub(crate) struct DrainMetrics {
 
 /// Write every batch from `batches` through `writer`, accumulating the total
 /// write time and row count. This is the single per-batch drain loop shared by
-/// the basic [`DeltaWriter::drain_with_metrics`] and the DataFusion
-/// producer/consumer path (`write_streams`).
+/// the basic [`DeltaDataWriter::write_all`] and the DataFusion producer/consumer
+/// path (`write_streams`).
 pub(crate) async fn write_batches_timed<S>(
     writer: &mut DeltaWriter,
     mut batches: S,
@@ -337,33 +337,19 @@ where
     Ok(metrics)
 }
 
-impl DeltaWriter {
-    /// Drain the batch-future stream into data files, returning the [`Add`]
-    /// actions, write time (ms), and rows written (the latter two for metrics).
-    ///
-    /// `max_in_flight` bounds how many batch futures are resolved concurrently
-    /// (backpressure for streamed inputs).
-    pub(crate) async fn drain_with_metrics(
-        mut self: Box<Self>,
-        batches: RecordBatchFutureStream,
-        max_in_flight: usize,
-    ) -> DeltaResult<(Vec<Add>, u64, u64)> {
-        // Resolve up to `max_in_flight` batch futures ahead and write them in
-        // input order (`buffered`, not `buffer_unordered`, so file content is
-        // deterministic). Current callers wrap already-produced batches in ready
-        // futures, so the ordering does not cause head-of-line blocking.
-        let buffered = batches.buffered(max_in_flight.max(1));
-        let metrics = write_batches_timed(&mut self, buffered).await?;
-        let adds = (*self).close().await?;
-        Ok((adds, metrics.write_time_ms, metrics.rows_written))
-    }
-}
-
 #[async_trait::async_trait]
 impl DeltaDataWriter for DeltaWriter {
-    async fn write_all(self: Box<Self>, batches: RecordBatchFutureStream) -> DeltaResult<Vec<Add>> {
-        let (adds, _, _) = self.drain_with_metrics(batches, num_cpus::get()).await?;
-        Ok(adds)
+    async fn write_all(
+        mut self: Box<Self>,
+        batches: RecordBatchFutureStream,
+    ) -> DeltaResult<Vec<Add>> {
+        // Resolve up to `num_cpus` batch futures ahead and write them in input
+        // order (`buffered`, not `buffer_unordered`, so file content is
+        // deterministic). These callers wrap already-materialized batches in
+        // ready futures, so this is just a bounded drain (metrics unused).
+        let buffered = batches.buffered(num_cpus::get().max(1));
+        write_batches_timed(&mut self, buffered).await?;
+        (*self).close().await
     }
 }
 

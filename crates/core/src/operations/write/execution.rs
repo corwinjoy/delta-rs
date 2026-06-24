@@ -555,7 +555,7 @@ pub(crate) async fn write_streams(
     });
 
     // Consume the channel as a batch stream so the shared timed-write loop drives
-    // both this path and the basic `drain_with_metrics`.
+    // both this path and the basic writer (`write_all`).
     let mut writer = DeltaWriter::new(object_store, config);
     let batches = futures::stream::unfold(rx, |mut rx| async move {
         rx.recv()
@@ -564,35 +564,36 @@ pub(crate) async fn write_streams(
     })
     .boxed();
 
-    match write_batches_timed(&mut writer, batches).await {
+    let metrics = match write_batches_timed(&mut writer, batches).await {
+        Ok(metrics) => metrics,
         // Writer rejected a batch: abort the producer (it may be parked on a
         // pending source stream) and surface the writer error.
         Err(err) => {
             producer.abort();
             let _ = producer.await;
-            Err(err)
+            return Err(err);
         }
-        Ok(metrics) => {
-            // Join the producer to surface any input-stream error.
-            match producer.await {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => return Err(err),
-                Err(join_err) => {
-                    return Err(DeltaTableError::Generic(format!(
-                        "writer source task failed: {join_err}"
-                    )));
-                }
-            }
-            let adds = writer.close().await?;
-            Ok((
-                adds,
-                WriteStreamMetrics {
-                    rows_written: metrics.rows_written,
-                    write_time_ms: metrics.write_time_ms,
-                },
-            ))
+    };
+
+    // Join the producer to surface any input-stream error.
+    match producer.await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => return Err(err),
+        Err(join_err) => {
+            return Err(DeltaTableError::Generic(format!(
+                "writer source task failed: {join_err}"
+            )));
         }
     }
+
+    let adds = writer.close().await?;
+    Ok((
+        adds,
+        WriteStreamMetrics {
+            rows_written: metrics.rows_written,
+            write_time_ms: metrics.write_time_ms,
+        },
+    ))
 }
 
 /// Hash repartitions the plan by partition columns so each stream
