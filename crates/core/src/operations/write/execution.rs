@@ -279,13 +279,16 @@ struct WriteSinkConfig {
 }
 
 /// Apply column mapping to a write plan: wrap it so its batches are emitted physically, translate
+/// A plan with its (physical) partition columns and optional random-prefix length.
+type ColumnMappedPlan = (Arc<dyn ExecutionPlan>, Vec<String>, Option<usize>);
+
 /// partition columns to physical names, and request a random file prefix. No-op (returns its
 /// inputs) when `column_mapping` is `None`.
 fn apply_column_mapping_to_plan(
     plan: Arc<dyn ExecutionPlan>,
     partition_columns: Vec<String>,
     column_mapping: &Option<ColumnMappingState>,
-) -> DeltaResult<(Arc<dyn ExecutionPlan>, Vec<String>, Option<usize>)> {
+) -> DeltaResult<ColumnMappedPlan> {
     match column_mapping {
         None => Ok((plan, partition_columns, None)),
         Some(state) => {
