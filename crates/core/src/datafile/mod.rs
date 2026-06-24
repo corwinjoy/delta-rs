@@ -11,9 +11,9 @@
 
 use arrow_array::RecordBatch;
 use futures::future::BoxFuture;
-use futures::stream::{BoxStream, StreamExt as _};
+use futures::stream::{BoxStream, Stream, StreamExt as _};
 
-use crate::errors::DeltaResult;
+use crate::errors::{DeltaResult, DeltaTableError};
 use crate::kernel::Add;
 
 pub mod properties;
@@ -41,6 +41,20 @@ pub fn batches_to_future_stream(batches: Vec<RecordBatch>) -> RecordBatchFutureS
             .map(|batch| -> BatchFuture { Box::pin(async move { Ok(batch) }) }),
     )
     .boxed()
+}
+
+/// Adapt a fallible `RecordBatch` stream into a [`RecordBatchFutureStream`]:
+/// each item becomes a ready [`BatchFuture`] with its error mapped into
+/// [`DeltaTableError`]. Shared by the parquet file reader ([`reader`]) and the
+/// DataFusion stream adapters ([`ext`]).
+pub fn results_to_future_stream<S, E>(stream: S) -> RecordBatchFutureStream
+where
+    S: Stream<Item = Result<RecordBatch, E>> + Send + 'static,
+    E: Into<DeltaTableError> + Send + 'static,
+{
+    stream
+        .map(|res| -> BatchFuture { Box::pin(async move { res.map_err(Into::into) }) })
+        .boxed()
 }
 
 /// File tier: writes a single Delta data file (or size-split set for one

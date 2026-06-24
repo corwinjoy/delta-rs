@@ -26,7 +26,9 @@ use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStream
 use crate::DeltaTable;
 use crate::errors::{DeltaResult, DeltaTableError};
 
-use super::{BatchFuture, DeltaDataReader, ReadOptions, RecordBatchFutureStream};
+use super::{
+    BatchFuture, DeltaDataReader, ReadOptions, RecordBatchFutureStream, results_to_future_stream,
+};
 
 /// File tier: reads a single parquet data file (the per-file decryption seam,
 /// mirroring [`super::DataFileWriter`]).
@@ -70,22 +72,29 @@ impl ParquetFileReader {
     pub fn new(store: Arc<dyn ObjectStore>) -> Self {
         Self { store }
     }
+
+    /// Read a data file, optionally passing its known size so the parquet reader
+    /// can skip the extra `HEAD` request it would otherwise make to discover it.
+    async fn read_file_sized(
+        &self,
+        path: Path,
+        size: Option<u64>,
+    ) -> DeltaResult<RecordBatchFutureStream> {
+        let mut reader = ParquetObjectReader::new(self.store.clone(), path);
+        if let Some(size) = size {
+            reader = reader.with_file_size(size);
+        }
+        let stream = ParquetRecordBatchStreamBuilder::new(reader)
+            .await?
+            .build()?;
+        Ok(results_to_future_stream(stream))
+    }
 }
 
 #[async_trait::async_trait]
 impl DataFileReader for ParquetFileReader {
     async fn read_file(&self, path: Path) -> DeltaResult<RecordBatchFutureStream> {
-        let reader = ParquetObjectReader::new(self.store.clone(), path);
-        let stream = ParquetRecordBatchStreamBuilder::new(reader)
-            .await?
-            .build()?;
-        // Wrap each parquet batch in a ready future, matching the
-        // `ext::sendable_to_future_stream` adapter shape on the DataFusion side.
-        Ok(stream
-            .map(|res| -> BatchFuture {
-                Box::pin(async move { res.map_err(DeltaTableError::from) })
-            })
-            .boxed())
+        self.read_file_sized(path, None).await
     }
 }
 
@@ -100,10 +109,17 @@ impl DataFileReader for ParquetFileReader {
 /// Minimal by design — it reads raw parquet, so [`ParquetTableReader::try_new`]
 /// rejects tables that use deletion vectors, column mapping, or partition
 /// columns. Honoring those is the job of the kernel-backed [`KernelDataReader`].
+///
+/// It also does not unify schemas across files: the returned batches reflect
+/// each data file's physical schema as written. On a table whose schema evolved
+/// (a widened column type or an added column), older and newer files yield
+/// batches with differing schemas, and the caller is responsible for
+/// reconciling them (e.g. casting to a common schema before `concat`).
 #[derive(Debug, Clone)]
 pub struct ParquetTableReader {
     file_reader: ParquetFileReader,
-    paths: Vec<Path>,
+    /// Data files as (object-store path, size in bytes).
+    files: Vec<(Path, u64)>,
 }
 
 impl ParquetTableReader {
@@ -115,10 +131,14 @@ impl ParquetTableReader {
         let snapshot = table.snapshot()?;
 
         // Guard: column mapping would mean physical (not logical) column names.
+        // Use the resolved mode (the property is only honored when the protocol
+        // actually enables the feature) to avoid rejecting a table that merely
+        // carries a stale, ignored `delta.columnMapping.mode` property.
         if snapshot
-            .table_config()
-            .column_mapping_mode
-            .is_some_and(|mode| mode != ColumnMappingMode::None)
+            .snapshot()
+            .table_configuration()
+            .column_mapping_mode()
+            != ColumnMappingMode::None
         {
             return Err(not_supported("column mapping"));
         }
@@ -128,20 +148,23 @@ impl ParquetTableReader {
         }
 
         let log_store = table.log_store();
-        let mut paths = Vec::new();
+        let mut files = Vec::new();
         let mut views = snapshot.snapshot().file_views(log_store.as_ref(), None);
         while let Some(view) = views.try_next().await? {
             // Guard: a raw read would return rows that a deletion vector removes.
             if view.deletion_vector_descriptor().is_some() {
                 return Err(not_supported("deletion vectors"));
             }
-            paths.push(Path::from(view.path().as_ref()));
+            // Use the canonical object-store path helper (preserves percent
+            // encoding), matching every other read path; carry the size so the
+            // parquet reader can skip a `HEAD` per file.
+            files.push((view.object_store_path(), view.size() as u64));
         }
 
         let store = log_store.object_store(None);
         Ok(Self {
             file_reader: ParquetFileReader::new(store),
-            paths,
+            files,
         })
     }
 }
@@ -158,25 +181,36 @@ impl DeltaDataReader for ParquetTableReader {
         }
 
         let file_reader = self.file_reader.clone();
-        let stream = futures::stream::iter(self.paths.clone())
-            .then(move |path| {
-                let file_reader = file_reader.clone();
-                async move { file_reader.read_file(path).await }
+        // Read up to `num_cpus` files concurrently and interleave their batches
+        // (`flat_map_unordered`), so the `RecordBatchFutureStream` waist actually
+        // overlaps per-file open/read latency instead of serializing it. Row
+        // order across files is not preserved, which is fine for a no-predicate
+        // scan.
+        let concurrency = num_cpus::get().max(1);
+        let stream = futures::stream::iter(self.files.clone())
+            .flat_map_unordered(concurrency, move |(path, size)| {
+                futures::stream::once(open_file_stream(file_reader.clone(), path, size))
+                    .flatten()
+                    .boxed()
             })
-            // Flatten each file's batch stream into one; surface an open error as
-            // a single failing batch future so it is not silently dropped.
-            .map(|opened| -> RecordBatchFutureStream {
-                match opened {
-                    Ok(file_stream) => file_stream,
-                    Err(err) => {
-                        let failing: BatchFuture = Box::pin(async move { Err(err) });
-                        futures::stream::once(async move { failing }).boxed()
-                    }
-                }
-            })
-            .flatten()
             .boxed();
         Ok(stream)
+    }
+}
+
+/// Open one data file, turning an open error into a single failing batch future
+/// so it surfaces while draining rather than being silently dropped.
+async fn open_file_stream(
+    reader: ParquetFileReader,
+    path: Path,
+    size: u64,
+) -> RecordBatchFutureStream {
+    match reader.read_file_sized(path, Some(size)).await {
+        Ok(file_stream) => file_stream,
+        Err(err) => {
+            let failing: BatchFuture = Box::pin(async move { Err(err) });
+            futures::stream::once(std::future::ready(failing)).boxed()
+        }
     }
 }
 

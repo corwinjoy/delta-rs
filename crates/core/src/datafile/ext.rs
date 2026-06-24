@@ -13,16 +13,17 @@ use datafusion::physical_plan::{
 use futures::stream::{StreamExt as _, select_all};
 
 use super::writer::DeltaWriter;
-use super::{BatchFuture, DeltaDataReader, DeltaDataWriter, ReadOptions, RecordBatchFutureStream};
+use super::{
+    BatchFuture, DeltaDataReader, DeltaDataWriter, ReadOptions, RecordBatchFutureStream,
+    results_to_future_stream,
+};
 use crate::DeltaTable;
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::kernel::Add;
 
 /// Adapt a single DataFusion stream into the basic [`RecordBatchFutureStream`] waist.
 pub fn sendable_to_future_stream(stream: SendableRecordBatchStream) -> RecordBatchFutureStream {
-    stream
-        .map(|res| -> BatchFuture { Box::pin(async move { res.map_err(DeltaTableError::from) }) })
-        .boxed()
+    results_to_future_stream(stream)
 }
 
 /// Adapt several DataFusion partition streams into one basic
@@ -34,9 +35,7 @@ pub fn sendable_streams_to_future_stream(
     if streams.is_empty() {
         return futures::stream::empty::<BatchFuture>().boxed();
     }
-    select_all(streams)
-        .map(|res| -> BatchFuture { Box::pin(async move { res.map_err(DeltaTableError::from) }) })
-        .boxed()
+    results_to_future_stream(select_all(streams))
 }
 
 /// Options controlling a DataFusion-backed scan.
@@ -165,7 +164,6 @@ impl DeltaDataReader for DataFusionDataReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::StreamExt as _;
 
     #[tokio::test]
     async fn test_sendable_streams_to_future_stream_empty_is_empty() {
