@@ -27,8 +27,7 @@ use tracing::log::*;
 use uuid::Uuid;
 
 use crate::DeltaTableError;
-use crate::datafile::ext::sendable_to_future_stream;
-use crate::datafile::writer::{DeltaWriter, WriterConfig};
+use crate::datafile::writer::{DeltaWriter, WriterConfig, write_batches_timed};
 use crate::delta_datafusion::{
     ColumnMappingState, DataValidationExec, generated_columns_to_exprs, validation_predicates,
 };
@@ -46,10 +45,9 @@ fn parse_channel_size(raw: Option<&str>) -> usize {
         .unwrap_or(DEFAULT_WRITER_BATCH_CHANNEL_SIZE)
 }
 
-/// In-flight batch bound for the write paths (tunable via
-/// `DELTARS_WRITER_BATCH_CHANNEL_SIZE`): the producer→writer channel capacity in
-/// `write_streams` and the change-data fan-in path, and the `buffered()`
-/// concurrency for the partitioned `drain_with_metrics` path.
+/// Producer→writer channel capacity for the streaming write paths (tunable via
+/// `DELTARS_WRITER_BATCH_CHANNEL_SIZE`): `write_streams` (used by both the
+/// unpartitioned and per-partition writes) and the change-data fan-in path.
 fn channel_size() -> usize {
     static CHANNEL_SIZE: OnceLock<usize> = OnceLock::new();
     *CHANNEL_SIZE.get_or_init(|| {
@@ -543,7 +541,7 @@ pub(crate) async fn write_streams(
     if streams.is_empty() {
         return Ok((Vec::new(), WriteStreamMetrics::default()));
     }
-    let (tx, mut rx) = mpsc::channel::<RecordBatch>(channel_size());
+    let (tx, rx) = mpsc::channel::<RecordBatch>(channel_size());
 
     let producer = tokio::spawn(async move {
         let mut source = select_all(streams);
@@ -556,47 +554,45 @@ pub(crate) async fn write_streams(
         Ok::<(), DeltaTableError>(())
     });
 
+    // Consume the channel as a batch stream so the shared timed-write loop drives
+    // both this path and the basic `drain_with_metrics`.
     let mut writer = DeltaWriter::new(object_store, config);
-    let mut write_time_ms: u64 = 0;
-    let mut rows_written: u64 = 0;
-    let mut writer_error: Option<DeltaTableError> = None;
-    while let Some(batch) = rx.recv().await {
-        rows_written += batch.num_rows() as u64;
-        let wstart = std::time::Instant::now();
-        if let Err(e) = writer.write(&batch).await {
-            writer_error = Some(e);
-            break;
-        }
-        write_time_ms += wstart.elapsed().as_millis() as u64;
-    }
-    rx.close();
+    let batches = futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv()
+            .await
+            .map(|batch| (Ok::<_, DeltaTableError>(batch), rx))
+    })
+    .boxed();
 
-    // If the writer failed, abort the producer (it may be parked on a pending
-    // source stream) and surface the writer error. Otherwise join the producer
-    // to surface any input-stream error.
-    if let Some(err) = writer_error {
-        producer.abort();
-        let _ = producer.await;
-        return Err(err);
-    }
-    match producer.await {
-        Ok(Ok(())) => {}
-        Ok(Err(err)) => return Err(err),
-        Err(join_err) => {
-            return Err(DeltaTableError::Generic(format!(
-                "writer source task failed: {join_err}"
-            )));
+    match write_batches_timed(&mut writer, batches).await {
+        // Writer rejected a batch: abort the producer (it may be parked on a
+        // pending source stream) and surface the writer error.
+        Err(err) => {
+            producer.abort();
+            let _ = producer.await;
+            Err(err)
+        }
+        Ok(metrics) => {
+            // Join the producer to surface any input-stream error.
+            match producer.await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => return Err(err),
+                Err(join_err) => {
+                    return Err(DeltaTableError::Generic(format!(
+                        "writer source task failed: {join_err}"
+                    )));
+                }
+            }
+            let adds = writer.close().await?;
+            Ok((
+                adds,
+                WriteStreamMetrics {
+                    rows_written: metrics.rows_written,
+                    write_time_ms: metrics.write_time_ms,
+                },
+            ))
         }
     }
-
-    let adds = writer.close().await?;
-    Ok((
-        adds,
-        WriteStreamMetrics {
-            rows_written,
-            write_time_ms,
-        },
-    ))
 }
 
 /// Hash repartitions the plan by partition columns so each stream
@@ -682,11 +678,11 @@ async fn write_data_plan(
         let store = object_store.clone();
         let config = config.clone();
         join_set.spawn(async move {
-            let writer = Box::new(DeltaWriter::new(store, config));
-            let (adds, write_ms, _rows) = writer
-                .drain_with_metrics(sendable_to_future_stream(stream), channel_size())
-                .await?;
-            Ok::<(Vec<Add>, u64), DeltaTableError>((adds, write_ms))
+            // Each partition drains through the same producer/consumer writer as
+            // the unpartitioned path, so scan and parquet encode+upload overlap
+            // within the partition (and across partitions via the JoinSet).
+            let (adds, metrics) = write_streams(vec![stream], store, config).await?;
+            Ok::<(Vec<Add>, u64), DeltaTableError>((adds, metrics.write_time_ms))
         });
     }
 

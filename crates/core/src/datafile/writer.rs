@@ -8,7 +8,7 @@ use arrow_array::RecordBatch;
 use arrow_schema::{ArrowError, SchemaRef as ArrowSchemaRef};
 use delta_kernel::expressions::Scalar;
 use delta_kernel::table_properties::DataSkippingNumIndexedCols;
-use futures::{StreamExt, TryStreamExt};
+use futures::{Stream, StreamExt, TryStreamExt};
 use indexmap::IndexMap;
 use object_store::buffered::BufWriter;
 use object_store::path::Path;
@@ -306,6 +306,37 @@ impl DeltaWriter {
     }
 }
 
+/// Per-batch write metrics accumulated while draining a batch stream.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct DrainMetrics {
+    /// Cumulative time spent inside [`DeltaWriter::write`] (ms).
+    pub write_time_ms: u64,
+    /// Total rows written.
+    pub rows_written: u64,
+}
+
+/// Write every batch from `batches` through `writer`, accumulating the total
+/// write time and row count. This is the single per-batch drain loop shared by
+/// the basic [`DeltaWriter::drain_with_metrics`] and the DataFusion
+/// producer/consumer path (`write_streams`).
+pub(crate) async fn write_batches_timed<S>(
+    writer: &mut DeltaWriter,
+    mut batches: S,
+) -> DeltaResult<DrainMetrics>
+where
+    S: Stream<Item = DeltaResult<RecordBatch>> + Unpin,
+{
+    let mut metrics = DrainMetrics::default();
+    while let Some(batch) = batches.next().await {
+        let batch = batch?;
+        metrics.rows_written += batch.num_rows() as u64;
+        let wstart = std::time::Instant::now();
+        writer.write(&batch).await?;
+        metrics.write_time_ms += wstart.elapsed().as_millis() as u64;
+    }
+    Ok(metrics)
+}
+
 impl DeltaWriter {
     /// Drain the batch-future stream into data files, returning the [`Add`]
     /// actions, write time (ms), and rows written (the latter two for metrics).
@@ -321,18 +352,10 @@ impl DeltaWriter {
         // input order (`buffered`, not `buffer_unordered`, so file content is
         // deterministic). Current callers wrap already-produced batches in ready
         // futures, so the ordering does not cause head-of-line blocking.
-        let mut buffered = batches.buffered(max_in_flight.max(1));
-        let mut write_time_ms: u64 = 0;
-        let mut rows_written: u64 = 0;
-        while let Some(batch) = buffered.next().await {
-            let batch = batch?;
-            rows_written += batch.num_rows() as u64;
-            let wstart = std::time::Instant::now();
-            self.write(&batch).await?;
-            write_time_ms += wstart.elapsed().as_millis() as u64;
-        }
+        let buffered = batches.buffered(max_in_flight.max(1));
+        let metrics = write_batches_timed(&mut self, buffered).await?;
         let adds = (*self).close().await?;
-        Ok((adds, write_time_ms, rows_written))
+        Ok((adds, metrics.write_time_ms, metrics.rows_written))
     }
 }
 
