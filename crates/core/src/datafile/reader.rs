@@ -13,7 +13,7 @@
 //!   applies deletion vectors, partition values, and column-mapping transforms).
 //!
 //! In a `datafusion` build, full reads go through
-//! [`crate::datafile::ext::DeltaDataReaderExt`].
+//! [`crate::datafile::datafusion_ext::DeltaDataReaderExt`].
 
 use std::sync::Arc;
 
@@ -27,21 +27,16 @@ use crate::DeltaTable;
 use crate::errors::{DeltaResult, DeltaTableError};
 
 use super::{
-    BatchFuture, DeltaDataReader, ReadOptions, RecordBatchFutureStream, results_to_future_stream,
+    BatchFuture, DataFileReader, DeltaDataReader, ReadOptions, RecordBatchFutureStream,
+    results_to_future_stream,
 };
-
-/// File tier: reads a single parquet data file (the per-file decryption seam,
-/// mirroring [`super::DataFileWriter`]).
-#[async_trait::async_trait]
-pub trait DataFileReader: Send + Sync {
-    /// Read the parquet data file at `path` into a stream of record batches.
-    async fn read_file(&self, path: Path) -> DeltaResult<RecordBatchFutureStream>;
-}
 
 fn not_yet_implemented(what: &str) -> DeltaTableError {
     DeltaTableError::Generic(format!(
-        "The DataFusion-free read path ({what}) is not yet implemented. \
-         Enable the `datafusion` feature and use DeltaDataReaderExt for reads."
+        "The kernel-backed read path ({what}) is not yet implemented. For a plain \
+         table, use ParquetTableReader (a DataFusion-free reader); for full Delta \
+         read semantics (deletion vectors, column mapping, partition values) \
+         enable the `datafusion` feature."
     ))
 }
 

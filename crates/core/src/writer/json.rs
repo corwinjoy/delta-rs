@@ -2,15 +2,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-#[cfg(test)]
-use arrow::datatypes::Schema as ArrowSchema;
 use arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use arrow::record_batch::*;
 use delta_kernel::engine::arrow_conversion::TryIntoArrow as _;
-#[cfg(test)]
-use delta_kernel::expressions::Scalar;
-#[cfg(test)]
-use indexmap::IndexMap;
 use itertools::Itertools;
 use parquet::file::properties::WriterProperties;
 use serde_json::Value;
@@ -24,8 +18,6 @@ use crate::datafile::writer::{DeltaWriter as DataFileDeltaWriter, WriterConfig};
 use crate::datafile::{DeltaDataWriter as _, batches_to_future_stream};
 use crate::errors::DeltaTableError;
 use crate::kernel::Add;
-#[cfg(test)]
-use crate::kernel::scalars::ScalarExt;
 use crate::parquet_utils::default_writer_properties;
 use crate::table::builder::DeltaTableBuilder;
 use crate::table::config::TablePropertiesExt as _;
@@ -141,18 +133,14 @@ impl DeltaWriter<Vec<Value>> for JsonWriter {
         self.write_with_mode(values, WriteMode::Default).await
     }
 
-    /// Decode the JSON values into a batch and buffer it; partitioning and the
-    /// parquet write happen at flush via the dataset writer.
+    /// Decode the JSON values into a record batch and buffer it; partitioning and
+    /// the parquet encode happen once at flush, via the dataset writer.
     ///
-    /// Behavior change: earlier versions eagerly parquet-encoded each write to
-    /// quarantine individual records that could not be encoded, reporting them
-    /// as a `PartialParquetWrite`. That required encoding every batch twice (once
-    /// to detect bad rows, once to write the file). The quarantine has been
-    /// dropped: a record that decodes to valid Arrow but cannot be parquet-encoded
-    /// now surfaces its error from [`flush`](JsonWriter::flush) and fails the
-    /// whole flush (every batch buffered since the last flush), not just its own
-    /// write, rather than being skipped. JSON decode / schema errors are still
-    /// reported here, per write.
+    /// JSON decode and schema-mismatch errors are reported here, per write. A
+    /// record that decodes to valid Arrow but only fails when parquet-encoded
+    /// surfaces its error later, from [`flush`](JsonWriter::flush), and fails that
+    /// whole flush (every batch buffered since the last flush) rather than being
+    /// skipped individually.
     async fn write_with_mode(
         &mut self,
         values: Vec<Value>,
@@ -222,30 +210,15 @@ impl DeltaWriter<Vec<Value>> for JsonWriter {
     }
 }
 
-/// Extract partition scalar values from a record batch (test-only).
-#[cfg(test)]
-fn extract_partition_values(
-    partition_cols: &[String],
-    record_batch: &RecordBatch,
-) -> Result<IndexMap<String, Scalar>, DeltaWriterError> {
-    let mut partition_values = IndexMap::new();
-
-    for col_name in partition_cols.iter() {
-        let arrow_schema = record_batch.schema();
-        let i = arrow_schema.index_of(col_name)?;
-        let col = record_batch.column(i);
-        let value = Scalar::from_array(col.as_ref(), 0)
-            .ok_or(DeltaWriterError::MissingPartitionColumn(col_name.clone()))?;
-
-        partition_values.insert(col_name.clone(), value);
-    }
-
-    Ok(partition_values)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use arrow::datatypes::Schema as ArrowSchema;
+    use delta_kernel::expressions::Scalar;
+    use indexmap::IndexMap;
+
+    use crate::kernel::scalars::ScalarExt;
 
     use arrow_schema::ArrowError;
     #[cfg(feature = "datafusion")]
@@ -258,6 +231,26 @@ mod tests {
     use crate::arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField};
     use crate::operations::create::CreateBuilder;
     use crate::writer::test_utils::get_delta_schema;
+
+    /// Extract partition scalar values from a record batch.
+    fn extract_partition_values(
+        partition_cols: &[String],
+        record_batch: &RecordBatch,
+    ) -> Result<IndexMap<String, Scalar>, DeltaWriterError> {
+        let mut partition_values = IndexMap::new();
+
+        for col_name in partition_cols.iter() {
+            let arrow_schema = record_batch.schema();
+            let i = arrow_schema.index_of(col_name)?;
+            let col = record_batch.column(i);
+            let value = Scalar::from_array(col.as_ref(), 0)
+                .ok_or(DeltaWriterError::MissingPartitionColumn(col_name.clone()))?;
+
+            partition_values.insert(col_name.clone(), value);
+        }
+
+        Ok(partition_values)
+    }
 
     /// Generate a simple test table which has been pre-created at version 0
     async fn get_test_table(table_dir: &tempfile::TempDir) -> DeltaTable {

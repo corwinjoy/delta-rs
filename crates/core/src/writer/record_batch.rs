@@ -20,8 +20,6 @@ use object_store::ObjectStore;
 use parquet::file::properties::WriterProperties;
 use tracing::log::*;
 
-#[cfg(test)]
-use super::utils::arrow_schema_without_partitions;
 use super::{DeltaWriter, DeltaWriterError, WriteMode, ensure_legacy_writer_supports_table};
 use crate::DeltaTable;
 use crate::datafile::writer::{DeltaWriter as DataFileDeltaWriter, WriterConfig};
@@ -234,19 +232,6 @@ impl RecordBatchWriter {
     pub fn with_writer_properties(mut self, writer_properties: WriterProperties) -> Self {
         self.writer_properties = writer_properties;
         self
-    }
-
-    /// Test-only wrapper over the shared [`divide_by_partition_values`] free function.
-    #[cfg(test)]
-    fn divide_by_partition_values(
-        &mut self,
-        values: &RecordBatch,
-    ) -> Result<Vec<PartitionResult>, DeltaWriterError> {
-        divide_by_partition_values(
-            arrow_schema_without_partitions(&self.arrow_schema_ref, &self.partition_columns),
-            self.partition_columns.clone(),
-            values,
-        )
     }
 }
 
@@ -503,6 +488,20 @@ mod tests {
     use crate::writer::test_utils::*;
 
     use super::*;
+    use crate::writer::utils::arrow_schema_without_partitions;
+
+    /// Partition a record batch through the writer's schema/partition columns,
+    /// for tests that assert on the resulting [`PartitionResult`]s.
+    fn divide_writer_batch(
+        writer: &RecordBatchWriter,
+        values: &RecordBatch,
+    ) -> Result<Vec<PartitionResult>, DeltaWriterError> {
+        divide_by_partition_values(
+            arrow_schema_without_partitions(&writer.arrow_schema_ref, &writer.partition_columns),
+            writer.partition_columns.clone(),
+            values,
+        )
+    }
 
     #[test]
     fn test_conform_to_schema_null_fills_missing_columns() {
@@ -633,7 +632,7 @@ mod tests {
         let table = create_initialized_table(table_path, &partition_cols).await;
         let mut writer = RecordBatchWriter::for_table(&table).unwrap();
 
-        let partitions = writer.divide_by_partition_values(&batch).unwrap();
+        let partitions = divide_writer_batch(&writer, &batch).unwrap();
 
         assert_eq!(partitions.len(), 1);
         assert_eq!(partitions[0].record_batch, batch)
@@ -649,7 +648,7 @@ mod tests {
         let table = create_initialized_table(table_path, &partition_cols).await;
         let mut writer = RecordBatchWriter::for_table(&table).unwrap();
 
-        let partitions = writer.divide_by_partition_values(&batch).unwrap();
+        let partitions = divide_writer_batch(&writer, &batch).unwrap();
 
         let expected_keys = vec![
             String::from("modified=2021-02-01"),
@@ -711,7 +710,7 @@ mod tests {
         let batch = decoder.flush().expect("Failed to flush").unwrap();
 
         let mut writer = RecordBatchWriter::for_table(&table).unwrap();
-        let partitions = writer.divide_by_partition_values(&batch).unwrap();
+        let partitions = divide_writer_batch(&writer, &batch).unwrap();
 
         let expected_keys = [
             String::from("modified=2021-02-01"),
@@ -789,7 +788,7 @@ mod tests {
         let table = create_initialized_table(table_path, &partition_cols).await;
         let mut writer = RecordBatchWriter::for_table(&table).unwrap();
 
-        let partitions = writer.divide_by_partition_values(&batch).unwrap();
+        let partitions = divide_writer_batch(&writer, &batch).unwrap();
 
         let expected_keys = vec![
             String::from("modified=2021-02-01/id=A"),
@@ -1278,7 +1277,7 @@ mod tests {
                 .unwrap();
 
             let mut writer = RecordBatchWriter::for_table(&table).unwrap();
-            let partitions = writer.divide_by_partition_values(&batch).unwrap();
+            let partitions = divide_writer_batch(&writer, &batch).unwrap();
 
             assert_eq!(partitions.len(), 1);
             assert_eq!(partitions[0].record_batch, batch);
@@ -1333,7 +1332,7 @@ mod tests {
                 .unwrap();
 
             let mut writer = RecordBatchWriter::for_table(&table).unwrap();
-            let partitions = writer.divide_by_partition_values(&batch).unwrap();
+            let partitions = divide_writer_batch(&writer, &batch).unwrap();
 
             assert_eq!(partitions.len(), 1);
             assert_eq!(partitions[0].record_batch, batch);
