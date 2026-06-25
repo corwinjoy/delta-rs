@@ -517,8 +517,9 @@ pub(crate) async fn write_streams(
 
     let metrics = match write_batches_timed(&mut writer, batches).await {
         Ok(metrics) => metrics,
-        // Writer rejected a batch: abort the producer (it may be parked on a
-        // pending source stream) and surface the writer error.
+        // Writer rejected a batch: it's now in a partial state, so abort the
+        // producer (it may be parked on a pending source stream) and surface the
+        // error WITHOUT closing the (broken) writer.
         Err(err) => {
             producer.abort();
             let _ = producer.await;
@@ -526,15 +527,20 @@ pub(crate) async fn write_streams(
         }
     };
 
-    // Join the producer to surface any input-stream error.
-    match producer.await {
-        Ok(Ok(())) => {}
-        Ok(Err(err)) => return Err(err),
-        Err(join_err) => {
-            return Err(DeltaTableError::Generic(format!(
-                "writer source task failed: {join_err}"
-            )));
-        }
+    // The writer drained the channel cleanly (it is healthy). Surface any
+    // input-stream error from the producer, but close the writer best-effort
+    // first so its parquet multipart uploads are finalized rather than left
+    // dangling on abort (matching the previous implementation, which always
+    // closed the writer before surfacing a worker error).
+    let producer_result = match producer.await {
+        Ok(result) => result,
+        Err(join_err) => Err(DeltaTableError::Generic(format!(
+            "writer source task failed: {join_err}"
+        ))),
+    };
+    if let Err(err) = producer_result {
+        let _ = writer.close().await;
+        return Err(err);
     }
 
     let adds = writer.close().await?;
