@@ -308,6 +308,15 @@ impl DeltaWriter {
         Ok(())
     }
 
+    /// Total encoded (parquet) size currently buffered across all open partition
+    /// files (i.e. data written but not yet finalized into a closed file).
+    pub(crate) fn buffered_size(&self) -> usize {
+        self.partition_writers
+            .values()
+            .map(PartitionWriter::buffered_size)
+            .sum()
+    }
+
     /// Close the writer and get the new [Add] actions.
     ///
     /// This will flush all remaining data.
@@ -549,6 +558,11 @@ impl PartitionWriter {
                 .spawn(upload_parquet_file(arrow_writer, path));
         }
         Ok(())
+    }
+
+    /// Encoded (parquet) size currently buffered in the in-progress file.
+    fn buffered_size(&self) -> usize {
+        self.writer.estimated_size()
     }
 
     /// Buffers record batches in-memory up to appx. `target_file_size`.
