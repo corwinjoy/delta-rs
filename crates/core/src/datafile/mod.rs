@@ -1,7 +1,7 @@
 //! Data-file read/write abstractions, in two tiers:
 //!
 //! * **File tier** ([`DataFileWriter`], [`reader::DataFileReader`]) — the per-file
-//!   seam where parquet `WriterProperties`/encryption attach.
+//!   seam where parquet `WriterProperties` attach.
 //!   Impl: [`writer::PartitionWriter`].
 //! * **Dataset tier** ([`DeltaDataWriter`], [`DeltaDataReader`]) — composes the
 //!   file tier across a table. Impl: [`writer::DeltaWriter`].
