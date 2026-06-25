@@ -250,6 +250,32 @@ impl DeltaWriter {
         .map_err(|err| WriteError::Partitioning(err.to_string()))?)
     }
 
+    /// Build a fresh [`PartitionWriter`] for the given partition values.
+    fn build_partition_writer(
+        &self,
+        partition_values: IndexMap<String, Scalar>,
+    ) -> DeltaResult<PartitionWriter> {
+        let prefix_override = match self.config.random_prefix_length {
+            Some(length) => Some(Path::parse(random_prefix(length))?),
+            None => None,
+        };
+        let config = PartitionWriterConfig::try_new(
+            self.config.file_schema(),
+            partition_values,
+            Some(self.config.writer_properties.clone()),
+            self.config.target_file_size,
+            Some(self.config.write_batch_size),
+            None,
+            prefix_override,
+        )?;
+        PartitionWriter::try_with_config(
+            self.object_store.clone(),
+            config,
+            self.config.num_indexed_cols,
+            self.config.stats_columns.clone(),
+        )
+    }
+
     /// Write a batch to the partition induced by the partition_values. The record batch is expected
     /// to be pre-partitioned and only contain rows that belong into the same partition.
     /// However, it should still contain the partition columns.
@@ -268,30 +294,30 @@ impl DeltaWriter {
                 writer.write(&record_batch).await?;
             }
             None => {
-                let prefix_override = match self.config.random_prefix_length {
-                    Some(length) => Some(Path::parse(random_prefix(length))?),
-                    None => None,
-                };
-                let config = PartitionWriterConfig::try_new(
-                    self.config.file_schema(),
-                    partition_values.clone(),
-                    Some(self.config.writer_properties.clone()),
-                    self.config.target_file_size,
-                    Some(self.config.write_batch_size),
-                    None,
-                    prefix_override,
-                )?;
-                let mut writer = PartitionWriter::try_with_config(
-                    self.object_store.clone(),
-                    config,
-                    self.config.num_indexed_cols,
-                    self.config.stats_columns.clone(),
-                )?;
+                let mut writer = self.build_partition_writer(partition_values.clone())?;
                 writer.write(&record_batch).await?;
                 let _ = self.partition_writers.insert(partition_key, writer);
             }
         }
 
+        Ok(())
+    }
+
+    /// Fast path for unpartitioned tables: there is a single partition writer
+    /// (keyed by the empty path), so skip the per-batch partition split, the
+    /// partition-column projection, the hive-path parse, and the map lookup churn
+    /// — the projection is an identity for an unpartitioned schema, so the batch
+    /// can go straight to the writer.
+    async fn write_unpartitioned(&mut self, batch: &RecordBatch) -> DeltaResult<()> {
+        let partition_key = Path::default();
+        match self.partition_writers.get_mut(&partition_key) {
+            Some(writer) => writer.write(batch).await?,
+            None => {
+                let mut writer = self.build_partition_writer(IndexMap::new())?;
+                writer.write(batch).await?;
+                let _ = self.partition_writers.insert(partition_key, writer);
+            }
+        }
         Ok(())
     }
 
@@ -301,6 +327,9 @@ impl DeltaWriter {
     /// The `close` method has to be invoked to write all data still buffered
     /// and get the list of all written files.
     pub async fn write(&mut self, batch: &RecordBatch) -> DeltaResult<()> {
+        if self.config.partition_columns.is_empty() {
+            return self.write_unpartitioned(batch).await;
+        }
         for result in self.divide_by_partition_values(batch)? {
             self.write_partition(result.record_batch, &result.partition_values)
                 .await?;
