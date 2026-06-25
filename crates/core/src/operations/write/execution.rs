@@ -17,7 +17,6 @@ use datafusion::physical_plan::{
 };
 use delta_kernel::engine::arrow_conversion::TryIntoKernel as _;
 use delta_kernel::table_configuration::TableConfiguration;
-use futures::stream::select_all;
 use futures::{StreamExt as _, TryStreamExt as _};
 use object_store::prefix::PrefixStore;
 use parquet::file::properties::WriterProperties;
@@ -27,9 +26,7 @@ use tracing::log::*;
 use uuid::Uuid;
 
 use crate::DeltaTableError;
-use crate::datafile::writer::{
-    DeltaWriter, WriterConfig, write_batches_timed, writer_batch_concurrency,
-};
+use crate::datafile::writer::{DeltaWriter, WriterConfig, writer_batch_concurrency};
 use crate::delta_datafusion::{
     ColumnMappingState, DataValidationExec, generated_columns_to_exprs, validation_predicates,
 };
@@ -112,8 +109,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_streams_empty_is_noop() {
-        // No input streams: must return an empty result rather than panic in
-        // `select_all`.
+        // No input streams: must return an empty result (no producers spawned).
         let config = write_streams_config(write_streams_schema());
         let (adds, metrics) = write_streams(vec![], write_streams_object_store(), config)
             .await
@@ -476,79 +472,154 @@ pub(crate) async fn write_exec_plan(
     }
 }
 
+/// Error message used when a worker's `send` fails because the writer task has
+/// already closed the channel (e.g. the writer errored). It is recognised by
+/// [`is_writer_task_closed_error`] so the real (writer) error is surfaced
+/// instead of this downstream symptom.
+const WRITER_TASK_CLOSED_UNEXPECTEDLY_MSG: &str = "Writer task closed unexpectedly";
+
+fn is_writer_task_closed_error(err: &DeltaTableError) -> bool {
+    matches!(err, DeltaTableError::Generic(msg) if msg == WRITER_TASK_CLOSED_UNEXPECTEDLY_MSG)
+}
+
 /// Drain one or more streams through a single [`DeltaWriter`].
 ///
-/// A producer task polls the input streams concurrently (via `select_all`) and
-/// feeds batches over a bounded channel (capacity `writer_batch_concurrency()`) to the
-/// writer, so scanning/computing the input overlaps parquet encoding+upload with
-/// backpressure. If the writer rejects a batch, the producer is aborted and the
-/// remaining streams dropped; if a stream errors, that error is surfaced.
+/// One worker task is spawned per input stream (so the per-stream scan/compute —
+/// the CPU work in `next()` — parallelizes across runtime threads); all workers
+/// feed the writer task over a bounded channel (capacity
+/// `writer_batch_concurrency()`), overlapping scan/compute with parquet
+/// encode+upload under backpressure. On the first stream error the remaining
+/// workers are aborted and the error surfaced; if the writer rejects a batch the
+/// workers are aborted and the writer error surfaced.
 pub(crate) async fn write_streams(
     streams: Vec<SendableRecordBatchStream>,
     object_store: ObjectStoreRef,
     config: WriterConfig,
 ) -> DeltaResult<(Vec<Add>, WriteStreamMetrics)> {
-    // `select_all` panics on an empty iterator; nothing to write either way.
-    if streams.is_empty() {
-        return Ok((Vec::new(), WriteStreamMetrics::default()));
-    }
-    let (tx, rx) = mpsc::channel::<RecordBatch>(writer_batch_concurrency());
+    let worker_count = streams.len();
+    let (tx, mut rx) = mpsc::channel::<RecordBatch>(writer_batch_concurrency());
 
-    let producer = tokio::spawn(async move {
-        let mut source = select_all(streams);
-        while let Some(item) = source.next().await {
-            let batch = item.map_err(DeltaTableError::from)?;
-            if tx.send(batch).await.is_err() {
-                break; // consumer (writer) is gone; stop producing
-            }
+    let mut writer_handle = tokio::task::spawn(async move {
+        let mut writer = DeltaWriter::new(object_store, config);
+        let mut total_write_ms: u64 = 0;
+        let mut rows_written: u64 = 0;
+        while let Some(batch) = rx.recv().await {
+            rows_written += batch.num_rows() as u64;
+            let wstart = std::time::Instant::now();
+            writer.write(&batch).await?;
+            total_write_ms += wstart.elapsed().as_millis() as u64;
         }
-        Ok::<(), DeltaTableError>(())
+        let adds = writer.close().await?;
+        Ok::<(Vec<Add>, u64, u64), DeltaTableError>((adds, total_write_ms, rows_written))
     });
 
-    // Consume the channel as a batch stream so the shared timed-write loop drives
-    // both this path and the basic writer (`write_all`).
-    let mut writer = DeltaWriter::new(object_store, config);
-    let batches = futures::stream::unfold(rx, |mut rx| async move {
-        rx.recv()
-            .await
-            .map(|batch| (Ok::<_, DeltaTableError>(batch), rx))
-    })
-    .boxed();
+    let mut worker_set = JoinSet::new();
+    for mut stream in streams {
+        let tx_clone = tx.clone();
+        worker_set.spawn(async move {
+            while let Some(maybe_batch) = stream.next().await {
+                let batch = maybe_batch?;
+                tx_clone.send(batch).await.map_err(|_| {
+                    DeltaTableError::Generic(WRITER_TASK_CLOSED_UNEXPECTEDLY_MSG.to_string())
+                })?;
+            }
+            Ok::<(), DeltaTableError>(())
+        });
+    }
 
-    let metrics = match write_batches_timed(&mut writer, batches).await {
-        Ok(metrics) => metrics,
-        // Writer rejected a batch: it's now in a partial state, so abort the
-        // producer (it may be parked on a pending source stream) and surface the
-        // error WITHOUT closing the (broken) writer.
-        Err(err) => {
-            producer.abort();
-            let _ = producer.await;
-            return Err(err);
+    drop(tx);
+
+    let mut worker_error: Option<DeltaTableError> = None;
+    let mut writer_result: Option<DeltaResult<(Vec<Add>, u64, u64)>> = None;
+    let mut workers_remaining = worker_count;
+
+    while workers_remaining > 0 || writer_result.is_none() {
+        tokio::select! {
+            writer_join = &mut writer_handle, if writer_result.is_none() => {
+                let result = writer_join
+                    .map_err(|e| DeltaTableError::Generic(format!("writer join error: {e}")))
+                    .and_then(|join_res| join_res);
+                if result.is_err() && workers_remaining > 0 {
+                    worker_set.abort_all();
+                }
+                writer_result = Some(result);
+            }
+            worker_join = worker_set.join_next(), if workers_remaining > 0 => {
+                let Some(worker_join) = worker_join else {
+                    workers_remaining = 0;
+                    continue;
+                };
+                workers_remaining -= 1;
+
+                match worker_join {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => {
+                        let writer_failed = writer_result.as_ref().is_some_and(Result::is_err);
+                        if worker_error.is_none()
+                            && !(writer_failed && is_writer_task_closed_error(&err))
+                        {
+                            worker_error = Some(err);
+                        }
+                        worker_set.abort_all();
+                    }
+                    Err(join_err) if join_err.is_cancelled() => {
+                        let writer_failed = writer_result.as_ref().is_some_and(Result::is_err);
+                        if worker_error.is_none() && !writer_failed {
+                            worker_error = Some(DeltaTableError::Generic(format!(
+                                "worker task unexpectedly cancelled while driving partition: {join_err}"
+                            )));
+                        }
+                    }
+                    Err(join_err) => {
+                        if worker_error.is_none() {
+                            worker_error = Some(DeltaTableError::Generic(format!(
+                                "worker join error when driving partition: {join_err}"
+                            )));
+                        }
+                        worker_set.abort_all();
+                    }
+                }
+            }
         }
+    }
+
+    while let Some(worker_join) = worker_set.join_next().await {
+        match worker_join {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                let writer_failed = writer_result.as_ref().is_some_and(Result::is_err);
+                if worker_error.is_none() && !(writer_failed && is_writer_task_closed_error(&err)) {
+                    worker_error = Some(err);
+                }
+            }
+            Err(join_err) if join_err.is_cancelled() => {}
+            Err(join_err) => {
+                if worker_error.is_none() {
+                    worker_error = Some(DeltaTableError::Generic(format!(
+                        "worker join error when driving partition: {join_err}"
+                    )));
+                }
+            }
+        }
+    }
+
+    let writer_result = writer_result.ok_or_else(|| {
+        DeltaTableError::Generic("writer task did not produce a result".to_string())
+    })?;
+    let (adds, write_time_ms, rows_written) = match writer_result {
+        Ok(values) => values,
+        Err(err) => return Err(err),
     };
 
-    // The writer drained the channel cleanly (it is healthy). Surface any
-    // input-stream error from the producer, but close the writer best-effort
-    // first so its parquet multipart uploads are finalized rather than left
-    // dangling on abort (matching the previous implementation, which always
-    // closed the writer before surfacing a worker error).
-    let producer_result = match producer.await {
-        Ok(result) => result,
-        Err(join_err) => Err(DeltaTableError::Generic(format!(
-            "writer source task failed: {join_err}"
-        ))),
-    };
-    if let Err(err) = producer_result {
-        let _ = writer.close().await;
+    if let Some(err) = worker_error {
         return Err(err);
     }
 
-    let adds = writer.close().await?;
     Ok((
         adds,
         WriteStreamMetrics {
-            rows_written: metrics.rows_written,
-            write_time_ms: metrics.write_time_ms,
+            rows_written,
+            write_time_ms,
         },
     ))
 }
