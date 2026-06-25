@@ -35,7 +35,7 @@ fn bench_write(bencher: Bencher, params: &WriteParams) {
 
 // Writes are expensive (and regenerate large inputs per iteration), so cap the
 // sample count rather than let Divan pick its default of ~100.
-#[divan::bench(args = write_cases(), sample_count = 12, sample_size = 1)]
+#[divan::bench(args = write_cases(), sample_count = 25, sample_size = 1)]
 fn write(bencher: Bencher, params: &WriteParams) {
     bench_write(bencher, params);
 }
