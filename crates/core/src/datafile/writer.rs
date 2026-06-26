@@ -608,19 +608,27 @@ impl PartitionWriter {
             .into());
         }
 
+        let Some(target_file_size) = self.config.target_file_size else {
+            // No size target: hand the whole batch to the arrow writer in one call.
+            // It still forms row groups internally, so the output is identical, but
+            // we avoid fragmenting a large batch into many tiny `write_batch` calls.
+            self.writer.write_batch(batch).await?;
+            return Ok(());
+        };
+
+        // With a target file size we slice the batch so we can check the encoded
+        // size between chunks and roll a new file once the target is reached.
         let max_offset = batch.num_rows();
         for offset in (0..max_offset).step_by(self.config.write_batch_size) {
             let length = usize::min(self.config.write_batch_size, max_offset - offset);
             self.writer
                 .write_batch(&batch.slice(offset, length))
                 .await?;
-            if let Some(target_file_size) = self.config.target_file_size {
-                let estimated_size = self.writer.estimated_size();
-                // flush currently buffered data to disk once we meet or exceed the target file size.
-                if estimated_size as u64 >= target_file_size.get() {
-                    debug!("Writing file with estimated size {estimated_size:?} in background.");
-                    self.reset_writer()?;
-                }
+            let estimated_size = self.writer.estimated_size();
+            // flush currently buffered data to disk once we meet or exceed the target file size.
+            if estimated_size as u64 >= target_file_size.get() {
+                debug!("Writing file with estimated size {estimated_size:?} in background.");
+                self.reset_writer()?;
             }
         }
 
