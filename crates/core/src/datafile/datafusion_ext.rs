@@ -21,14 +21,9 @@ use crate::DeltaTable;
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::kernel::Add;
 
-/// Adapt a single DataFusion stream into the basic [`RecordBatchFutureStream`] waist.
-pub fn sendable_to_future_stream(stream: SendableRecordBatchStream) -> RecordBatchFutureStream {
-    results_to_future_stream(stream)
-}
-
 /// Adapt several DataFusion partition streams into one basic
 /// [`RecordBatchFutureStream`], polling all of them concurrently.
-pub fn sendable_streams_to_future_stream(
+fn sendable_streams_to_future_stream(
     streams: Vec<SendableRecordBatchStream>,
 ) -> RecordBatchFutureStream {
     // `select_all` panics on an empty iterator; an empty input is just an empty stream.
@@ -157,7 +152,7 @@ impl DeltaDataReaderExt for DataFusionDataReader {
 impl DeltaDataReader for DataFusionDataReader {
     async fn read(&self, options: ReadOptions) -> DeltaResult<RecordBatchFutureStream> {
         let stream = self.scan(self.session.as_ref(), options.into()).await?;
-        Ok(sendable_to_future_stream(stream))
+        Ok(results_to_future_stream(stream))
     }
 }
 

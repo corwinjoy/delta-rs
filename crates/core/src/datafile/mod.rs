@@ -32,22 +32,11 @@ pub type BatchFuture = BoxFuture<'static, DeltaResult<RecordBatch>>;
 /// (e.g. [`futures::StreamExt::buffered`]) yields parallel reads/writes.
 pub type RecordBatchFutureStream = BoxStream<'static, BatchFuture>;
 
-/// Build a [`RecordBatchFutureStream`] from already-materialized record batches
-/// (each wrapped in a ready future).
-pub fn batches_to_future_stream(batches: Vec<RecordBatch>) -> RecordBatchFutureStream {
-    futures::stream::iter(
-        batches
-            .into_iter()
-            .map(|batch| -> BatchFuture { Box::pin(async move { Ok(batch) }) }),
-    )
-    .boxed()
-}
-
 /// Adapt a fallible `RecordBatch` stream into a [`RecordBatchFutureStream`]:
 /// each item becomes a ready [`BatchFuture`] with its error mapped into
 /// [`DeltaTableError`]. Shared by the parquet file reader ([`reader`]) and the
 /// DataFusion stream adapters ([`datafusion_ext`]).
-pub fn results_to_future_stream<S, E>(stream: S) -> RecordBatchFutureStream
+pub(crate) fn results_to_future_stream<S, E>(stream: S) -> RecordBatchFutureStream
 where
     S: Stream<Item = Result<RecordBatch, E>> + Send + 'static,
     E: Into<DeltaTableError> + Send + 'static,
