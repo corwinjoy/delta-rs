@@ -220,23 +220,12 @@ impl DeltaWriter<Vec<Value>> for JsonWriter {
         if self.sink.is_none() {
             self.sink = Some(self.new_sink()?);
         }
-        // If a batch fails to encode, the streaming sink's in-progress multipart
-        // upload can't be rolled back, so drop it: a later write starts a fresh file
-        // rather than appending onto a corrupt one. (Batches already streamed into
-        // this sink are lost — an inherent cost of streaming.)
-        if let Err(e) = self
-            .sink
-            .as_mut()
-            .expect("sink was just created")
-            .write(&record_batch)
-            .await
-        {
-            self.sink = None;
-            self.buffered_batch_count = 0;
-            return Err(e);
-        }
-        self.buffered_batch_count += 1;
-        Ok(())
+        super::write_into_sink(
+            &mut self.sink,
+            &mut self.buffered_batch_count,
+            &record_batch,
+        )
+        .await
     }
 
     /// Finalize all files written since the last flush and return their [`Add`]

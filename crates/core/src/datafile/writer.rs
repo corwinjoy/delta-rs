@@ -218,9 +218,11 @@ pub struct DeltaWriter {
     object_store: ObjectStoreRef,
     /// configuration for the writers
     config: WriterConfig,
-    /// Schema of the physical files (partition columns removed), derived once from
-    /// `config` since it is invariant for the writer's lifetime — `WriterConfig::file_schema()`
-    /// rebuilds it on every call, so caching it avoids a per-batch schema allocation.
+    /// Physical file schema (table schema with partition columns removed), derived
+    /// once at construction. The per-batch write paths read this instead of calling
+    /// `WriterConfig::file_schema()`, which reallocates the schema on every call.
+    /// Invariant: it depends only on the config's table schema + partition columns,
+    /// so any future setter for those must refresh this field.
     file_schema: ArrowSchemaRef,
     /// partition writers for individual partitions
     partition_writers: HashMap<Path, PartitionWriter>,
