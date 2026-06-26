@@ -42,6 +42,31 @@ pub(crate) fn ensure_legacy_writer_supports_table(
     Ok(())
 }
 
+/// Build the streaming [`DeltaWriter`](crate::datafile::writer::DeltaWriter) sink
+/// shared by the legacy [`RecordBatchWriter`] and [`JsonWriter`], centralizing the
+/// (positional) [`WriterConfig`](crate::datafile::writer::WriterConfig) construction
+/// so its argument order lives in one place.
+pub(crate) fn build_streaming_sink(
+    storage: std::sync::Arc<dyn object_store::ObjectStore>,
+    file_schema: SchemaRef,
+    partition_columns: Vec<String>,
+    writer_properties: parquet::file::properties::WriterProperties,
+    target_file_size: Option<std::num::NonZeroU64>,
+    num_indexed_cols: delta_kernel::table_properties::DataSkippingNumIndexedCols,
+    stats_columns: Option<Vec<String>>,
+) -> crate::datafile::writer::DeltaWriter {
+    let config = crate::datafile::writer::WriterConfig::new(
+        file_schema,
+        partition_columns,
+        Some(writer_properties),
+        target_file_size,
+        None,
+        num_indexed_cols,
+        stats_columns,
+    );
+    crate::datafile::writer::DeltaWriter::new(storage, config)
+}
+
 /// Enum representing an error when calling [`DeltaWriter`].
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum DeltaWriterError {

@@ -14,7 +14,7 @@ use url::Url;
 use super::utils::record_batch_from_message;
 use super::{DeltaWriter, DeltaWriterError, WriteMode, ensure_legacy_writer_supports_table};
 use crate::DeltaTable;
-use crate::datafile::writer::{DeltaWriter as DataFileDeltaWriter, WriterConfig};
+use crate::datafile::writer::DeltaWriter as DataFileDeltaWriter;
 use crate::errors::DeltaTableError;
 use crate::kernel::Add;
 use crate::parquet_utils::default_writer_properties;
@@ -144,16 +144,15 @@ impl JsonWriter {
                     .map(|cols| cols.iter().map(|c| c.to_string()).collect_vec()),
             )
         };
-        let config = WriterConfig::new(
+        Ok(super::build_streaming_sink(
+            storage,
             self.arrow_schema(),
             self.partition_columns.clone(),
-            Some(self.writer_properties.clone()),
+            self.writer_properties.clone(),
             self.target_file_size,
-            None,
             num_indexed_cols,
             stats_columns,
-        );
-        Ok(DataFileDeltaWriter::new(storage, config))
+        ))
     }
 
     /// Returns the user-defined arrow schema representation or the schema defined for the wrapped
@@ -221,11 +220,21 @@ impl DeltaWriter<Vec<Value>> for JsonWriter {
         if self.sink.is_none() {
             self.sink = Some(self.new_sink()?);
         }
-        self.sink
+        // If a batch fails to encode, the streaming sink's in-progress multipart
+        // upload can't be rolled back, so drop it: a later write starts a fresh file
+        // rather than appending onto a corrupt one. (Batches already streamed into
+        // this sink are lost — an inherent cost of streaming.)
+        if let Err(e) = self
+            .sink
             .as_mut()
             .expect("sink was just created")
             .write(&record_batch)
-            .await?;
+            .await
+        {
+            self.sink = None;
+            self.buffered_batch_count = 0;
+            return Err(e);
+        }
         self.buffered_batch_count += 1;
         Ok(())
     }

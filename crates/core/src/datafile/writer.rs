@@ -218,6 +218,10 @@ pub struct DeltaWriter {
     object_store: ObjectStoreRef,
     /// configuration for the writers
     config: WriterConfig,
+    /// Schema of the physical files (partition columns removed), derived once from
+    /// `config` since it is invariant for the writer's lifetime — `WriterConfig::file_schema()`
+    /// rebuilds it on every call, so caching it avoids a per-batch schema allocation.
+    file_schema: ArrowSchemaRef,
     /// partition writers for individual partitions
     partition_writers: HashMap<Path, PartitionWriter>,
 }
@@ -225,9 +229,11 @@ pub struct DeltaWriter {
 impl DeltaWriter {
     /// Create a new instance of [`DeltaWriter`]
     pub fn new(object_store: ObjectStoreRef, config: WriterConfig) -> Self {
+        let file_schema = config.file_schema();
         Self {
             object_store,
             config,
+            file_schema,
             partition_writers: HashMap::new(),
         }
     }
@@ -243,8 +249,8 @@ impl DeltaWriter {
         values: &RecordBatch,
     ) -> DeltaResult<Vec<PartitionResult>> {
         Ok(divide_by_partition_values(
-            self.config.file_schema(),
-            self.config.partition_columns.clone(),
+            self.file_schema.clone(),
+            &self.config.partition_columns,
             values,
         )
         .map_err(|err| WriteError::Partitioning(err.to_string()))?)
@@ -260,7 +266,7 @@ impl DeltaWriter {
             None => None,
         };
         let config = PartitionWriterConfig::try_new(
-            self.config.file_schema(),
+            self.file_schema.clone(),
             partition_values,
             Some(self.config.writer_properties.clone()),
             self.config.target_file_size,
@@ -351,6 +357,15 @@ impl DeltaWriter {
     /// This will flush all remaining data.
     pub async fn close(mut self) -> DeltaResult<Vec<Add>> {
         let writers = std::mem::take(&mut self.partition_writers);
+        // The common (unpartitioned) case has a single writer; close it directly and
+        // skip the concurrent-fan-out machinery (and the `num_cpus` probe).
+        if writers.len() <= 1 {
+            let mut actions = Vec::new();
+            for (_, writer) in writers {
+                actions.extend(writer.close().await?);
+            }
+            return Ok(actions);
+        }
         let actions = futures::stream::iter(writers)
             .map(|(_, writer)| async move {
                 let writer_actions = writer.close().await?;

@@ -22,7 +22,7 @@ use tracing::log::*;
 
 use super::{DeltaWriter, DeltaWriterError, WriteMode, ensure_legacy_writer_supports_table};
 use crate::DeltaTable;
-use crate::datafile::writer::{DeltaWriter as DataFileDeltaWriter, WriterConfig};
+use crate::datafile::writer::DeltaWriter as DataFileDeltaWriter;
 use crate::errors::DeltaTableError;
 use crate::kernel::schema::cast::{cast_record_batch, normalize_for_delta};
 use crate::kernel::schema::merge_arrow_schema;
@@ -39,7 +39,6 @@ pub struct RecordBatchWriter {
     arrow_schema_ref: ArrowSchemaRef,
     original_schema_ref: ArrowSchemaRef,
     writer_properties: WriterProperties,
-    should_evolve: bool,
     partition_columns: Vec<String>,
     /// Streaming sink (created lazily on first write). Batches are encoded into
     /// it incrementally; it is sealed at `flush` and rotated when a `MergeSchema`
@@ -153,7 +152,6 @@ impl RecordBatchWriter {
             original_schema_ref: arrow_schema_ref.clone(),
             writer_properties,
             partition_columns,
-            should_evolve: false,
             sink: None,
             pending_adds: Vec::new(),
             buffered_batch_count: 0,
@@ -190,7 +188,6 @@ impl RecordBatchWriter {
             original_schema_ref: schema,
             writer_properties,
             partition_columns: partition_columns.unwrap_or_default(),
-            should_evolve: false,
             sink: None,
             pending_adds: Vec::new(),
             buffered_batch_count: 0,
@@ -264,16 +261,15 @@ impl RecordBatchWriter {
 
     /// Build a fresh streaming sink for the current schema/partitioning/target size.
     fn new_sink(&self) -> DataFileDeltaWriter {
-        let config = WriterConfig::new(
+        super::build_streaming_sink(
+            self.storage.clone(),
             self.arrow_schema_ref.clone(),
             self.partition_columns.clone(),
-            Some(self.writer_properties.clone()),
+            self.writer_properties.clone(),
             self.target_file_size,
-            None,
             self.num_indexed_cols,
             self.stats_columns.clone(),
-        );
-        DataFileDeltaWriter::new(self.storage.clone(), config)
+        )
     }
 
     /// Finalize the current sink (if any), collecting its [`Add`] actions into
@@ -307,10 +303,6 @@ impl DeltaWriter<RecordBatch> for RecordBatchWriter {
                     .to_owned(),
             ));
         }
-        // Set the should_evolve flag for later in case the writer should perform schema evolution
-        // on its flush_and_commit
-        self.should_evolve = mode == WriteMode::MergeSchema;
-
         let values = if values.schema() != self.arrow_schema_ref {
             let normalized = normalize_for_delta(&values.schema());
             if normalized != values.schema() {
@@ -358,11 +350,22 @@ impl DeltaWriter<RecordBatch> for RecordBatchWriter {
         if self.sink.is_none() {
             self.sink = Some(self.new_sink());
         }
-        self.sink
+        // If a batch fails to encode, the streaming sink's in-progress multipart
+        // upload can't be rolled back to a good state, so drop it: a later write
+        // starts a fresh file rather than appending onto a corrupt one. (Batches
+        // already streamed into this sink are lost — an inherent cost of
+        // streaming vs. the old fully-buffered writer.)
+        if let Err(e) = self
+            .sink
             .as_mut()
             .expect("sink was just created")
             .write(&batch)
-            .await?;
+            .await
+        {
+            self.sink = None;
+            self.buffered_batch_count = 0;
+            return Err(e);
+        }
         self.buffered_batch_count += 1;
         Ok(())
     }
@@ -384,7 +387,10 @@ impl DeltaWriter<RecordBatch> for RecordBatchWriter {
         use crate::kernel::StructType;
         let mut adds: Vec<Action> = self.flush().await?.drain(..).map(Action::Add).collect();
 
-        if self.arrow_schema_ref != self.original_schema_ref && self.should_evolve {
+        // The schema only ever changes via a `MergeSchema` widening, so a difference
+        // from the original schema is exactly the signal to evolve the table metadata.
+        let evolve_schema = self.arrow_schema_ref != self.original_schema_ref;
+        if evolve_schema {
             let schema: StructType = self.arrow_schema_ref.clone().try_into_kernel()?;
             if !self.partition_columns.is_empty() {
                 return Err(DeltaTableError::Generic(
@@ -399,7 +405,13 @@ impl DeltaWriter<RecordBatch> for RecordBatchWriter {
             let metadata = current_meta.with_schema(&schema)?;
             adds.push(Action::Metadata(metadata));
         }
-        super::flush_and_commit(adds, table, self.commit_properties.clone()).await
+        let version = super::flush_and_commit(adds, table, self.commit_properties.clone()).await?;
+        if evolve_schema {
+            // The widened schema is now committed; treat it as the baseline so a
+            // subsequent commit doesn't re-emit the same metadata.
+            self.original_schema_ref = self.arrow_schema_ref.clone();
+        }
+        Ok(version)
     }
 }
 
@@ -442,7 +454,7 @@ fn conform_to_schema(
 /// Partition a RecordBatch along partition columns
 pub(crate) fn divide_by_partition_values(
     arrow_schema: ArrowSchemaRef,
-    partition_columns: Vec<String>,
+    partition_columns: &[String],
     values: &RecordBatch,
 ) -> Result<Vec<PartitionResult>, DeltaWriterError> {
     let mut partitions = Vec::new();
@@ -487,8 +499,8 @@ pub(crate) fn divide_by_partition_values(
             .collect::<Result<Vec<_>, _>>()?;
 
         let partition_values = partition_columns
-            .clone()
-            .into_iter()
+            .iter()
+            .cloned()
             .zip(partition_key_iter)
             .collect();
         let batch_data = arrow_schema
@@ -541,7 +553,7 @@ mod tests {
     ) -> Result<Vec<PartitionResult>, DeltaWriterError> {
         divide_by_partition_values(
             arrow_schema_without_partitions(&writer.arrow_schema_ref, &writer.partition_columns),
-            writer.partition_columns.clone(),
+            &writer.partition_columns,
             values,
         )
     }
@@ -1040,6 +1052,57 @@ mod tests {
             assert_eq!(
                 expected_columns, found_columns,
                 "The new table schema does not contain all evolved columns as expected"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_schema_evolution_not_dropped_by_trailing_default_write() {
+            // Regression: a MergeSchema widening followed, in the same flush window,
+            // by a Default write that already matches the widened schema must still
+            // evolve the table metadata at commit. (Schema evolution is keyed off the
+            // schema diff, not a flag the trailing Default write could clear.)
+            let table_schema = get_delta_schema();
+            let table_dir = tempfile::tempdir().unwrap();
+            let mut table = CreateBuilder::new()
+                .with_location(table_dir.path().to_str().unwrap())
+                .with_columns(table_schema.fields().cloned())
+                .await
+                .unwrap();
+            table.load().await.unwrap();
+
+            let mut writer = RecordBatchWriter::for_table(&table).unwrap();
+
+            // Widen the schema via MergeSchema.
+            let wider = Arc::new(ArrowSchema::new(vec![
+                Field::new("vid", DataType::Int32, true),
+                Field::new("name", DataType::Utf8, true),
+            ]));
+            let wide_batch = RecordBatch::try_new(
+                wider,
+                vec![
+                    Arc::new(Int32Array::from(vec![Some(1)])),
+                    Arc::new(StringArray::from(vec![Some("will")])),
+                ],
+            )
+            .unwrap();
+            writer
+                .write_with_mode(wide_batch, WriteMode::MergeSchema)
+                .await
+                .unwrap();
+
+            // A Default write that already matches the widened schema, before commit.
+            let merged = writer.arrow_schema();
+            let matching = conform_to_schema(&get_record_batch(None, false), &merged).unwrap();
+            writer.write(matching).await.unwrap();
+
+            writer.flush_and_commit(&mut table).await.unwrap();
+            table.load().await.unwrap();
+
+            let committed = table.snapshot().unwrap().metadata().parse_schema().unwrap();
+            let names: Vec<&str> = committed.fields().map(|f| f.name().as_str()).collect();
+            assert!(
+                names.contains(&"vid") && names.contains(&"name"),
+                "trailing Default write dropped the evolved columns: {names:?}",
             );
         }
 
