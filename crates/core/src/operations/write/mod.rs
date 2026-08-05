@@ -66,6 +66,7 @@ use crate::protocol::{DeltaOperation, SaveMode};
 
 /// Configuration types controlling how data and statistics are written.
 pub mod configs;
+pub mod encryption;
 pub(crate) mod execution;
 pub(crate) mod generated_columns;
 pub(crate) mod metrics;
@@ -441,10 +442,18 @@ impl WriteBuilder {
                 }
             }
             None => {
+                // Mirror `CreateBuilder::with_property`: relax strict property
+                // validation only when the configuration actually carries keys
+                // unknown to the TableProperty enum (e.g. `delta.encryption.*`).
+                let all_keys_known = self
+                    .configuration
+                    .keys()
+                    .all(|k| k.parse::<crate::table::config::TableProperty>().is_ok());
                 let mut builder = CreateBuilder::new()
                     .with_log_store(self.log_store.clone())
                     .with_columns(schema.fields().cloned())
-                    .with_configuration(self.configuration.clone());
+                    .with_configuration(self.configuration.clone())
+                    .with_raise_if_key_not_exists(all_keys_known);
                 if let Some(partition_columns) = self.partition_columns.as_ref() {
                     builder = builder.with_partition_columns(partition_columns.clone())
                 }
@@ -565,6 +574,17 @@ impl std::future::IntoFuture for WriteBuilder {
                     overwrite_plan.build_sink_plan()?;
                 let source_plan = session.create_physical_plan(&sink_plan).await?;
 
+                // A first write that creates the table may declare encryption in
+                // its configuration; surface those pending properties so the
+                // data files of the creating commit are encrypted too.
+                let pending_table_properties = this.snapshot.is_none().then(|| {
+                    delta_kernel::table_properties::TableProperties::from(
+                        this.configuration
+                            .iter()
+                            .filter_map(|(k, v)| v.clone().map(|v| (k.clone(), v))),
+                    )
+                });
+
                 // Here we need to validate if the new data conforms to a predicate if one is provided
                 let (add_actions, _) = write_execution_plan_v2(
                     this.snapshot.as_ref(),
@@ -575,6 +595,7 @@ impl std::future::IntoFuture for WriteBuilder {
                     target_file_size,
                     write_batch_size,
                     writer_properties,
+                    pending_table_properties.as_ref(),
                     writer_stats_config,
                     exact_validation,
                     contains_cdc,

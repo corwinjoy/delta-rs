@@ -236,6 +236,23 @@ impl CreateBuilder {
         self
     }
 
+    /// Specify an arbitrary table property by string key.
+    ///
+    /// Useful for custom or future properties (e.g. `delta.encryption.*`) that are not
+    /// yet represented in the [`TableProperty`] enum. Passing a key the enum does not
+    /// know disables strict property validation (equivalent to
+    /// `.with_raise_if_key_not_exists(false)`); known keys keep validation intact.
+    pub fn with_property(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        let key = key.into();
+        // Only an actually-unknown key needs validation relaxed — a known key
+        // must not silently disable typo checking for every other property.
+        if key.parse::<crate::table::config::TableProperty>().is_err() {
+            self.raise_if_key_not_exists = false;
+        }
+        self.configuration.insert(key, Some(value.into()));
+        self
+    }
+
     /// Additional metadata to be added to commit info
     pub fn with_commit_properties(mut self, commit_properties: CommitProperties) -> Self {
         self.commit_properties = commit_properties;

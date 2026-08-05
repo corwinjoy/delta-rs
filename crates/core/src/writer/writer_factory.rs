@@ -29,6 +29,13 @@ pub trait WriterPropertiesFactory: Send + Sync + Debug + 'static {
     /// the async key fetch so callers can compute the file-name extension.
     fn compression(&self, column_path: &ColumnPath) -> Compression;
 
+    /// Maximum number of rows per row group configured on the base properties, if any.
+    /// Called synchronously to slice batches at row-group boundaries before the
+    /// per-file properties are created.
+    fn max_row_group_row_count(&self) -> Option<usize> {
+        None
+    }
+
     /// Create [`WriterProperties`] for the given `file_path` and `file_schema`.
     ///
     /// Called once per new parquet file, immediately before the `AsyncArrowWriter` is
@@ -52,10 +59,12 @@ pub struct DefaultWriterPropertiesFactory {
 }
 
 impl DefaultWriterPropertiesFactory {
+    /// Wrap the given static [`WriterProperties`].
     pub fn new(writer_properties: WriterProperties) -> Self {
         Self { writer_properties }
     }
 
+    /// Factory returning the standard delta-rs SNAPPY properties.
     pub fn snappy() -> Self {
         Self::new(snappy_writer_properties())
     }
@@ -74,6 +83,10 @@ pub fn snappy_writer_properties() -> WriterProperties {
 impl WriterPropertiesFactory for DefaultWriterPropertiesFactory {
     fn compression(&self, column_path: &ColumnPath) -> Compression {
         self.writer_properties.compression(column_path)
+    }
+
+    fn max_row_group_row_count(&self) -> Option<usize> {
+        self.writer_properties.max_row_group_row_count()
     }
 
     async fn create_writer_properties(
