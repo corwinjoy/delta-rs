@@ -412,9 +412,16 @@ pub(crate) async fn write_execution_plan_v2(
 
     // Resolve the writer factory. Table encryption always takes precedence to prevent
     // accidental plaintext writes: even when the caller supplies WriterProperties, the
-    // encrypted factory is used so files are always encrypted for encrypted tables.
-    // An unencrypted caller override is honoured only for truly unencrypted tables.
-    let writer_factory = match WriterEncryptionConfig::from_config(table_config, session)?.factory {
+    // encrypted factory is used (with the caller's properties as its non-crypto base)
+    // so files are always encrypted for encrypted tables. An unencrypted caller
+    // override is honoured only for truly unencrypted tables.
+    let writer_factory = match WriterEncryptionConfig::from_config(
+        table_config,
+        session,
+        exec_options.writer_properties.clone(),
+    )?
+    .factory
+    {
         Some(factory) => Some(factory),
         None => exec_options
             .writer_properties
@@ -471,22 +478,26 @@ pub(crate) async fn write_exec_plan(
     writer_properties: Option<WriterProperties>,
 ) -> DeltaResult<(Vec<Action>, WriteExecutionPlanMetrics)> {
     let stats_config = WriterStatsConfig::from_config(table_config);
-    // Resolve the writer factory. Table encryption always takes precedence to prevent
-    // accidental plaintext writes; otherwise honour the caller's WriterProperties, and
-    // fall back to the session's parquet options.
-    let writer_factory = match WriterEncryptionConfig::from_config(table_config, session)? {
+    // Resolve the base (non-crypto) writer settings: the caller's properties, or
+    // the session's parquet options.
+    let base_properties = match writer_properties {
+        Some(props) => props,
+        None => session
+            .config_options()
+            .execution
+            .parquet
+            .into_writer_properties_builder()?
+            .build(),
+    };
+    // Table encryption always takes precedence to prevent accidental plaintext
+    // writes; the base properties still supply compression/row-group settings.
+    let writer_factory = match WriterEncryptionConfig::from_config(
+        table_config,
+        session,
+        Some(base_properties.clone()),
+    )? {
         enc if enc.factory.is_some() => enc.factory.unwrap(),
-        _ => match writer_properties {
-            Some(props) => factory_from_writer_properties(props),
-            None => factory_from_writer_properties(
-                session
-                    .config_options()
-                    .execution
-                    .parquet
-                    .into_writer_properties_builder()?
-                    .build(),
-            ),
-        },
+        _ => factory_from_writer_properties(base_properties),
     };
     let object_store = log_store.object_store();
     let sink_config = WriteSinkConfig {

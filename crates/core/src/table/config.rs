@@ -580,6 +580,19 @@ pub(crate) const FACTORY_OPT_COLUMN_KEYS: &str = "column_keys";
 /// `parquetEncryption` reader feature. delta-kernel rejects that feature until it supports
 /// it, so delta-rs does not add it yet; delta-rs's own protocol checks refuse encrypted
 /// tables the build cannot handle instead. Other engines are not protected until then.
+///
+/// # Registering a KMS client
+/// Register an [`EncryptionFactory`] under the table's `delta.encryption.kms_id` before using
+/// the table. Prefer the process-wide registry, which operations that create their own
+/// DataFusion sessions (e.g. `table.load()`, the legacy writers) also use:
+///
+/// ```rust,ignore
+/// deltalake_core::operations::write::encryption::register_encryption_factory("my-kms", factory);
+/// ```
+///
+/// Registering on a session's `RuntimeEnv` works for scans and writes under that session.
+///
+/// [`EncryptionFactory`]: datafusion::execution::parquet_encryption::EncryptionFactory
 #[derive(Debug, Clone)]
 pub struct EncryptionConfig {
     /// The KMS client to use (`delta.encryption.kms_id`).

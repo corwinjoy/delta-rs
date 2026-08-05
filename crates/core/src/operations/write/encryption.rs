@@ -80,13 +80,20 @@ impl WriterPropertiesFactory for KmsWriterPropertiesFactory {
             .get_file_encryption_properties(&self.factory_options, file_schema, file_path)
             .await?;
 
-        let mut builder: WriterPropertiesBuilder = self.base_properties.clone().into();
+        // This factory only exists because the table's properties declare
+        // encryption, so a factory that produces no encryption properties is a
+        // misconfiguration — erroring here prevents silently writing plaintext
+        // files into an encrypted table.
+        let Some(enc_props) = encryption_props else {
+            return Err(DeltaTableError::Generic(format!(
+                "The EncryptionFactory returned no file encryption properties for '{file_path}', \
+                 but the table's delta.encryption.* properties require encryption; \
+                 refusing to write a plaintext file"
+            )));
+        };
 
-        if let Some(enc_props) = encryption_props {
-            builder = builder.with_file_encryption_properties(enc_props);
-        }
-
-        Ok(builder.build())
+        let builder: WriterPropertiesBuilder = self.base_properties.clone().into();
+        Ok(builder.with_file_encryption_properties(enc_props).build())
     }
 }
 
@@ -107,27 +114,63 @@ pub struct WriterEncryptionConfig {
 impl WriterEncryptionConfig {
     /// Resolve from a [`TableConfiguration`] (used in `write_exec_plan` which receives
     /// `table_config: &TableConfiguration` directly).
-    pub fn from_config(config: &TableConfiguration, session: &dyn Session) -> DeltaResult<Self> {
-        // try_from_properties errors when kms.id is set but footer.key is missing,
-        // preventing silent plaintext writes on partially-configured tables.
-        let Some(enc) = EncryptionConfig::try_from_properties(config.table_properties())? else {
+    ///
+    /// `base_properties` supplies the non-crypto writer settings (compression,
+    /// row-group sizing, statistics, …) the encrypted factory encodes files
+    /// with — pass the caller's `WriterProperties` so an encrypted table honors
+    /// them; `None` uses the delta-rs SNAPPY defaults. Encryption itself always
+    /// comes from the table properties and cannot be overridden by the caller.
+    pub fn from_config(
+        config: &TableConfiguration,
+        session: &dyn Session,
+        base_properties: Option<WriterProperties>,
+    ) -> DeltaResult<Self> {
+        let env = session.runtime_env();
+        Self::from_table_properties(
+            config.table_properties(),
+            Some(env.as_ref()),
+            base_properties,
+        )
+    }
+
+    /// Resolve from raw [`TableProperties`] with an optional `RuntimeEnv`.
+    ///
+    /// The env (a session's or a `TaskContext`'s) is checked first; without one
+    /// (e.g. the legacy writers, which have no DataFusion context), the factory
+    /// is looked up in the global registry only.
+    pub fn from_table_properties(
+        properties: &delta_kernel::table_properties::TableProperties,
+        runtime_env: Option<&datafusion::execution::runtime_env::RuntimeEnv>,
+        base_properties: Option<WriterProperties>,
+    ) -> DeltaResult<Self> {
+        // try_from_properties errors when the encryption configuration is
+        // partial, preventing silent plaintext writes on misconfigured tables.
+        let Some(enc) = EncryptionConfig::try_from_properties(properties)? else {
             return Ok(Self { factory: None });
         };
-        // Check the session's RuntimeEnv first, then the global process-wide registry.
+        // Check the RuntimeEnv first, then the global process-wide registry.
         // The global registry is needed because operations create their own internal sessions
         // that don't inherit the user's session factory registrations.
-        let df_factory = resolve_encryption_factory_or_err(&enc.kms_id, session)?;
+        let df_factory = runtime_env
+            .and_then(|env| env.parquet_encryption_factory(&enc.kms_id).ok())
+            .or_else(|| get_encryption_factory(&enc.kms_id))
+            .ok_or_else(|| unregistered_factory_error(&enc.kms_id))?;
         Ok(Self {
-            factory: Some(Self::build_factory(df_factory, enc.factory_options())),
+            factory: Some(Self::build_factory(
+                df_factory,
+                enc.factory_options(),
+                base_properties,
+            )),
         })
     }
 
     fn build_factory(
         encryption_factory: Arc<dyn EncryptionFactory>,
         factory_options: EncryptionFactoryOptions,
+        base_properties: Option<WriterProperties>,
     ) -> WriterPropertiesFactoryRef {
         Arc::new(KmsWriterPropertiesFactory {
-            base_properties: snappy_writer_properties(),
+            base_properties: base_properties.unwrap_or_else(snappy_writer_properties),
             encryption_factory,
             factory_options,
         })
@@ -156,9 +199,27 @@ static GLOBAL_FACTORY_REGISTRY: LazyLock<DashMap<String, Arc<dyn EncryptionFacto
 /// Register an [`EncryptionFactory`] in the process-wide registry.
 ///
 /// The `id` must match the value of `delta.encryption.kms.id` on any table that should
-/// use this factory.  Registration persists for the lifetime of the process.
+/// use this factory.  Registration persists for the lifetime of the process; there is
+/// no unregistration, so a factory (and any credentials it holds) lives until exit.
+///
+/// # Trust model
+///
+/// The registry is process-global and last-write-wins: any code in the process can
+/// re-register an id and will then receive every key-derivation request for tables
+/// using that id (key identifiers, column-key maps, KMS configuration — not key
+/// material, which stays inside the factory). Registering over an existing id logs
+/// a warning. Treat factory registration as privileged setup code.
 pub fn register_encryption_factory(id: impl Into<String>, factory: Arc<dyn EncryptionFactory>) {
-    GLOBAL_FACTORY_REGISTRY.insert(id.into(), factory);
+    let id = id.into();
+    if GLOBAL_FACTORY_REGISTRY
+        .insert(id.clone(), factory)
+        .is_some()
+    {
+        tracing::warn!(
+            "replaced the previously registered EncryptionFactory for kms.id '{id}'; \
+             all future key-derivation requests for that id go to the new factory"
+        );
+    }
 }
 
 /// Look up a previously registered [`EncryptionFactory`] by id.

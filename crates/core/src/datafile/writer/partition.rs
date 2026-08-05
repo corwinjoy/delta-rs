@@ -444,7 +444,6 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
     use object_store::ObjectStoreExt as _;
     use parquet::file::reader::{FileReader, SerializedFileReader};
-    use parquet::schema::types::ColumnPath;
     use std::sync::Arc;
 
     fn get_partition_writer(

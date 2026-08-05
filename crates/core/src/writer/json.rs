@@ -79,10 +79,13 @@ impl JsonWriter {
         partition_columns: Vec<String>,
     ) -> Result<Self, DeltaTableError> {
         let (num_indexed_cols, stats_columns) = Self::read_stats_config(table)?;
+        let configuration = table.snapshot()?.metadata().configuration().clone();
+        let writer_properties_factory = super::resolve_legacy_writer_encryption(&configuration)?;
         let factory = SinkFactory {
             storage: table.object_store(),
             partition_columns,
             writer_properties: default_writer_properties(parquet::basic::Compression::SNAPPY),
+            writer_properties_factory,
             target_file_size: None,
             num_indexed_cols,
             stats_columns,
