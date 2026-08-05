@@ -607,9 +607,34 @@ impl CdfLoadBuilder {
         let remove_table_schema = TableSchema::builder(Arc::clone(&add_remove_file_schema))
             .with_table_partition_cols(add_remove_partition_fields)
             .build();
-        let parquet_options = TableParquetOptions {
+
+        // Start from the session's parquet options, then overlay the crypto settings
+        // derived from `delta.encryption.*` so the change feed of an encrypted
+        // table can be decrypted like every other read path. Applies to all three
+        // sources: `_change_data` files and the regular add/remove data files are
+        // encrypted alike.
+        //
+        // NOTE for path-bound (AAD) key derivation: `_change_data` files are
+        // written through a `PrefixStore`, so the write-side factory sees their
+        // path without the `_change_data/` prefix, while this scan presents the
+        // full path. A factory that binds keys to the exact file path must
+        // normalize for that prefix.
+        let mut parquet_options = TableParquetOptions {
             global: session.config().options().execution.parquet.clone(),
             ..Default::default()
+        };
+        if let Some(enc_opts) =
+            crate::delta_datafusion::table_provider::parquet_options_from_table_config(
+                snapshot.table_configuration(),
+            )?
+        {
+            parquet_options.crypto = enc_opts.crypto;
+        }
+        let encryption_factory = if let Some(factory_id) = &parquet_options.crypto.factory_id {
+            use crate::operations::write::encryption::resolve_encryption_factory_or_err;
+            Some(resolve_encryption_factory_or_err(factory_id, session)?)
+        } else {
+            None
         };
 
         let mut cdc_source = ParquetSource::new(cdc_table_schema)
@@ -662,6 +687,12 @@ impl CdfLoadBuilder {
             &metrics,
         )
         .await?;
+
+        if let Some(factory) = &encryption_factory {
+            cdc_source = cdc_source.with_encryption_factory(factory.clone());
+            add_source = add_source.with_encryption_factory(factory.clone());
+            remove_source = remove_source.with_encryption_factory(factory.clone());
+        }
 
         if let Some(filters) = filters {
             cdc_source = cdc_source.with_predicate(Arc::clone(filters));
