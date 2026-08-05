@@ -100,7 +100,7 @@ pub mod planner;
 mod session;
 pub use session::SessionFallbackPolicy;
 pub(crate) use session::{SessionResolveContext, resolve_session_state};
-mod table_provider;
+pub(crate) mod table_provider;
 pub(crate) mod utils;
 
 impl From<DeltaTableError> for DataFusionError {

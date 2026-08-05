@@ -34,6 +34,7 @@ use datafusion::{
         ColumnStatistics, HashMap, Result, Statistics, ToDFSchema, internal_datafusion_err,
         plan_err, stats::Precision,
     },
+    config::TableParquetOptions,
     datasource::physical_plan::{ParquetSource, parquet::CachedParquetFileReaderFactory},
     error::DataFusionError,
     execution::object_store::ObjectStoreUrl,
@@ -160,7 +161,27 @@ pub(super) async fn execution_plan(
         }
     }
 
-    get_data_scan_plan(session, scan_plan, replayed, limit).await
+    // `table_parquet_options` is `#[serde(skip)]` (DataFusion's TableParquetOptions
+    // is not serializable), so a provider decoded from the wire (DeltaLogicalCodec)
+    // arrives without it. The snapshot's `delta.encryption.*` properties survive
+    // serialization, so re-derive the options here when the field is empty rather
+    // than failing the scan of an encrypted table with a raw parquet decode error.
+    let table_parquet_options = match &config.table_parquet_options {
+        Some(opts) => Some(opts.clone()),
+        None => crate::delta_datafusion::table_provider::parquet_options_from_table_config(
+            scan_plan.table_configuration(),
+        )
+        .map_err(|e| DataFusionError::External(Box::new(e)))?,
+    };
+
+    get_data_scan_plan(
+        session,
+        scan_plan,
+        replayed,
+        limit,
+        table_parquet_options.as_ref(),
+    )
+    .await
 }
 
 /// Materialize deletion vector keep masks for every file in the scan that has one.
@@ -401,6 +422,7 @@ async fn get_data_scan_plan(
     scan_plan: KernelScanPlan,
     replayed: ReplayedScanFiles,
     limit: Option<usize>,
+    table_parquet_options: Option<&TableParquetOptions>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
     let ReplayedScanFiles {
         files,
@@ -468,6 +490,7 @@ async fn get_data_scan_plan(
         limit,
         &file_id_field,
         predicate,
+        table_parquet_options,
     )
     .await?;
 
@@ -654,6 +677,7 @@ async fn get_read_plan(
     limit: Option<usize>,
     file_id_field: &FieldRef,
     predicate: Option<&Expr>,
+    table_parquet_options: Option<&TableParquetOptions>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
     let mut plans = Vec::new();
 
@@ -664,13 +688,32 @@ async fn get_read_plan(
     let parquet_read_schema = Arc::new(relax_schema_nested_nullability(parquet_read_schema));
     let parquet_read_schema = &parquet_read_schema;
 
-    let pq_options = crate::datafile::ReaderProperties::default().to_table_parquet_options(state);
+    // Start from the Delta reader defaults (the session's parquet settings), then
+    // overlay the crypto settings derived from `delta.encryption.*` table properties.
+    let pq_options = {
+        let mut opts = crate::datafile::ReaderProperties::default().to_table_parquet_options(state);
+        if let Some(enc_opts) = table_parquet_options {
+            opts.crypto = enc_opts.crypto.clone();
+        }
+        opts
+    };
 
     let mut full_read_schema = SchemaBuilder::from(parquet_read_schema.as_ref().clone());
     full_read_schema.push(file_id_field.as_ref().clone().with_nullable(true));
     let full_read_schema = Arc::new(full_read_schema.finish());
     let parquet_predicate_df_schema = parquet_predicate_schema.clone().to_dfschema()?;
     let adapter_factory = Arc::new(DeltaPhysicalExprAdapterFactory);
+
+    // Resolve the encryption factory once — it is the same for every object-store group.
+    let maybe_encryption_factory = if let Some(factory_id) = &pq_options.crypto.factory_id {
+        use crate::operations::write::encryption::resolve_encryption_factory_or_err;
+        Some(
+            resolve_encryption_factory_or_err(factory_id, state)
+                .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?,
+        )
+    } else {
+        None
+    };
 
     for (store_url, files) in files_by_store.into_iter() {
         let reader_factory = Arc::new(CachedParquetFileReaderFactory::new(
@@ -687,6 +730,10 @@ async fn get_read_plan(
         let mut file_source = ParquetSource::new(table_schema)
             .with_table_parquet_options(pq_options.clone())
             .with_parquet_file_reader_factory(reader_factory);
+
+        if let Some(factory) = &maybe_encryption_factory {
+            file_source = file_source.with_encryption_factory(factory.clone());
+        }
 
         // TODO(roeap); we might be able to also push selection vectors into the read plan
         // by creating parquet access plans. However we need to make sure this does not
@@ -1380,6 +1427,7 @@ mod tests {
             None,
             &file_id_field,
             None,
+            None,
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -1402,6 +1450,7 @@ mod tests {
             &parquet_predicate_schema,
             Some(1),
             &file_id_field,
+            None,
             None,
         )
         .await?;
@@ -1430,6 +1479,7 @@ mod tests {
             &parquet_predicate_schema_extended,
             Some(1),
             &file_id_field,
+            None,
             None,
         )
         .await?;
@@ -1508,6 +1558,7 @@ mod tests {
             None,
             &file_id_field,
             None,
+            None,
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -1545,6 +1596,7 @@ mod tests {
             &parquet_predicate_schema_extended,
             None,
             &file_id_field,
+            None,
             None,
         )
         .await?;
@@ -1739,6 +1791,7 @@ mod tests {
             None,
             &file_id_field,
             None,
+            None,
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -1806,6 +1859,7 @@ mod tests {
             None,
             &file_id_field,
             Some(&predicate),
+            None,
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -1872,6 +1926,7 @@ mod tests {
             None,
             &file_id_field,
             Some(&predicate),
+            None,
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -1951,6 +2006,7 @@ mod tests {
             None,
             &file_id_field,
             Some(&predicate),
+            None,
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -2027,6 +2083,7 @@ mod tests {
             None,
             &file_id_field,
             Some(&predicate),
+            None,
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -2104,6 +2161,7 @@ mod tests {
             None,
             &file_id_field,
             Some(&predicate),
+            None,
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -2193,6 +2251,7 @@ mod tests {
             None,
             &file_id_field,
             Some(&predicate),
+            None,
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
