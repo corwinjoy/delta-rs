@@ -1605,6 +1605,7 @@ async fn execute(
         Some(snapshot.table_properties().target_file_size()),
         None,
         writer_properties.clone(),
+        None,
         writer_stats_config.clone(),
         None,
         should_cdc, // if true, write execution plan splits batches in [normal, cdc] data before writing

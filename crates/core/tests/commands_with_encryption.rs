@@ -153,3 +153,155 @@ async fn test_parquet_files_are_physically_encrypted() -> DeltaResult<()> {
     assert_all_parquets_encrypted(dir.path()).await;
     Ok(())
 }
+
+/// The advertised precedence guarantee: caller-supplied `WriterProperties`
+/// must not defeat table encryption.
+#[tokio::test]
+async fn test_caller_writer_properties_cannot_defeat_encryption() -> DeltaResult<()> {
+    use parquet::file::properties::WriterProperties;
+
+    let kms_id = register_fresh_factory();
+    let dir = TempDir::new()?;
+    let uri = dir.path().to_str().unwrap();
+    create_encrypted_table(uri, &kms_id).await?;
+
+    let table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
+        .load()
+        .await?;
+    table
+        .write(vec![get_table_batches()])
+        .with_writer_properties(WriterProperties::builder().build())
+        .await?;
+
+    assert_all_parquets_encrypted(dir.path()).await;
+    Ok(())
+}
+
+/// The legacy `RecordBatchWriter` must resolve encryption from the table
+/// configuration (via the global registry) rather than writing plaintext.
+#[tokio::test]
+async fn test_legacy_record_batch_writer_is_encrypted() -> DeltaResult<()> {
+    use deltalake_core::writer::{DeltaWriter as _, RecordBatchWriter};
+
+    let kms_id = register_fresh_factory();
+    let dir = TempDir::new()?;
+    let uri = dir.path().to_str().unwrap();
+    create_encrypted_table(uri, &kms_id).await?;
+
+    let mut table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
+        .load()
+        .await?;
+    let mut writer = RecordBatchWriter::for_table(&table)?;
+    writer.write(get_table_batches()).await?;
+    writer.flush_and_commit(&mut table).await?;
+
+    assert_all_parquets_encrypted(dir.path()).await;
+    Ok(())
+}
+
+/// A DataFusion `INSERT INTO` through the table provider's DataSink must
+/// encrypt like every other write path.
+#[tokio::test]
+async fn test_insert_into_datasink_is_encrypted() -> DeltaResult<()> {
+    use datafusion::prelude::SessionContext;
+
+    let kms_id = register_fresh_factory();
+    let dir = TempDir::new()?;
+    let uri = dir.path().to_str().unwrap();
+    create_encrypted_table(uri, &kms_id).await?;
+
+    let table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
+        .load()
+        .await?;
+    let ctx = SessionContext::new();
+    ctx.register_table("t", table.table_provider().await?)?;
+    ctx.sql("INSERT INTO t (int, string) VALUES (42, 'Z')")
+        .await?
+        .collect()
+        .await?;
+
+    assert_all_parquets_encrypted(dir.path()).await;
+    Ok(())
+}
+
+/// A single operation that creates the table (with encryption in its
+/// configuration) and writes data must encrypt that first commit's files too.
+#[tokio::test]
+async fn test_create_with_data_in_one_call_is_encrypted() -> DeltaResult<()> {
+    let kms_id = register_fresh_factory();
+    let dir = TempDir::new()?;
+    let uri = dir.path().to_str().unwrap();
+
+    let table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?.build()?;
+    table
+        .write(vec![get_table_batches()])
+        .with_configuration(vec![
+            ("delta.encryption.kms.id".to_string(), Some(kms_id.clone())),
+            (
+                "delta.encryption.footer.key".to_string(),
+                Some("test-footer-key".to_string()),
+            ),
+        ])
+        .await?;
+
+    assert_all_parquets_encrypted(dir.path()).await;
+    Ok(())
+}
+
+/// A partially-configured table (either encryption property alone) must fail
+/// writes instead of silently writing plaintext.
+#[tokio::test]
+async fn test_partially_configured_encryption_errors_on_write() -> DeltaResult<()> {
+    for props in [
+        vec![("delta.encryption.kms.id", "some-kms")],
+        vec![("delta.encryption.footer.key", "some-key")],
+    ] {
+        let dir = TempDir::new()?;
+        let uri = dir.path().to_str().unwrap();
+        let table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?.build()?;
+        let mut create = table.create().with_columns(get_table_columns());
+        for (k, v) in &props {
+            create = create.with_property(*k, *v);
+        }
+        create.await?;
+
+        let table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
+            .load()
+            .await?;
+        let result = table.write(vec![get_table_batches()]).await;
+        assert!(
+            result.is_err(),
+            "write on a partially-configured table ({props:?}) must error, not write plaintext"
+        );
+    }
+    Ok(())
+}
+
+/// The descriptive unregistered-factory error must surface through an actual
+/// write, not just the registry lookup.
+#[tokio::test]
+async fn test_unregistered_factory_errors_on_write() -> DeltaResult<()> {
+    let unregistered = format!("never-registered-{}", Uuid::new_v4());
+    let dir = TempDir::new()?;
+    let uri = dir.path().to_str().unwrap();
+    let table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?.build()?;
+    table
+        .create()
+        .with_columns(get_table_columns())
+        .with_property("delta.encryption.kms.id", unregistered.as_str())
+        .with_property("delta.encryption.footer.key", "test-footer-key")
+        .await?;
+
+    let table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
+        .load()
+        .await?;
+    let err = table
+        .write(vec![get_table_batches()])
+        .await
+        .expect_err("write without a registered factory must fail");
+    assert!(
+        err.to_string().contains("No EncryptionFactory registered"),
+        "expected the descriptive registry error, got: {err}"
+    );
+    Ok(())
+}

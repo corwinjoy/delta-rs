@@ -428,7 +428,7 @@ impl<'a> std::future::IntoFuture for OptimizeBuilder<'a> {
             let operation_id = this.get_operation_id();
             this.pre_execute(operation_id).await?;
 
-            let writer_properties = this.writer_properties.unwrap_or_else(|| {
+            let base_properties = this.writer_properties.unwrap_or_else(|| {
                 default_writer_properties(Compression::ZSTD(ZstdLevel::try_new(4).unwrap()))
             });
             let (session, _) = resolve_session_state(
@@ -441,13 +441,25 @@ impl<'a> std::future::IntoFuture for OptimizeBuilder<'a> {
                     cdc: false,
                 },
             )?;
+            // Table encryption always wins, so optimize can never rewrite an
+            // encrypted table's files as plaintext; the base properties still
+            // supply compression/row-group settings.
+            use crate::operations::write::encryption::WriterEncryptionConfig;
+            let writer_properties_factory = match WriterEncryptionConfig::from_config(
+                snapshot.table_configuration(),
+                &session,
+                Some(base_properties.clone()),
+            )? {
+                enc if enc.factory.is_some() => enc.factory.unwrap(),
+                _ => factory_from_writer_properties(base_properties),
+            };
             let plan = create_merge_plan(
                 &this.log_store,
                 this.optimize_type,
                 &snapshot,
                 this.filters,
                 this.target_size.to_owned(),
-                writer_properties,
+                writer_properties_factory,
                 session,
             )
             .await?;
@@ -598,8 +610,8 @@ impl PlannerStats {
 pub struct MergeTaskParameters {
     /// Schema of written files
     file_schema: SchemaRef,
-    /// Properties passed to parquet writer
-    writer_properties: WriterProperties,
+    /// Factory for creating per-file WriterProperties (supports KMS encryption / AAD).
+    writer_properties_factory: crate::operations::write::encryption::WriterPropertiesFactoryRef,
     /// Input parameters for the optimize operation
     input_parameters: OptimizeInput,
     /// Num index cols to collect stats for
@@ -694,9 +706,7 @@ impl MergePlan {
         let writer_config = PartitionWriterConfig::try_new(
             task_parameters.file_schema.clone(),
             partition_values.clone(),
-            Some(factory_from_writer_properties(
-                task_parameters.writer_properties.clone(),
-            )),
+            Some(task_parameters.writer_properties_factory.clone()),
             // Since we know the total size of the bin, we can set the target file size to None.
             if ignore_target_size {
                 None
@@ -1015,7 +1025,7 @@ pub async fn create_merge_plan(
     snapshot: &EagerSnapshot,
     filters: &[PartitionFilter],
     target_size: Option<NonZeroU64>,
-    writer_properties: WriterProperties,
+    writer_properties_factory: crate::operations::write::encryption::WriterPropertiesFactoryRef,
     session: SessionState,
 ) -> Result<MergePlan, DeltaTableError> {
     let target_size = target_size.unwrap_or_else(|| snapshot.table_properties().target_file_size());
@@ -1061,7 +1071,7 @@ pub async fn create_merge_plan(
         planner_stats,
         task_parameters: Arc::new(MergeTaskParameters {
             file_schema,
-            writer_properties,
+            writer_properties_factory,
             input_parameters,
             num_indexed_cols: snapshot.table_properties().num_indexed_cols(),
             stats_columns: snapshot

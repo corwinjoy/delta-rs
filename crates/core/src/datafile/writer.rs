@@ -274,7 +274,13 @@ impl DeltaWriter {
         }
     }
 
-    /// Apply custom writer_properties to the underlying parquet writer
+    /// Apply custom writer_properties to the underlying parquet writer.
+    ///
+    /// This **replaces** the configured writer-properties factory with a plain
+    /// (unencrypted) one wrapping `writer_properties`. Do not call it on a
+    /// config carrying an encryption factory — the table's files would silently
+    /// be written as plaintext; set the base properties when resolving the
+    /// factory instead (`WriterEncryptionConfig::from_config`).
     pub fn with_writer_properties(mut self, writer_properties: WriterProperties) -> Self {
         self.config.writer_properties_factory = factory_from_writer_properties(writer_properties);
         self

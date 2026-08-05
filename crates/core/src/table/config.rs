@@ -516,16 +516,24 @@ pub(crate) const FACTORY_OPT_COLUMN_KEYS: &str = "column.keys";
 /// all read and write operations — no per-operation configuration is needed.
 ///
 /// # Protocol
-/// Tables using encryption require Reader Version 3, Writer Version 7, and the
-/// `parquetEncryption` writer feature.
+/// The `delta.encryption.*` properties are a delta-rs extension; no Delta protocol
+/// table feature gates them yet, so encryption-unaware writers are not protocol-blocked
+/// from committing plaintext files to an encrypted table. Gating behind a writer
+/// feature is future work tracked with the encryption effort.
 ///
 /// # Registering a KMS client
 /// Before operating on an encrypted table, register an [`EncryptionFactory`] whose ID
-/// matches `delta.encryption.kms.id` with DataFusion's `RuntimeEnv`:
+/// matches `delta.encryption.kms.id`. Prefer the process-wide registry — operations
+/// that create their own internal DataFusion sessions (e.g. `table.load()`, the
+/// legacy writers) resolve through it:
 ///
 /// ```rust,ignore
-/// session.runtime_env().register_parquet_encryption_factory("my-kms", factory);
+/// deltalake_core::operations::write::encryption::register_encryption_factory("my-kms", factory);
 /// ```
+///
+/// Registering on a session's `RuntimeEnv`
+/// (`session.runtime_env().register_parquet_encryption_factory(..)`) also works for
+/// scans and writes that run under that session.
 ///
 /// [`EncryptionFactory`]: datafusion::execution::parquet_encryption::EncryptionFactory
 #[derive(Debug, Clone)]
@@ -597,26 +605,31 @@ impl EncryptionConfig {
     }
 
     /// Like [`from_properties`](Self::from_properties) but returns an error when
-    /// `delta.encryption.kms.id` is set without a corresponding `delta.encryption.footer.key`.
-    /// Use this in write paths to detect partially-configured tables before writing.
-    #[cfg(feature = "datafusion")]
+    /// the encryption configuration is partial — `delta.encryption.kms.id` without
+    /// a `delta.encryption.footer.key`, or vice versa. Use this in write paths to
+    /// detect misconfigured tables before silently writing plaintext.
     pub(crate) fn try_from_properties(
         props: &TableProperties,
     ) -> crate::errors::DeltaResult<Option<Self>> {
-        if props
+        let has_kms_id = props
             .unknown_properties
             .get(ENCRYPTION_KMS_ID_PROP)
-            .is_some()
-            && props
-                .unknown_properties
-                .get(ENCRYPTION_FOOTER_KEY_PROP)
-                .filter(|v| !v.is_empty())
-                .is_none()
-        {
+            .filter(|v| !v.is_empty())
+            .is_some();
+        let has_footer_key = props
+            .unknown_properties
+            .get(ENCRYPTION_FOOTER_KEY_PROP)
+            .filter(|v| !v.is_empty())
+            .is_some();
+        if has_kms_id != has_footer_key {
+            let (present, missing) = if has_kms_id {
+                (ENCRYPTION_KMS_ID_PROP, ENCRYPTION_FOOTER_KEY_PROP)
+            } else {
+                (ENCRYPTION_FOOTER_KEY_PROP, ENCRYPTION_KMS_ID_PROP)
+            };
             return Err(crate::errors::DeltaTableError::Generic(format!(
-                "Table has '{}' configured but '{}' is missing or empty. \
-                 Both are required for an encrypted table.",
-                ENCRYPTION_KMS_ID_PROP, ENCRYPTION_FOOTER_KEY_PROP,
+                "Table has '{present}' configured but '{missing}' is missing or empty. \
+                 Both are required for an encrypted table."
             )));
         }
         Ok(Self::from_properties(props))

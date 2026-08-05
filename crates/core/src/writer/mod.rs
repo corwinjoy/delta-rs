@@ -46,6 +46,46 @@ pub(crate) fn ensure_legacy_writer_supports_table(
     Ok(())
 }
 
+/// Resolve the encryption writer-properties factory for a legacy writer from
+/// the table's configuration.
+///
+/// The legacy writers carry no DataFusion session, so the factory is looked up
+/// in the process-wide registry only (see
+/// [`register_encryption_factory`](crate::operations::write::encryption::register_encryption_factory)
+/// when the `datafusion` feature is enabled). Returns `Ok(None)` for
+/// unencrypted tables; errors on a partially-configured table, an unregistered
+/// factory, or (without the `datafusion` feature) any encrypted table — never
+/// silently writing plaintext into an encrypted table.
+pub(crate) fn resolve_legacy_writer_encryption(
+    configuration: &std::collections::HashMap<String, String>,
+) -> Result<Option<writer_factory::WriterPropertiesFactoryRef>, DeltaTableError> {
+    let properties = delta_kernel::table_properties::TableProperties::from(
+        configuration.iter().map(|(k, v)| (k.clone(), v.clone())),
+    );
+    #[cfg(feature = "datafusion")]
+    {
+        Ok(
+            crate::operations::write::encryption::WriterEncryptionConfig::from_table_properties(
+                &properties,
+                None,
+                None,
+            )?
+            .factory,
+        )
+    }
+    #[cfg(not(feature = "datafusion"))]
+    {
+        if crate::table::config::EncryptionConfig::try_from_properties(&properties)?.is_some() {
+            return Err(DeltaTableError::Generic(
+                "This table's delta.encryption.* properties require the 'datafusion' feature; \
+                 the legacy writers cannot encrypt without it"
+                    .to_string(),
+            ));
+        }
+        Ok(None)
+    }
+}
+
 /// Enum representing an error when calling [`DeltaWriter`].
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum DeltaWriterError {

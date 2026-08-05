@@ -37,6 +37,12 @@ pub(crate) struct SinkFactory {
     pub(crate) storage: Arc<dyn ObjectStore>,
     pub(crate) partition_columns: Vec<String>,
     pub(crate) writer_properties: WriterProperties,
+    /// Encryption factory resolved from the table's `delta.encryption.*`
+    /// properties. When set it takes precedence over `writer_properties`
+    /// (including a later `set_writer_properties`), so an encrypted table can
+    /// never fall back to plaintext output through the legacy writers.
+    pub(crate) writer_properties_factory:
+        Option<crate::writer::writer_factory::WriterPropertiesFactoryRef>,
     pub(crate) target_file_size: Option<NonZeroU64>,
     pub(crate) num_indexed_cols: DataSkippingNumIndexedCols,
     pub(crate) stats_columns: Option<Vec<String>>,
@@ -45,14 +51,16 @@ pub(crate) struct SinkFactory {
 impl SinkFactory {
     /// Open a fresh streaming sink encoding under `schema`.
     fn build(&self, schema: ArrowSchemaRef) -> DatasetSink {
+        let factory = match &self.writer_properties_factory {
+            Some(factory) => factory.clone(),
+            None => crate::writer::writer_factory::factory_from_writer_properties(
+                self.writer_properties.clone(),
+            ),
+        };
         let config = WriterConfig::new(
             schema,
             self.partition_columns.clone(),
-            Some(
-                crate::writer::writer_factory::factory_from_writer_properties(
-                    self.writer_properties.clone(),
-                ),
-            ),
+            Some(factory),
             self.target_file_size,
             None,
             self.num_indexed_cols,
@@ -357,6 +365,7 @@ mod tests {
             storage: Arc::new(InMemory::new()),
             partition_columns: vec![],
             writer_properties: WriterProperties::builder().build(),
+            writer_properties_factory: None,
             target_file_size: None,
             num_indexed_cols: DataSkippingNumIndexedCols::AllColumns,
             stats_columns: None,
@@ -463,6 +472,7 @@ mod tests {
             writer_properties: WriterProperties::builder()
                 .set_dictionary_enabled(false)
                 .build(),
+            writer_properties_factory: None,
             target_file_size: None,
             num_indexed_cols: DataSkippingNumIndexedCols::AllColumns,
             stats_columns: None,

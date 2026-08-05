@@ -78,13 +78,13 @@ impl RecordBatchWriter {
             |snapshot| snapshot.metadata().configuration().clone(),
         );
 
-        Ok(Self::new_with_table(
+        Self::new_with_table(
             delta_table,
             schema,
             partition_columns,
             configuration,
             writer_properties,
-        ))
+        )
     }
 
     /// Create a new [`RecordBatchWriter`] for an existing table after validating table metadata.
@@ -106,13 +106,13 @@ impl RecordBatchWriter {
         let writer_properties = default_writer_properties(parquet::basic::Compression::SNAPPY);
         let configuration = delta_table.snapshot()?.metadata().configuration().clone();
 
-        Ok(Self::new_with_table(
+        Self::new_with_table(
             delta_table,
             schema,
             partition_columns,
             configuration,
             writer_properties,
-        ))
+        )
     }
 
     /// Add the [CommitProperties] to the [RecordBatchWriter] to be used when the writer flushes
@@ -139,13 +139,13 @@ impl RecordBatchWriter {
         let writer_properties = default_writer_properties(parquet::basic::Compression::SNAPPY);
         let configuration = table.snapshot()?.metadata().configuration().clone();
 
-        Ok(Self::from_parts(
+        Self::from_parts(
             table.object_store(),
             arrow_schema_ref,
             partition_columns,
             &configuration,
             writer_properties,
-        ))
+        )
     }
 
     /// Creates a [`RecordBatchWriter`] to write data to an [`BlindDeltaTable`].
@@ -167,13 +167,13 @@ impl RecordBatchWriter {
             .build();
         let configuration = metadata.configuration().clone();
 
-        Ok(Self::from_parts(
+        Self::from_parts(
             table.object_store(),
             arrow_schema_ref,
             partition_columns,
             &configuration,
             writer_properties,
-        ))
+        )
     }
 
     fn new_with_table(
@@ -182,7 +182,7 @@ impl RecordBatchWriter {
         partition_columns: Option<Vec<String>>,
         configuration: HashMap<String, String>,
         writer_properties: WriterProperties,
-    ) -> Self {
+    ) -> Result<Self, DeltaTableError> {
         Self::from_parts(
             delta_table.object_store(),
             normalize_for_delta(&schema),
@@ -201,7 +201,7 @@ impl RecordBatchWriter {
         partition_columns: Vec<String>,
         configuration: &HashMap<String, String>,
         writer_properties: WriterProperties,
-    ) -> Self {
+    ) -> Result<Self, DeltaTableError> {
         let num_indexed_cols = configuration
             .get("delta.dataSkippingNumIndexedCols")
             .and_then(|v| {
@@ -215,19 +215,21 @@ impl RecordBatchWriter {
         let stats_columns = configuration
             .get("delta.dataSkippingStatsColumns")
             .map(|v| v.split(',').map(|s| s.to_string()).collect());
+        let writer_properties_factory = super::resolve_legacy_writer_encryption(configuration)?;
 
         let factory = SinkFactory {
             storage,
             partition_columns,
             writer_properties,
+            writer_properties_factory,
             target_file_size: None,
             num_indexed_cols,
             stats_columns,
         };
-        Self {
+        Ok(Self {
             window: WriteWindow::new(factory, arrow_schema_ref),
             commit_properties: None,
-        }
+        })
     }
 
     /// Approximate encoded (parquet) size written since the last flush,

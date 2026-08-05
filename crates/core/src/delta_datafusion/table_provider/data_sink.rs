@@ -104,7 +104,7 @@ impl DataSink for DeltaDataSink {
     async fn write_all(
         &self,
         data: SendableRecordBatchStream,
-        _context: &Arc<TaskContext>,
+        context: &Arc<TaskContext>,
     ) -> datafusion::common::Result<u64> {
         let target_schema = self.snapshot.input_schema();
         let table_props = self.snapshot.table_configuration().table_properties();
@@ -159,10 +159,22 @@ impl DataSink for DeltaDataSink {
                     )
                 }
             };
+        // An encrypted table must never fall back to the plaintext default
+        // factory: resolve encryption from the table's delta.encryption.*
+        // properties (task RuntimeEnv first, then the global registry).
+        let runtime_env = context.runtime_env();
+        let writer_factory =
+            crate::operations::write::encryption::WriterEncryptionConfig::from_table_properties(
+                table_props,
+                Some(runtime_env.as_ref()),
+                None,
+            )
+            .map_err(|e| DataFusionError::External(Box::new(e)))?
+            .factory;
         let config = WriterConfig::new(
             table_schema,
             physical_partition_columns,
-            None,
+            writer_factory,
             Some(table_props.target_file_size()),
             None,
             stats_config.num_indexed_cols,
