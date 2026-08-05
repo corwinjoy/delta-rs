@@ -69,7 +69,7 @@ pub(crate) fn resolve_file_column_name(
 }
 
 /// Derive [`TableParquetOptions`] from `delta.encryption.*` table properties.
-fn parquet_options_from_table_config(
+pub(crate) fn parquet_options_from_table_config(
     config: &delta_kernel::table_configuration::TableConfiguration,
 ) -> crate::DeltaResult<Option<TableParquetOptions>> {
     Ok(

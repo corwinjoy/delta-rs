@@ -561,3 +561,112 @@ async fn test_unregistered_factory_errors_on_write() -> DeltaResult<()> {
     );
     Ok(())
 }
+
+/// The change feed of an encrypted table must decrypt like every other read
+/// path (both `_change_data` files and the regular add/remove data files).
+#[tokio::test]
+async fn test_cdf_read_on_encrypted_table() -> DeltaResult<()> {
+    use datafusion::physical_plan::collect;
+
+    let kms_id = register_fresh_factory();
+    let dir = TempDir::new()?;
+    let uri = dir.path().to_str().unwrap();
+
+    let table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?.build()?;
+    table
+        .create()
+        .with_columns(get_table_columns())
+        .with_property("delta.encryption.kms.id", kms_id.as_str())
+        .with_property("delta.encryption.footer.key", "test-footer-key")
+        .with_property("delta.enableChangeDataFeed", "true")
+        .await?;
+
+    let table: DeltaTable = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
+        .load()
+        .await?;
+    let table = table.write(vec![get_table_batches()]).await?;
+    // An update produces `_change_data` files, which are encrypted too.
+    let (table, metrics) = table
+        .update()
+        .with_predicate(col("int").eq(lit(1)))
+        .with_update("int", lit(100))
+        .await?;
+    assert!(metrics.num_updated_rows > 0);
+    assert_all_parquets_encrypted(dir.path()).await;
+
+    let ctx = SessionContext::new();
+    let plan = table
+        .scan_cdf()
+        .with_starting_version(0)
+        .build(&ctx.state(), None)
+        .await?;
+    let batches = collect(plan, ctx.task_ctx()).await?;
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert!(
+        rows > 0,
+        "change feed of an encrypted table must be readable"
+    );
+    Ok(())
+}
+
+/// Round-trip on a partitioned encrypted table: partitioned writes go through
+/// the per-partition writer fan-out, and reads reassemble partition values.
+#[tokio::test]
+async fn test_partitioned_encrypted_round_trip() -> DeltaResult<()> {
+    let kms_id = register_fresh_factory();
+    let dir = TempDir::new()?;
+    let uri = dir.path().to_str().unwrap();
+
+    let table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?.build()?;
+    table
+        .create()
+        .with_columns(get_table_columns())
+        .with_partition_columns(["string"])
+        .with_property("delta.encryption.kms.id", kms_id.as_str())
+        .with_property("delta.encryption.footer.key", "test-footer-key")
+        .await?;
+
+    let table: DeltaTable = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
+        .load()
+        .await?;
+    let expected_rows = get_table_batches().num_rows();
+    table.write(vec![get_table_batches()]).await?;
+
+    assert_all_parquets_encrypted(dir.path()).await;
+    let batches = read_table(uri).await?;
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(rows, expected_rows);
+    Ok(())
+}
+
+/// A provider that crossed the wire (DeltaLogicalCodec serde round-trip) loses
+/// its `#[serde(skip)]` parquet options; the scan must re-derive the crypto
+/// options from the snapshot's table properties instead of failing to decode.
+#[tokio::test]
+async fn test_serde_round_tripped_provider_still_decrypts() -> DeltaResult<()> {
+    use deltalake_core::delta_datafusion::DeltaScanNext;
+
+    let kms_id = register_fresh_factory();
+    let dir = TempDir::new()?;
+    let uri = dir.path().to_str().unwrap();
+    create_encrypted_table(uri, "test", &kms_id).await?;
+
+    let table: DeltaTable = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
+        .load()
+        .await?;
+    let provider = table.table_provider().await?;
+    let scan = provider
+        .downcast_ref::<DeltaScanNext>()
+        .expect("table_provider returns DeltaScanNext");
+
+    // Same round-trip DeltaLogicalCodec performs for distributed plans.
+    let encoded = serde_json::to_vec(scan).expect("encode provider");
+    let decoded: DeltaScanNext = serde_json::from_slice(&encoded).expect("decode provider");
+
+    let ctx = SessionContext::new();
+    ctx.register_table("t", Arc::new(decoded))?;
+    let batches = ctx.sql("SELECT * FROM t").await?.collect().await?;
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert!(rows > 0, "decoded provider must still decrypt the table");
+    Ok(())
+}

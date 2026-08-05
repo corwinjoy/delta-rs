@@ -161,12 +161,25 @@ pub(super) async fn execution_plan(
         }
     }
 
+    // `table_parquet_options` is `#[serde(skip)]` (DataFusion's TableParquetOptions
+    // is not serializable), so a provider decoded from the wire (DeltaLogicalCodec)
+    // arrives without it. The snapshot's `delta.encryption.*` properties survive
+    // serialization, so re-derive the options here when the field is empty rather
+    // than failing the scan of an encrypted table with a raw parquet decode error.
+    let table_parquet_options = match &config.table_parquet_options {
+        Some(opts) => Some(opts.clone()),
+        None => crate::delta_datafusion::table_provider::parquet_options_from_table_config(
+            scan_plan.table_configuration(),
+        )
+        .map_err(|e| DataFusionError::External(Box::new(e)))?,
+    };
+
     get_data_scan_plan(
         session,
         scan_plan,
         replayed,
         limit,
-        config.table_parquet_options.as_ref(),
+        table_parquet_options.as_ref(),
     )
     .await
 }
