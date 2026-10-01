@@ -12,3 +12,6 @@ protocol for Parquet Modular Encryption as proposed in the Delta protocol RFC
 
 The `parquetEncryption` table feature is not yet known to delta-kernel, so
 this table cannot be opened with `open_table` yet; tests read the log directly.
+
+Until the encryption read and write paths land, delta-rs refuses to read or
+write any table with `delta.encryption.*` properties (see `ProtocolChecker`).
