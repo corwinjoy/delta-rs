@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::sync::LazyLock;
 
 use delta_kernel::table_features::TableFeature;
+use delta_kernel::table_properties::TableProperties;
 
 use super::{TableReference, TransactionError};
 #[cfg(feature = "nanosecond-timestamps")]
@@ -11,9 +12,19 @@ use crate::kernel::{
     contains_variant,
 };
 use crate::protocol::DeltaOperation;
-use crate::table::config::TablePropertiesExt as _;
+use crate::table::config::{EncryptionConfig, TablePropertiesExt as _};
 
 use tracing::log::*;
+
+/// Name of the table feature the encryption RFC (delta-io/delta#6195) defines.
+const PARQUET_ENCRYPTION_FEATURE: &str = "parquetEncryption";
+
+/// Whether this build can read and write tables with `delta.encryption.*` properties.
+/// The encryption read and write paths land in follow-up PRs, which enable these behind
+/// the `encryption` cargo feature. Until then such tables are refused, rather than having
+/// ciphertext handed to readers or plaintext files written into them.
+const READS_ENCRYPTED_TABLES: bool = false;
+const WRITES_ENCRYPTED_TABLES: bool = false;
 
 static READER_V2: LazyLock<HashSet<TableFeature>> =
     LazyLock::new(|| HashSet::from_iter([TableFeature::ColumnMapping]));
@@ -197,7 +208,30 @@ impl ProtocolChecker {
 
     /// Check if delta-rs can read form the given delta table.
     pub fn can_read_from(&self, snapshot: &dyn TableReference) -> Result<(), TransactionError> {
-        self.can_read_from_protocol(snapshot.protocol())
+        self.can_read_from_protocol(snapshot.protocol())?;
+        self.check_encryption(snapshot.config(), READS_ENCRYPTED_TABLES)
+    }
+
+    /// Check that this build can read a table with the given properties.
+    ///
+    /// delta-kernel cannot open tables carrying the RFC's `parquetEncryption` table feature
+    /// yet, so encrypted tables are identified by their `delta.encryption.*` properties
+    /// and refused with the same error the feature would produce.
+    pub fn can_read_encryption(&self, config: &TableProperties) -> Result<(), TransactionError> {
+        self.check_encryption(config, READS_ENCRYPTED_TABLES)
+    }
+
+    fn check_encryption(
+        &self,
+        config: &TableProperties,
+        supported: bool,
+    ) -> Result<(), TransactionError> {
+        if !supported && EncryptionConfig::is_configured(config) {
+            return Err(TransactionError::UnsupportedTableFeatures(vec![
+                TableFeature::Unknown(PARQUET_ENCRYPTION_FEATURE.to_string()),
+            ]));
+        }
+        Ok(())
     }
 
     pub fn can_read_from_protocol(&self, protocol: &Protocol) -> Result<(), TransactionError> {
@@ -231,6 +265,7 @@ impl ProtocolChecker {
     pub fn can_write_to(&self, snapshot: &dyn TableReference) -> Result<(), TransactionError> {
         // NOTE: writers must always support all required reader features
         self.can_read_from(snapshot)?;
+        self.check_encryption(snapshot.config(), WRITES_ENCRYPTED_TABLES)?;
         let min_writer_version = snapshot.protocol().min_writer_version();
 
         let required_features: Option<HashSet<TableFeature>> = match min_writer_version {

@@ -52,10 +52,12 @@ pub struct DefaultWriterPropertiesFactory {
 }
 
 impl DefaultWriterPropertiesFactory {
+    /// Create a factory that hands out `writer_properties` for every file.
     pub fn new(writer_properties: WriterProperties) -> Self {
         Self { writer_properties }
     }
 
+    /// Create a factory using SNAPPY compression and the delta-rs `created_by` tag.
     pub fn snappy() -> Self {
         Self::new(snappy_writer_properties())
     }
