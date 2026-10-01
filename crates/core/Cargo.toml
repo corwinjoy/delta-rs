@@ -39,7 +39,7 @@ arrow-ord = { workspace = true }
 arrow-row = { workspace = true }
 arrow-schema = { workspace = true, features = ["serde"] }
 arrow-select = { workspace = true }
-parquet = { workspace = true, features = ["async", "object_store", "encryption"] }
+parquet = { workspace = true, features = ["async", "object_store"] }
 object_store = { workspace = true }
 roaring = "0.11.4"
 
@@ -126,6 +126,8 @@ datafusion = [
     "datafusion-proto",
 ]
 datafusion-ext = ["datafusion"]
+# Parquet Modular Encryption for tables configured with `delta.encryption.*` properties
+encryption = ["parquet/encryption", "datafusion?/parquet_encryption"]
 json = ["parquet/json"]
 python = ["arrow/pyarrow"]
 native-tls = ["delta_kernel_default_engine/native-tls"]
