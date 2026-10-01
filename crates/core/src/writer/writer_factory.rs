@@ -15,8 +15,8 @@ use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 use parquet::schema::types::ColumnPath;
 
-use crate::crate_version;
 use crate::errors::DeltaResult;
+use crate::parquet_utils::default_writer_properties;
 
 /// Async factory for creating per-file [`WriterProperties`].
 ///
@@ -64,10 +64,7 @@ impl DefaultWriterPropertiesFactory {
 /// Build the standard delta-rs base [`WriterProperties`]: SNAPPY compression with
 /// the delta-rs `created_by` tag. Used as the base for both plain and encrypted writers.
 pub fn snappy_writer_properties() -> WriterProperties {
-    WriterProperties::builder()
-        .set_compression(Compression::SNAPPY)
-        .set_created_by(format!("delta-rs version {}", crate_version()))
-        .build()
+    default_writer_properties(Compression::SNAPPY)
 }
 
 #[async_trait]
