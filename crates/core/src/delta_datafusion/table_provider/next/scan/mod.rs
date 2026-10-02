@@ -34,6 +34,7 @@ use datafusion::{
         ColumnStatistics, HashMap, Result, Statistics, ToDFSchema, internal_datafusion_err,
         plan_err, stats::Precision,
     },
+    config::TableParquetOptions,
     datasource::physical_plan::{
         ParquetSource,
         parquet::{CachedParquetFileReaderFactory, metadata::DFParquetMetadata},
@@ -81,6 +82,7 @@ use self::replay::{ScanFileContext, ScanFileStream};
 pub(crate) use self::runtime_filter::RuntimeFileFilter;
 use self::runtime_filter::RuntimeScanFilePruner;
 use super::{FileSelection, ResolvedFileSelection};
+use crate::delta_datafusion::decryption::{Decryption, parquet_options_from_table_config};
 use crate::{
     DeltaTableError,
     delta_datafusion::{
@@ -209,7 +211,19 @@ pub(super) async fn execution_plan(
         ))
     });
 
-    get_data_scan_plan(session, scan_plan, replayed, limit, file_pruner).await
+    // The decryption options follow from the snapshot's `delta.encryption.*` properties,
+    // which is what survives serialization (DeltaLogicalCodec), so derive them per scan.
+    let table_parquet_options = parquet_options_from_table_config(scan_plan.table_configuration())?;
+
+    get_data_scan_plan(
+        session,
+        scan_plan,
+        replayed,
+        limit,
+        file_pruner,
+        table_parquet_options.as_ref(),
+    )
+    .await
 }
 
 /// Load deletion-vector keep masks for the selected files.
@@ -545,7 +559,9 @@ async fn get_data_scan_plan(
     replayed: ReplayedScanFiles,
     limit: Option<usize>,
     file_pruner: Option<Arc<RuntimeScanFilePruner>>,
+    table_parquet_options: Option<&TableParquetOptions>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
+    let table_root = scan_plan.scan.table_root().clone();
     let ReplayedScanFiles {
         files,
         transforms,
@@ -555,6 +571,12 @@ async fn get_data_scan_plan(
         ..
     } = replayed;
     let has_deletion_vectors = !dvs.is_empty();
+    // Resolve the decryption factory once: the deletion-vector footer reads below and the
+    // Parquet sources share it.
+    let decryption = match table_parquet_options {
+        Some(options) => Decryption::try_new(options, session, &table_root)?,
+        None => Decryption::default(),
+    };
     let mut partition_stats = HashMap::new();
     let log_counts: Vec<_> = files.iter().map(|file| file.num_records).collect();
 
@@ -643,6 +665,7 @@ async fn get_data_scan_plan(
         if !masks.is_empty() {
             return plan_err!("Deletion vector was loaded for an unselected file");
         }
+        let decryption = &decryption;
         let loaded = futures::stream::iter(footer_tasks)
             .map(|(id, store_url, object_meta, log_count, mask)| {
                 let cache = Arc::clone(
@@ -652,9 +675,12 @@ async fn get_data_scan_plan(
                 );
                 async move {
                     let store = session.runtime_env().object_store(&store_url)?;
-                    let metadata = DFParquetMetadata::new(store.as_ref(), &object_meta)
+                    let reader = DFParquetMetadata::new(store.as_ref(), &object_meta)
                         .with_file_metadata_cache(Some(cache))
-                        .with_page_index_policy(Some(PageIndexPolicy::Skip))
+                        .with_page_index_policy(Some(PageIndexPolicy::Skip));
+                    let metadata = decryption
+                        .metadata_reader(reader, &object_meta.location)
+                        .await?
                         .fetch_metadata()
                         .await?;
                     let count = validate_dv_parquet_metadata(
@@ -719,6 +745,8 @@ async fn get_data_scan_plan(
         &file_id_field,
         predicate,
         file_pruner.as_ref().map(|pruner| pruner.predicate()),
+        table_parquet_options,
+        &decryption,
     )
     .await?;
     let pq_plan = if has_deletion_vectors && pq_plan.properties().partitioning.partition_count() > 1
@@ -927,6 +955,9 @@ async fn get_read_plan(
     // rows, and the deletion vector of a file must see all rows of that file. This predicate is
     // always set, because it keeps or removes a file with all its rows.
     file_predicate: Option<Arc<dyn PhysicalExpr>>,
+    // The table's decryption options, and the factory resolved from them.
+    table_parquet_options: Option<&TableParquetOptions>,
+    decryption: &Decryption,
 ) -> Result<Arc<dyn ExecutionPlan>> {
     let mut plans = Vec::new();
 
@@ -937,7 +968,15 @@ async fn get_read_plan(
     let parquet_read_schema = Arc::new(relax_schema_nested_nullability(parquet_read_schema));
     let parquet_read_schema = &parquet_read_schema;
 
-    let pq_options = crate::datafile::ReaderProperties::default().to_table_parquet_options(state);
+    // Start from the Delta reader defaults (the session's parquet settings), then
+    // overlay the crypto settings derived from `delta.encryption.*` table properties.
+    let pq_options = {
+        let mut opts = crate::datafile::ReaderProperties::default().to_table_parquet_options(state);
+        if let Some(enc_opts) = table_parquet_options {
+            opts.crypto = enc_opts.crypto.clone();
+        }
+        opts
+    };
 
     let mut full_read_schema = SchemaBuilder::from(parquet_read_schema.as_ref().clone());
     full_read_schema.push(file_id_field.as_ref().clone().with_nullable(true));
@@ -967,9 +1006,11 @@ async fn get_read_plan(
             builder.build()
         };
         let full_table_schema = table_schema.table_schema().clone();
-        let mut file_source = ParquetSource::new(table_schema)
-            .with_table_parquet_options(pq_options.clone())
-            .with_parquet_file_reader_factory(reader_factory);
+        let mut file_source = decryption.apply(
+            ParquetSource::new(table_schema)
+                .with_table_parquet_options(pq_options.clone())
+                .with_parquet_file_reader_factory(reader_factory),
+        );
 
         // TODO(roeap); we might be able to also push selection vectors into the read plan
         // by creating parquet access plans. However we need to make sure this does not
@@ -1702,6 +1743,8 @@ mod tests {
             &file_id_field,
             None,
             None,
+            None,
+            &Decryption::default(),
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -1726,6 +1769,8 @@ mod tests {
             &file_id_field,
             None,
             None,
+            None,
+            &Decryption::default(),
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -1755,6 +1800,8 @@ mod tests {
             &file_id_field,
             None,
             None,
+            None,
+            &Decryption::default(),
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -1830,6 +1877,8 @@ mod tests {
             &file_id_field,
             None,
             None,
+            None,
+            &Decryption::default(),
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -1869,6 +1918,8 @@ mod tests {
             &file_id_field,
             None,
             None,
+            None,
+            &Decryption::default(),
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -2057,6 +2108,8 @@ mod tests {
             &file_id_field,
             None,
             None,
+            None,
+            &Decryption::default(),
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -2122,6 +2175,8 @@ mod tests {
             &file_id_field,
             Some(&predicate),
             None,
+            None,
+            &Decryption::default(),
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -2186,6 +2241,8 @@ mod tests {
             &file_id_field,
             Some(&predicate),
             None,
+            None,
+            &Decryption::default(),
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -2263,6 +2320,8 @@ mod tests {
             &file_id_field,
             Some(&predicate),
             None,
+            None,
+            &Decryption::default(),
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -2337,6 +2396,8 @@ mod tests {
             &file_id_field,
             Some(&predicate),
             None,
+            None,
+            &Decryption::default(),
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -2412,6 +2473,8 @@ mod tests {
             &file_id_field,
             Some(&predicate),
             None,
+            None,
+            &Decryption::default(),
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -2499,6 +2562,8 @@ mod tests {
             &file_id_field,
             Some(&predicate),
             None,
+            None,
+            &Decryption::default(),
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::delta_datafusion::cdf::{CHANGE_TYPE_COL, CdcDataSpec, FileAction, ResolvedPair};
+use crate::delta_datafusion::decryption::Decryption;
 use crate::delta_datafusion::{get_null_of_arrow_type, to_correct_scalar_value};
 use crate::kernel::StorageType;
 use crate::{DeltaResult, DeltaTableError};
@@ -114,6 +115,7 @@ pub async fn extend_groups_with_pairs(
     table_root: Url,
     cache: Arc<CachedParquetFileReaderFactory>,
     metrics: &ExecutionPlanMetricsSet,
+    decryption: &Decryption,
 ) -> DeltaResult<()> {
     for mut pair in pairs {
         let (deletes, inserts) = resolve_dv_pair(
@@ -136,6 +138,7 @@ pub async fn extend_groups_with_pairs(
             &table_partition_values,
             Arc::clone(&cache),
             &metrics,
+            decryption,
         )
         .await?;
         push_pair_selection(
@@ -146,6 +149,7 @@ pub async fn extend_groups_with_pairs(
             &table_partition_values,
             Arc::clone(&cache),
             &metrics,
+            decryption,
         )
         .await?;
     }
@@ -160,6 +164,7 @@ async fn push_pair_selection(
     table_partition_values: &[ScalarValue],
     cache: Arc<CachedParquetFileReaderFactory>,
     metrics: &ExecutionPlanMetricsSet,
+    decryption: &Decryption,
 ) -> DeltaResult<()> {
     if selection.is_empty() {
         return Ok(());
@@ -170,6 +175,7 @@ async fn push_pair_selection(
         pair.add.size as u64,
         Arc::clone(&cache),
         metrics,
+        decryption,
     )
     .await?;
 
@@ -372,8 +378,14 @@ async fn read_parquet_metadata(
     metrics: &ExecutionPlanMetricsSet,
     file_path: Path,
     file_size: u64,
+    decryption: &Decryption,
 ) -> DeltaResult<Arc<ParquetMetaData>> {
-    let arrow_reader = ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Optional);
+    let arrow_reader = decryption
+        .reader_options(
+            ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Optional),
+            &file_path,
+        )
+        .await?;
     Ok(cache
         .create_reader(0, PartitionedFile::new(file_path, file_size), None, metrics)?
         .get_metadata(Some(&arrow_reader))
@@ -431,9 +443,11 @@ async fn access_plan_for_selection(
     file_size: u64,
     cache: Arc<CachedParquetFileReaderFactory>,
     metrics: &ExecutionPlanMetricsSet,
+    decryption: &Decryption,
 ) -> DeltaResult<ParquetAccessPlan> {
     let file_path = Path::parse(file_path_str)?;
-    let parquet_metadata = read_parquet_metadata(cache, metrics, file_path, file_size).await?;
+    let parquet_metadata =
+        read_parquet_metadata(cache, metrics, file_path, file_size, decryption).await?;
     Ok(access_plan_from_treemap(
         &selection,
         &parquet_metadata,
@@ -449,6 +463,7 @@ pub async fn create_file_scan_plan<F: FileAction>(
     table_root_url: Url,
     cache: Arc<CachedParquetFileReaderFactory>,
     metrics: &ExecutionPlanMetricsSet,
+    decryption: &Decryption,
 ) -> DeltaResult<Option<ParquetAccessPlan>> {
     if let Some(dv) = file_action.deletion_vector() {
         let tree_map = read_dv_treemap(Some(dv), &engine, &table_root_url)?;
@@ -459,6 +474,7 @@ pub async fn create_file_scan_plan<F: FileAction>(
                 file_action.size()? as u64,
                 cache,
                 metrics,
+                decryption,
             )
             .await?,
         ));

@@ -1365,12 +1365,17 @@ mod encryption_tests {
         }
     }
 
-    /// Until the encryption read path lands, delta-rs refuses to read encrypted tables
-    /// rather than hand out ciphertext.
+    /// Reading an encrypted table needs the KMS-backed decryption, so builds without it
+    /// refuse rather than hand out ciphertext.
     #[tokio::test]
-    async fn protocol_checker_refuses_reading_encrypted_tables() {
+    async fn protocol_checker_reads_encrypted_tables_only_with_encryption_support() {
         let table = create_encrypted_table("pii-key:ssn", &[]).await.unwrap();
-        assert_refused(PROTOCOL.can_read_from(table.snapshot().unwrap().snapshot()));
+        let result = PROTOCOL.can_read_from(table.snapshot().unwrap().snapshot());
+        if cfg!(all(feature = "datafusion", feature = "encryption")) {
+            result.unwrap();
+        } else {
+            assert_refused(result);
+        }
     }
 
     /// Writing an encrypted table needs the KMS-backed writer, so builds without it

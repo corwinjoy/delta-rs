@@ -23,6 +23,7 @@ use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStream
 
 use crate::DeltaTable;
 use crate::errors::{DeltaResult, DeltaTableError};
+use crate::table::config::EncryptionConfig;
 
 use super::{BatchStream, DataFileReader, DeltaDataReader, ReadOptions, results_to_stream};
 
@@ -103,10 +104,15 @@ impl ParquetTableReader {
     /// Build a reader over the table's current data files.
     ///
     /// Errors if the table uses a feature this raw reader cannot honor
-    /// (deletion vectors, column mapping, or partition columns).
+    /// (deletion vectors, column mapping, partition columns, or encryption).
     pub async fn try_new(table: &DeltaTable) -> DeltaResult<Self> {
         let snapshot = table.snapshot()?;
 
+        // Guard: this reader has no decryption keys, so it would fail inside the
+        // parquet decoder (or read nothing useful) rather than with a clear error.
+        if EncryptionConfig::is_configured(snapshot.table_config()) {
+            return Err(not_supported("encryption"));
+        }
         // Guard: column mapping would mean physical (not logical) column names.
         // Use the resolved mode (the property is only honored when the protocol
         // actually enables the feature) to avoid rejecting a table that merely

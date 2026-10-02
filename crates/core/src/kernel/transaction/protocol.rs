@@ -23,9 +23,9 @@ use tracing::log::*;
 const PARQUET_ENCRYPTION_FEATURE: &str = "parquetEncryption";
 
 /// Whether this build can read and write tables with `delta.encryption.*` properties.
-/// Writing needs `datafusion` + `encryption`; reads stay refused until the read path
-/// exists, so readers never get ciphertext and writers never add plaintext files.
-const READS_ENCRYPTED_TABLES: bool = false;
+/// Both need `datafusion` + `encryption`; other builds refuse such tables, so readers never
+/// get ciphertext and writers never add plaintext files.
+const READS_ENCRYPTED_TABLES: bool = cfg!(all(feature = "datafusion", feature = "encryption"));
 const WRITES_ENCRYPTED_TABLES: bool = cfg!(all(feature = "datafusion", feature = "encryption"));
 
 static READER_V2: LazyLock<HashSet<TableFeature>> =
