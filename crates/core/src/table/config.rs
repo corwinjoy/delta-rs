@@ -580,6 +580,19 @@ pub(crate) const FACTORY_OPT_COLUMN_KEYS: &str = "column_keys";
 /// `parquetEncryption` reader feature. delta-kernel rejects that feature until it supports
 /// it, so delta-rs does not add it yet; delta-rs's own protocol checks refuse encrypted
 /// tables the build cannot handle instead. Other engines are not protected until then.
+///
+/// # Registering a KMS client
+/// Register an [`EncryptionFactory`] under the table's `delta.encryption.kms_id` before using
+/// the table. Prefer the process-wide registry, which operations that create their own
+/// DataFusion sessions (e.g. `table.load()`, the legacy writers) also use:
+///
+/// ```rust,ignore
+/// deltalake_core::operations::write::encryption::register_encryption_factory("my-kms", factory);
+/// ```
+///
+/// Registering on a session's `RuntimeEnv` works for scans and writes under that session.
+///
+/// [`EncryptionFactory`]: datafusion::execution::parquet_encryption::EncryptionFactory
 #[derive(Debug, Clone)]
 pub struct EncryptionConfig {
     /// The KMS client to use (`delta.encryption.kms_id`).
@@ -1342,23 +1355,34 @@ mod encryption_tests {
         assert!(err.contains("cannot be removed"), "{err}");
     }
 
-    /// Until the encryption read and write paths land, delta-rs refuses encrypted tables
-    /// instead of reading ciphertext or writing plaintext into them.
-    #[tokio::test]
-    async fn protocol_checker_refuses_encrypted_tables() {
-        let table = create_encrypted_table("pii-key:ssn", &[]).await.unwrap();
-        let snapshot = table.snapshot().unwrap().snapshot();
-        for result in [
-            PROTOCOL.can_read_from(snapshot),
-            PROTOCOL.can_write_to(snapshot),
-        ] {
-            match result {
-                Err(TransactionError::UnsupportedTableFeatures(features)) => {
-                    assert_eq!(features.len(), 1);
-                    assert!(format!("{features:?}").contains("parquetEncryption"));
-                }
-                other => panic!("expected UnsupportedTableFeatures, got {other:?}"),
+    fn assert_refused(result: Result<(), TransactionError>) {
+        match result {
+            Err(TransactionError::UnsupportedTableFeatures(features)) => {
+                assert_eq!(features.len(), 1);
+                assert!(format!("{features:?}").contains("parquetEncryption"));
             }
+            other => panic!("expected UnsupportedTableFeatures, got {other:?}"),
+        }
+    }
+
+    /// Until the encryption read path lands, delta-rs refuses to read encrypted tables
+    /// rather than hand out ciphertext.
+    #[tokio::test]
+    async fn protocol_checker_refuses_reading_encrypted_tables() {
+        let table = create_encrypted_table("pii-key:ssn", &[]).await.unwrap();
+        assert_refused(PROTOCOL.can_read_from(table.snapshot().unwrap().snapshot()));
+    }
+
+    /// Writing an encrypted table needs the KMS-backed writer, so builds without it
+    /// refuse rather than write plaintext files.
+    #[tokio::test]
+    async fn protocol_checker_writes_encrypted_tables_only_with_encryption_support() {
+        let table = create_encrypted_table("pii-key:ssn", &[]).await.unwrap();
+        let result = PROTOCOL.can_write_to(table.snapshot().unwrap().snapshot());
+        if cfg!(all(feature = "datafusion", feature = "encryption")) {
+            result.unwrap();
+        } else {
+            assert_refused(result);
         }
     }
 }

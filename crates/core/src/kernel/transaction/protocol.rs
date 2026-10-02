@@ -22,11 +22,11 @@ use tracing::log::*;
 /// The table feature the encryption RFC (delta-io/delta#6195) defines.
 const PARQUET_ENCRYPTION_FEATURE: &str = "parquetEncryption";
 
-/// Whether this build can read and write tables with `delta.encryption.*` properties. Until
-/// the encryption read and write paths exist they are refused, so readers never get
-/// ciphertext and writers never add plaintext files.
+/// Whether this build can read and write tables with `delta.encryption.*` properties.
+/// Writing needs `datafusion` + `encryption`; reads stay refused until the read path
+/// exists, so readers never get ciphertext and writers never add plaintext files.
 const READS_ENCRYPTED_TABLES: bool = false;
-const WRITES_ENCRYPTED_TABLES: bool = false;
+const WRITES_ENCRYPTED_TABLES: bool = cfg!(all(feature = "datafusion", feature = "encryption"));
 
 static READER_V2: LazyLock<HashSet<TableFeature>> =
     LazyLock::new(|| HashSet::from_iter([TableFeature::ColumnMapping]));
@@ -265,8 +265,10 @@ impl ProtocolChecker {
 
     /// Check if delta-rs can write to the given delta table.
     pub fn can_write_to(&self, snapshot: &dyn TableReference) -> Result<(), TransactionError> {
-        // NOTE: writers must always support all required reader features
-        self.can_read_from(snapshot)?;
+        // NOTE: writers must always support all required reader features. Encryption is
+        // checked separately: writing an encrypted table needs write support only, and an
+        // operation that also reads data files fails on them without read support.
+        self.can_read_from_protocol(snapshot.protocol())?;
         self.check_encryption(snapshot.config(), WRITES_ENCRYPTED_TABLES)?;
         let min_writer_version = snapshot.protocol().min_writer_version();
 

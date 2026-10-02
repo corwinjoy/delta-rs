@@ -10,7 +10,6 @@ use delta_kernel::table_properties::DataSkippingNumIndexedCols;
 use futures::{Stream, StreamExt};
 use indexmap::IndexMap;
 use object_store::path::Path;
-use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 use tracing::*;
 
@@ -20,9 +19,11 @@ use crate::datafile::{BatchStream, DeltaDataWriter};
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::kernel::{Add, PartitionsExt};
 use crate::logstore::ObjectStoreRef;
-use crate::parquet_utils::default_writer_properties;
 use crate::writer::partition_split::{PartitionResult, divide_by_partition_values};
 use crate::writer::utils::{arrow_schema_without_partitions, record_batch_without_partitions};
+use crate::writer::writer_factory::{
+    WriterPropertiesFactoryRef, default_writer_properties_factory, with_base_properties,
+};
 
 /// Configuration to write data into Delta tables
 #[derive(Debug, Clone)]
@@ -31,8 +32,8 @@ pub struct WriterConfig {
     table_schema: ArrowSchemaRef,
     /// Column names for columns the table is partitioned by
     partition_columns: Vec<String>,
-    /// Properties passed to underlying parquet writer
-    writer_properties: WriterProperties,
+    /// Creates each file's WriterProperties, including any per-file encryption keys.
+    writer_properties_factory: WriterPropertiesFactoryRef,
     /// Size above which we will write a buffered parquet file to disk.
     /// If None, the writer will not create a new file until the writer is closed.
     target_file_size: Option<NonZeroU64>,
@@ -53,23 +54,26 @@ pub struct WriterConfig {
 
 impl WriterConfig {
     /// Create a new instance of [WriterConfig].
+    ///
+    /// Pass `writer_properties_factory: None` to use the default SNAPPY factory (no encryption).
+    /// Pass an explicit factory (e.g. from `WriterEncryptionConfig`) to enable encryption.
     pub fn new(
         table_schema: ArrowSchemaRef,
         partition_columns: Vec<String>,
-        writer_properties: Option<WriterProperties>,
+        writer_properties_factory: Option<WriterPropertiesFactoryRef>,
         target_file_size: Option<NonZeroU64>,
         write_batch_size: Option<usize>,
         num_indexed_cols: DataSkippingNumIndexedCols,
         stats_columns: Option<Vec<String>>,
     ) -> Self {
-        let writer_properties =
-            writer_properties.unwrap_or_else(|| default_writer_properties(Compression::SNAPPY));
+        let writer_properties_factory =
+            writer_properties_factory.unwrap_or_else(default_writer_properties_factory);
         let write_batch_size = write_batch_size.unwrap_or(DEFAULT_WRITE_BATCH_SIZE);
 
         Self {
             table_schema,
             partition_columns,
-            writer_properties,
+            writer_properties_factory,
             target_file_size,
             write_batch_size,
             num_indexed_cols,
@@ -127,9 +131,11 @@ impl DeltaWriter {
         }
     }
 
-    /// Apply custom writer_properties to the underlying parquet writer
+    /// Apply custom writer_properties to the underlying parquet writer. Encryption
+    /// configured on the writer is kept.
     pub fn with_writer_properties(mut self, writer_properties: WriterProperties) -> Self {
-        self.config.writer_properties = writer_properties;
+        self.config.writer_properties_factory =
+            with_base_properties(&self.config.writer_properties_factory, writer_properties);
         self
     }
 
@@ -157,7 +163,7 @@ impl DeltaWriter {
         let config = PartitionWriterConfig::try_new(
             self.file_schema.clone(),
             partition_values,
-            Some(self.config.writer_properties.clone()),
+            Some(self.config.writer_properties_factory.clone()),
             self.config.target_file_size,
             Some(self.config.write_batch_size),
             None,
@@ -383,13 +389,13 @@ fn random_prefix(length: usize) -> String {
 mod tests {
     use super::*;
     use crate::DeltaTableBuilder;
-    use crate::datafile::writer::test_utils::assert_default_created_by;
+    use crate::datafile::writer::test_utils::assert_default_writer_properties;
     use crate::logstore::tests::flatten_list_stream as list;
     use crate::table::config::DEFAULT_NUM_INDEX_COLS;
     use crate::writer::test_utils::get_record_batch;
+    use crate::writer::writer_factory::factory_from_writer_properties;
     use arrow::array::{Int32Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
-    use parquet::schema::types::ColumnPath;
     use std::sync::Arc;
 
     fn get_delta_writer(
@@ -402,7 +408,7 @@ mod tests {
         let config = WriterConfig::new(
             batch.schema(),
             vec![],
-            writer_properties,
+            writer_properties.map(factory_from_writer_properties),
             target_file_size,
             write_batch_size,
             DataSkippingNumIndexedCols::NumColumns(DEFAULT_NUM_INDEX_COLS),
@@ -411,15 +417,15 @@ mod tests {
         DeltaWriter::new(object_store, config)
     }
 
-    #[test]
-    fn test_writer_config_defaults_include_delta_rs_created_by() {
+    #[tokio::test]
+    async fn test_writer_config_defaults_include_delta_rs_created_by() {
         let schema = Arc::new(ArrowSchema::new(vec![Field::new(
             "id",
             DataType::Int32,
             true,
         )]));
         let config = WriterConfig::new(
-            schema,
+            schema.clone(),
             vec![],
             None,
             None,
@@ -428,13 +434,7 @@ mod tests {
             None,
         );
 
-        assert_default_created_by(&config.writer_properties);
-        assert_eq!(
-            config
-                .writer_properties
-                .compression(&ColumnPath::from("id")),
-            Compression::SNAPPY
-        );
+        assert_default_writer_properties(&config.writer_properties_factory, &schema).await;
     }
 
     #[tokio::test]
