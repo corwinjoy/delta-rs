@@ -604,10 +604,7 @@ async fn test_record_batch_writer_refuses_plaintext_for_table_created_encrypted(
     let mut writer =
         RecordBatchWriter::try_new(table_url(uri).as_str(), batch.schema(), None, None)?;
     writer.write(batch).await?;
-    create_encrypted_table(uri, &kms_id).await?;
-    let mut table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
-        .load()
-        .await?;
+    let mut table = create_encrypted_table(uri, "test", &kms_id).await?;
     let version = table.version();
 
     let err = writer

@@ -16,7 +16,7 @@ use parquet::encryption::encrypt::FileEncryptionProperties;
 use url::Url;
 
 use crate::errors::DeltaResult;
-use crate::operations::write::encryption::resolve_encryption_factory_or_err;
+use crate::operations::write::encryption::resolve_encryption_factory;
 use crate::table::config::EncryptionConfig;
 
 /// Derive [`TableParquetOptions`] from `delta.encryption.*` table properties, or `None`
@@ -48,11 +48,12 @@ impl Decryption {
         session: &dyn Session,
         table_root: &Url,
     ) -> DeltaResult<Self> {
+        let runtime_env = session.runtime_env();
         let factory = options
             .crypto
             .factory_id
             .as_deref()
-            .map(|id| resolve_encryption_factory_or_err(id, session))
+            .map(|id| resolve_encryption_factory(id, Some(&runtime_env)))
             .transpose()?
             .map(|inner| {
                 Arc::new(TableRelativePaths {
