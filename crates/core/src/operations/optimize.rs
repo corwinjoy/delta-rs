@@ -1037,9 +1037,7 @@ pub async fn create_merge_plan(
         predicate: serde_json::to_string(&rendered_filters).ok(),
     };
     // Write the types the rewrite scan produces (e.g. view types), so batches need no cast
-    // Rewrite scans of an encrypted table must decrypt its files.
-    let scan_config =
-        DeltaScanConfig::new_from_session(&session).with_encryption_from_snapshot(snapshot)?;
+    let scan_config = DeltaScanConfig::new_from_session(&session);
     let file_schema = arrow_schema_without_partitions(
         &scan_config.table_schema(snapshot.table_configuration())?,
         partitions_keys,

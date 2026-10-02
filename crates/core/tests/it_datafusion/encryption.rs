@@ -737,6 +737,70 @@ async fn test_cdf_read_on_encrypted_table() -> DeltaResult<()> {
     Ok(())
 }
 
+/// A scan of a table with deletion vectors reads each file's footer to check the vector
+/// against the file, which needs the decryption keys like the data read does.
+#[tokio::test]
+async fn test_encrypted_table_with_deletion_vectors() -> DeltaResult<()> {
+    use deltalake_core::kernel::transaction::CommitBuilder;
+    use deltalake_core::kernel::{Action, DeletionVectorDescriptor, StorageType};
+    use deltalake_core::protocol::DeltaOperation;
+    use futures::TryStreamExt as _;
+
+    let kms_id = register_fresh_factory();
+    let dir = TempDir::new()?;
+    let uri = dir.path().to_str().unwrap();
+    let table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?.build()?;
+    table
+        .create()
+        .with_columns(get_table_columns())
+        .with_property("delta.encryption.kms_id", kms_id.as_str())
+        .with_property("delta.encryption.footer_key", "test-footer-key")
+        .with_property("delta.enableDeletionVectors", "true")
+        .await?;
+    let table: DeltaTable = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
+        .load()
+        .await?;
+    let batch = get_table_batches();
+    let rows = batch.num_rows();
+    let table = table.write(vec![batch]).await?;
+
+    // delta-rs rewrites files on delete rather than writing deletion vectors, so attach an
+    // inline vector that removes the first row of the one file by hand.
+    let snapshot = table.snapshot()?.snapshot();
+    let files: Vec<_> = snapshot
+        .file_views(&table.log_store(), None)
+        .try_collect()
+        .await?;
+    assert_eq!(files.len(), 1);
+    let mut bitmap = roaring::RoaringTreemap::new();
+    bitmap.insert(0);
+    // The portable roaring bitmap magic, then the bitmap (PROTOCOL.md, Deletion Vector Format).
+    let mut bytes = 1681511377u32.to_le_bytes().to_vec();
+    bitmap.serialize_into(&mut bytes).unwrap();
+    let mut add = files[0].add_action();
+    add.deletion_vector = Some(DeletionVectorDescriptor {
+        storage_type: StorageType::Inline,
+        path_or_inline_dv: z85::encode(&bytes),
+        offset: None,
+        size_in_bytes: bytes.len() as i32,
+        cardinality: 1,
+    });
+    let remove = files[0].remove_action(true);
+    CommitBuilder::default()
+        .with_actions(vec![Action::Remove(remove), Action::Add(add)])
+        .build(
+            Some(snapshot),
+            table.log_store(),
+            DeltaOperation::Delete { predicate: None },
+        )
+        .await?;
+
+    let batches = read_table(uri).await?;
+    let read_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(read_rows, rows - 1);
+    Ok(())
+}
+
 /// Round-trip on a partitioned encrypted table: partitioned writes go through
 /// the per-partition writer fan-out, and reads reassemble partition values.
 #[tokio::test]

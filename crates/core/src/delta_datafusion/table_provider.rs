@@ -5,7 +5,7 @@ use arrow::datatypes::{Schema, SchemaRef};
 use datafusion::catalog::TableProvider;
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion::common::{DFSchemaRef, Result, Statistics};
-use datafusion::config::{ConfigOptions, TableParquetOptions};
+use datafusion::config::ConfigOptions;
 use datafusion::error::DataFusionError;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::logical_expr::simplify::SimplifyContext;
@@ -67,14 +67,6 @@ pub(crate) fn resolve_file_column_name(
             Ok(name)
         }
     }
-}
-
-pub(crate) use crate::delta_datafusion::decryption::parquet_options_from_table_config;
-
-fn parquet_options_from_snapshot(
-    snapshot: &next::SnapshotWrapper,
-) -> crate::DeltaResult<Option<TableParquetOptions>> {
-    parquet_options_from_table_config(snapshot.table_configuration())
 }
 
 #[derive(Debug, Clone)]
@@ -158,16 +150,12 @@ impl DeltaScanConfigBuilder {
             None
         };
 
-        let table_parquet_options =
-            parquet_options_from_table_config(snapshot.table_configuration())?;
-
         Ok(DeltaScanConfig {
             file_column_name,
             wrap_partition_values: self.wrap_partition_values.unwrap_or(true),
             enable_parquet_pushdown: self.enable_parquet_pushdown,
             schema: self.schema.clone(),
             schema_force_view_types: true,
-            table_parquet_options,
         })
     }
 }
@@ -186,11 +174,6 @@ pub struct DeltaScanConfig {
     pub schema_force_view_types: bool,
     /// Schema to read as
     pub schema: Option<SchemaRef>,
-    /// Parquet scan options derived from `delta.encryption.*` table properties.
-    /// When set, the scan configures the parquet reader to look up the decryption
-    /// factory by `factory_id` in the DataFusion `RuntimeEnv`.
-    #[serde(skip)]
-    pub table_parquet_options: Option<TableParquetOptions>,
 }
 
 impl Default for DeltaScanConfig {
@@ -208,7 +191,6 @@ impl DeltaScanConfig {
             enable_parquet_pushdown: true,
             schema_force_view_types: true,
             schema: None,
-            table_parquet_options: None,
         }
     }
 
@@ -222,7 +204,6 @@ impl DeltaScanConfig {
             enable_parquet_pushdown: config_options.execution.parquet.pushdown_filters,
             schema_force_view_types: config_options.execution.parquet.schema_force_view_types,
             schema: None,
-            table_parquet_options: None,
         }
     }
 
@@ -252,16 +233,6 @@ impl DeltaScanConfig {
     pub fn with_schema(mut self, schema: SchemaRef) -> Self {
         self.schema = Some(schema);
         self
-    }
-
-    /// Apply encryption parquet options derived from the table's `delta.encryption.*` properties.
-    pub fn with_encryption_from_snapshot(
-        mut self,
-        snapshot: &EagerSnapshot,
-    ) -> crate::DeltaResult<Self> {
-        self.table_parquet_options =
-            parquet_options_from_table_config(snapshot.table_configuration())?;
-        Ok(self)
     }
 }
 
@@ -464,9 +435,6 @@ impl TableProviderBuilder {
                 )));
             }
         }
-
-        config.table_parquet_options = parquet_options_from_snapshot(&snapshot)
-            .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
         let mut provider = next::DeltaScan::new(snapshot, config)?;
         if let Some(row_index_column) = row_index_column {

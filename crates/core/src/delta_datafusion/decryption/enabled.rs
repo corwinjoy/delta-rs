@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use datafusion::catalog::Session;
 use datafusion::config::{EncryptionFactoryOptions, TableParquetOptions};
 use datafusion::datasource::physical_plan::ParquetSource;
+use datafusion::datasource::physical_plan::parquet::metadata::DFParquetMetadata;
 use datafusion::execution::parquet_encryption::EncryptionFactory;
 use delta_kernel::table_configuration::TableConfiguration;
 use object_store::path::Path;
@@ -49,6 +50,7 @@ impl Decryption {
         table_root: &Url,
     ) -> DeltaResult<Self> {
         let runtime_env = session.runtime_env();
+        let table_root = Path::from_url_path(table_root.path())?;
         let factory = options
             .crypto
             .factory_id
@@ -56,10 +58,7 @@ impl Decryption {
             .map(|id| resolve_encryption_factory(id, Some(&runtime_env)))
             .transpose()?
             .map(|inner| {
-                Arc::new(TableRelativePaths {
-                    inner,
-                    table_root: Path::from_url_path(table_root.path()).unwrap_or_default(),
-                }) as Arc<dyn EncryptionFactory>
+                Arc::new(TableRelativePaths { inner, table_root }) as Arc<dyn EncryptionFactory>
             });
         Ok(Self {
             factory,
@@ -75,6 +74,19 @@ impl Decryption {
         }
     }
 
+    /// The decryption keys for `file_path`, if the table is encrypted.
+    async fn file_decryption_properties(
+        &self,
+        file_path: &Path,
+    ) -> DeltaResult<Option<Arc<FileDecryptionProperties>>> {
+        let Some(factory) = &self.factory else {
+            return Ok(None);
+        };
+        Ok(factory
+            .get_file_decryption_properties(&self.factory_options, file_path)
+            .await?)
+    }
+
     /// Add the decryption keys for `file_path` to `options`, for reading a file's metadata
     /// outside a [`ParquetSource`].
     pub(crate) async fn reader_options(
@@ -82,18 +94,20 @@ impl Decryption {
         options: ArrowReaderOptions,
         file_path: &Path,
     ) -> DeltaResult<ArrowReaderOptions> {
-        let Some(factory) = &self.factory else {
-            return Ok(options);
-        };
-        Ok(
-            match factory
-                .get_file_decryption_properties(&self.factory_options, file_path)
-                .await?
-            {
-                Some(properties) => options.with_file_decryption_properties(properties),
-                None => options,
-            },
-        )
+        Ok(match self.file_decryption_properties(file_path).await? {
+            Some(properties) => options.with_file_decryption_properties(properties),
+            None => options,
+        })
+    }
+
+    /// Give `reader` the decryption keys for `file_path`, for fetching a file's footer
+    /// outside a [`ParquetSource`].
+    pub(crate) async fn metadata_reader<'a>(
+        &self,
+        reader: DFParquetMetadata<'a>,
+        file_path: &Path,
+    ) -> DeltaResult<DFParquetMetadata<'a>> {
+        Ok(reader.with_decryption_properties(self.file_decryption_properties(file_path).await?))
     }
 }
 

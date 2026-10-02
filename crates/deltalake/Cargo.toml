@@ -77,9 +77,9 @@ opendal-hf = ["opendal", "deltalake-opendal/opendal-hf", "deltalake-opendal/rust
 lakefs = ["deltalake-lakefs"]
 native-tls = ["deltalake-core/native-tls"]
 rustls = ["deltalake-core/rustls"]
-integration-test = ["deltalake-core/integration_test"]
 
 [dev-dependencies]
+async-trait = { workspace = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 chrono = { workspace = true, default-features = false, features = ["clock"] }
 tempfile = { workspace = true }
@@ -99,7 +99,7 @@ name = "recordbatch-writer"
 
 [[example]]
 name = "basic_operations_encryption"
-required-features = ["datafusion", "encryption", "integration-test"]
+required-features = ["datafusion", "encryption"]
 
 [package.metadata.cargo-machete]
 ignored = ["deltalake-catalog-glue"]

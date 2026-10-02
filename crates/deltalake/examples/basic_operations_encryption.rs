@@ -6,28 +6,66 @@
 //!
 //! Run with:
 //! ```shell
-//! cargo run --example basic_operations_encryption \
-//!     --features "datafusion encryption integration-test" -p deltalake
+//! cargo run --example basic_operations_encryption --features "datafusion encryption" -p deltalake
 //! ```
 
 use deltalake::arrow::{
     array::{Int32Array, StringArray, TimestampMicrosecondArray},
-    datatypes::{DataType as ArrowDataType, Field, Schema, TimeUnit},
+    datatypes::{DataType as ArrowDataType, Field, Schema, SchemaRef, TimeUnit},
     record_batch::RecordBatch,
 };
 use deltalake::datafusion::{
     assert_batches_sorted_eq,
+    config::EncryptionFactoryOptions,
+    execution::parquet_encryption::EncryptionFactory,
     prelude::{SessionContext, col, lit},
 };
 use deltalake::kernel::{DataType, PrimitiveType, StructField};
 use deltalake::operations::optimize::OptimizeType;
-use deltalake::{DeltaTable, DeltaTableError};
+use deltalake::parquet::encryption::{
+    decrypt::FileDecryptionProperties, encrypt::FileEncryptionProperties,
+};
+use deltalake::{DeltaTable, DeltaTableError, Path};
 use deltalake_core::operations::write::encryption::register_encryption_factory;
-use deltalake_core::test_utils::kms_encryption::MockKmsFactory;
 use std::sync::Arc;
 use tempfile::TempDir;
 
 const KMS_ID: &str = "my-test-kms";
+
+/// A stand-in for a KMS client: encrypts every file with one fixed key.
+///
+/// A real [`EncryptionFactory`] would use the key IDs delta-rs forwards in `options`
+/// (`footer_key`, `column_keys`, `plaintext_footer`; see `EncryptionConfig::factory_options`)
+/// to fetch or derive keys from a key management service, and bind each file's keys to its
+/// table-relative `file_path`.
+#[derive(Debug)]
+struct FixedKeyFactory {
+    key: Vec<u8>,
+}
+
+#[async_trait::async_trait]
+impl EncryptionFactory for FixedKeyFactory {
+    async fn get_file_encryption_properties(
+        &self,
+        _options: &EncryptionFactoryOptions,
+        _schema: &SchemaRef,
+        _file_path: &Path,
+    ) -> deltalake::datafusion::error::Result<Option<Arc<FileEncryptionProperties>>> {
+        Ok(Some(
+            FileEncryptionProperties::builder(self.key.clone()).build()?,
+        ))
+    }
+
+    async fn get_file_decryption_properties(
+        &self,
+        _options: &EncryptionFactoryOptions,
+        _file_path: &Path,
+    ) -> deltalake::datafusion::error::Result<Option<Arc<FileDecryptionProperties>>> {
+        Ok(Some(
+            FileDecryptionProperties::builder(self.key.clone()).build()?,
+        ))
+    }
+}
 
 fn schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
@@ -85,7 +123,9 @@ async fn main() -> Result<(), DeltaTableError> {
     // -----------------------------------------------------------------------
     // Step 1: Register the KMS factory (done once at application startup).
     // -----------------------------------------------------------------------
-    let factory = Arc::new(MockKmsFactory::new());
+    let factory = Arc::new(FixedKeyFactory {
+        key: b"0123456789abcdef".to_vec(),
+    });
     register_encryption_factory(KMS_ID, factory);
     println!("Registered KMS factory '{KMS_ID}'");
 

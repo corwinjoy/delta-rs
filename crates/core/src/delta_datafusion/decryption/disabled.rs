@@ -4,6 +4,7 @@
 use datafusion::catalog::Session;
 use datafusion::config::TableParquetOptions;
 use datafusion::datasource::physical_plan::ParquetSource;
+use datafusion::datasource::physical_plan::parquet::metadata::DFParquetMetadata;
 use delta_kernel::table_configuration::TableConfiguration;
 use object_store::path::Path;
 use parquet::arrow::arrow_reader::ArrowReaderOptions;
@@ -41,5 +42,13 @@ impl Decryption {
         _file_path: &Path,
     ) -> DeltaResult<ArrowReaderOptions> {
         Ok(options)
+    }
+
+    pub(crate) async fn metadata_reader<'a>(
+        &self,
+        reader: DFParquetMetadata<'a>,
+        _file_path: &Path,
+    ) -> DeltaResult<DFParquetMetadata<'a>> {
+        Ok(reader)
     }
 }
