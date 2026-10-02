@@ -33,12 +33,16 @@ use crate::kernel::{Action, Add, AddCDCFile};
 use crate::logstore::{LogStore, ObjectStoreRef};
 use crate::operations::cdc::CDC_COLUMN_NAME;
 use crate::operations::write::configs::{WriteExecOptions, WriterStatsConfig};
+use crate::writer::writer_factory::with_path_prefix;
 
 /// Error message used when a worker's `send` fails because the writer task has
 /// already closed the channel (e.g. the writer errored). It is recognised by
 /// [`is_writer_task_closed_error`] so the real (writer) error is surfaced
 /// instead of this downstream symptom.
 const WRITER_TASK_CLOSED_UNEXPECTEDLY_MSG: &str = "Writer task closed unexpectedly";
+
+/// Directory, below the table root, that change data files are written to.
+const CHANGE_DATA_DIR: &str = "_change_data";
 
 #[cfg(test)]
 mod tests {
@@ -332,31 +336,40 @@ pub(crate) async fn write_execution_plan_cdc(
     object_store: ObjectStoreRef,
     exec_options: WriteExecOptions,
 ) -> DeltaResult<Vec<Action>> {
-    let cdc_store = Arc::new(PrefixStore::new(object_store, "_change_data"));
-
-    Ok(
-        write_execution_plan(table_config, session, plan, cdc_store, exec_options)
-            .await?
-            .into_iter()
-            .map(|add| {
-                // Modify add actions into CDC actions
-                match add {
-                    Action::Add(add) => {
-                        Action::Cdc(AddCDCFile {
-                            // This is a gnarly hack, but the action needs the nested path, not the
-                            // path inside the prefixed store
-                            path: format!("_change_data/{}", add.path),
-                            size: add.size,
-                            partition_values: add.partition_values,
-                            data_change: false,
-                            tags: add.tags,
-                        })
-                    }
-                    _ => panic!("Expected Add action"),
-                }
-            })
-            .collect::<Vec<_>>(),
+    let cdc_store = Arc::new(PrefixStore::new(object_store, CHANGE_DATA_DIR));
+    let (actions, _) = write_plan(
+        table_config,
+        session,
+        plan,
+        cdc_store,
+        exec_options,
+        None,
+        false,
+        None,
+        Some(CHANGE_DATA_DIR),
     )
+    .await?;
+
+    Ok(actions
+        .into_iter()
+        .map(|add| {
+            // Modify add actions into CDC actions
+            match add {
+                Action::Add(add) => {
+                    Action::Cdc(AddCDCFile {
+                        // This is a gnarly hack, but the action needs the nested path, not the
+                        // path inside the prefixed store
+                        path: format!("{CHANGE_DATA_DIR}/{}", add.path),
+                        size: add.size,
+                        partition_values: add.partition_values,
+                        data_change: false,
+                        tags: add.tags,
+                    })
+                }
+                _ => panic!("Expected Add action"),
+            }
+        })
+        .collect::<Vec<_>>())
 }
 
 pub(crate) async fn write_execution_plan(
@@ -390,6 +403,34 @@ pub(crate) async fn write_execution_plan_v2(
     predicate: Option<Expr>,
     contains_cdc: bool,
     insert_marker_column: Option<String>,
+) -> DeltaResult<(Vec<Action>, WriteExecutionPlanMetrics)> {
+    write_plan(
+        table_config,
+        session,
+        plan,
+        object_store,
+        exec_options,
+        predicate,
+        contains_cdc,
+        insert_marker_column,
+        None,
+    )
+    .await
+}
+
+/// [`write_execution_plan_v2`] into `object_store`, which is rooted at `file_path_prefix`
+/// below the table root when set; the writer factory still sees table-relative paths.
+#[allow(clippy::too_many_arguments)]
+async fn write_plan(
+    table_config: &TableConfiguration,
+    session: &dyn Session,
+    plan: Arc<dyn ExecutionPlan>,
+    object_store: ObjectStoreRef,
+    exec_options: WriteExecOptions,
+    predicate: Option<Expr>,
+    contains_cdc: bool,
+    insert_marker_column: Option<String>,
+    file_path_prefix: Option<&str>,
 ) -> DeltaResult<(Vec<Action>, WriteExecutionPlanMetrics)> {
     let mut validations =
         validation_predicates(session, &plan.schema().to_dfschema()?, table_config)?;
@@ -426,6 +467,10 @@ pub(crate) async fn write_execution_plan_v2(
         None => exec_options
             .writer_properties
             .map(factory_from_writer_properties),
+    };
+    let writer_factory = match file_path_prefix {
+        Some(prefix) => writer_factory.map(|factory| with_path_prefix(factory, prefix)),
+        None => writer_factory,
     };
 
     let sink_config = WriteSinkConfig {
@@ -952,7 +997,7 @@ async fn write_cdc_plan(
         apply_column_mapping_to_plan(plan, partition_columns, &column_mapping)?;
     let writer_factory =
         writer_properties_factory.unwrap_or_else(default_writer_properties_factory);
-    let cdf_store = Arc::new(PrefixStore::new(object_store.clone(), "_change_data"));
+    let cdf_store = Arc::new(PrefixStore::new(object_store.clone(), CHANGE_DATA_DIR));
 
     let write_schema = Arc::new(Schema::new(
         plan.schema()
@@ -987,7 +1032,7 @@ async fn write_cdc_plan(
     let cdf_config = WriterConfig::new(
         cdf_schema.clone(),
         partition_columns.clone(),
-        Some(writer_factory.clone()),
+        Some(with_path_prefix(writer_factory.clone(), CHANGE_DATA_DIR)),
         target_file_size,
         write_batch_size,
         writer_stats_config.num_indexed_cols,
@@ -1098,7 +1143,7 @@ async fn write_cdc_plan(
             .into_iter()
             .map(|add| {
                 Action::Cdc(AddCDCFile {
-                    path: format!("_change_data/{}", add.path),
+                    path: format!("{CHANGE_DATA_DIR}/{}", add.path),
                     size: add.size,
                     partition_values: add.partition_values,
                     data_change: false,
@@ -1163,7 +1208,7 @@ async fn write_cdc_plan(
                 all_actions.extend(normal_adds.into_iter().map(Action::Add));
                 all_actions.extend(cdf_adds.into_iter().map(|add| {
                     Action::Cdc(AddCDCFile {
-                        path: format!("_change_data/{}", add.path),
+                        path: format!("{CHANGE_DATA_DIR}/{}", add.path),
                         size: add.size,
                         partition_values: add.partition_values,
                         data_change: false,

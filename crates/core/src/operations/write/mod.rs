@@ -430,18 +430,10 @@ impl WriteBuilder {
                 }
             }
             None => {
-                // Mirror `CreateBuilder::with_property`: relax strict property
-                // validation only when the configuration actually carries keys
-                // unknown to the TableProperty enum (e.g. `delta.encryption.*`).
-                let all_keys_known = self
-                    .configuration
-                    .keys()
-                    .all(|k| k.parse::<crate::table::config::TableProperty>().is_ok());
                 let mut builder = CreateBuilder::new()
                     .with_log_store(self.log_store.clone())
                     .with_columns(schema.fields().cloned())
-                    .with_configuration(self.configuration.clone())
-                    .with_raise_if_key_not_exists(all_keys_known);
+                    .with_configuration(self.configuration.clone());
                 if let Some(partition_columns) = self.partition_columns.as_ref() {
                     builder = builder.with_partition_columns(partition_columns.clone())
                 }

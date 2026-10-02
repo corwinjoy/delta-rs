@@ -9,6 +9,7 @@ use arrow::{
     datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema, TimeUnit},
     record_batch::RecordBatch,
 };
+use delta_kernel::table_properties::TableProperties;
 use deltalake_core::DeltaResult;
 use deltalake_core::kernel::{DataType, PrimitiveType, StructField};
 use deltalake_core::operations::write::encryption::register_encryption_factory;
@@ -304,5 +305,97 @@ async fn test_unregistered_factory_errors_on_write() -> DeltaResult<()> {
         err.to_string().contains("No EncryptionFactory registered"),
         "expected the descriptive registry error, got: {err}"
     );
+    Ok(())
+}
+
+/// `RecordBatchWriter::try_new` cannot load the table, so it resolves the table's
+/// encryption on the first write; it must not write plaintext files.
+#[tokio::test]
+async fn test_record_batch_writer_try_new_is_encrypted() -> DeltaResult<()> {
+    use deltalake_core::writer::{DeltaWriter as _, RecordBatchWriter};
+
+    let kms_id = register_fresh_factory();
+    let dir = TempDir::new()?;
+    let uri = dir.path().to_str().unwrap();
+    create_encrypted_table(uri, &kms_id).await?;
+
+    let batch = get_table_batches();
+    let mut writer =
+        RecordBatchWriter::try_new(table_url(uri).as_str(), batch.schema(), None, None)?;
+    writer.write(batch).await?;
+    let mut table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
+        .load()
+        .await?;
+    writer.flush_and_commit(&mut table).await?;
+
+    assert_all_parquets_encrypted(dir.path()).await;
+    Ok(())
+}
+
+/// Replacing the base writer properties of an encrypting factory keeps the encryption and
+/// applies the new settings.
+#[tokio::test]
+async fn test_base_properties_keep_encryption() -> DeltaResult<()> {
+    use deltalake_core::operations::write::encryption::WriterEncryptionConfig;
+    use parquet::basic::{Compression, ZstdLevel};
+    use parquet::file::properties::WriterProperties;
+    use parquet::schema::types::ColumnPath;
+
+    let kms_id = register_fresh_factory();
+    let properties = TableProperties::from([
+        ("delta.encryption.kms_id", kms_id.as_str()),
+        ("delta.encryption.footer_key", "test-footer-key"),
+    ]);
+    let factory = WriterEncryptionConfig::from_table_properties(&properties, None, None)?
+        .factory
+        .expect("table is encrypted");
+
+    let zstd = Compression::ZSTD(ZstdLevel::try_new(3).unwrap());
+    let factory =
+        factory.with_base_properties(WriterProperties::builder().set_compression(zstd).build());
+    assert_eq!(factory.compression(&ColumnPath::from("int")), zstd);
+    let file_properties = factory
+        .create_writer_properties(
+            &object_store::path::Path::from("part-0.parquet"),
+            &get_table_batches().schema(),
+        )
+        .await?;
+    assert!(file_properties.file_encryption_properties().is_some());
+    Ok(())
+}
+
+/// `delta.encryption.*` keys are validated on their own, so other unknown `delta.*` keys,
+/// such as typos, are still rejected when creating a table.
+#[tokio::test]
+async fn test_misspelled_property_is_rejected_alongside_encryption() -> DeltaResult<()> {
+    let kms_id = register_fresh_factory();
+    let dir = TempDir::new()?;
+    let uri = dir.path().to_str().unwrap();
+    let table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?.build()?;
+    let result = table
+        .clone()
+        .create()
+        .with_columns(get_table_columns())
+        .with_property("delta.encryption.kms_id", kms_id.as_str())
+        .with_property("delta.encryption.footer_key", "test-footer-key")
+        .with_property("delta.enableChangeDataFed", "true")
+        .await;
+    assert!(result.is_err(), "a misspelled property must be rejected");
+
+    let result = table
+        .write(vec![get_table_batches()])
+        .with_configuration(vec![
+            ("delta.encryption.kms_id".to_string(), Some(kms_id)),
+            (
+                "delta.encryption.footer_key".to_string(),
+                Some("test-footer-key".to_string()),
+            ),
+            (
+                "delta.enableChangeDataFed".to_string(),
+                Some("true".to_string()),
+            ),
+        ])
+        .await;
+    assert!(result.is_err(), "a misspelled property must be rejected");
     Ok(())
 }

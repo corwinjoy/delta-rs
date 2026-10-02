@@ -18,8 +18,16 @@ use crate::parquet_utils::default_writer_properties;
 
 /// Creates the [`WriterProperties`] for each Parquet file.
 ///
-/// It is async so implementations can fetch per-file keys from a KMS, using the file path
-/// as additional authenticated data (AAD).
+/// It is async so implementations can fetch per-file keys from a KMS.
+///
+/// # File paths and AAD
+/// File paths are relative to the table root, as in the Delta log's `add` and `cdc`
+/// actions, and readers pass decryption factories the same paths. A factory should use only
+/// the file name for the AAD prefix (additional authenticated data), which binds encrypted
+/// modules to their file
+/// (<https://parquet.apache.org/docs/file-format/data-pages/encryption/>). File names are
+/// unique within a table and, unlike full paths, survive moving the table, so its files stay
+/// readable. The KMS decides; `test_utils::kms_encryption::MockKmsFactory` uses the file name.
 #[async_trait]
 pub trait WriterPropertiesFactory: Send + Sync + Debug + 'static {
     /// The compression for `column_path`; the writer uses it to pick the file extension
@@ -38,12 +46,16 @@ pub trait WriterPropertiesFactory: Send + Sync + Debug + 'static {
     }
 
     /// The [`WriterProperties`] for a new file, called once just before it is opened.
-    /// Implementations using AAD must derive keys from `file_path`.
     async fn create_writer_properties(
         &self,
         file_path: &Path,
         file_schema: &Arc<ArrowSchema>,
     ) -> DeltaResult<WriterProperties>;
+
+    /// A factory like this one, but with `properties` as the base settings (compression,
+    /// row groups, statistics). Anything the factory adds on top, such as encryption, is
+    /// kept, so callers' settings cannot turn it off.
+    fn with_base_properties(&self, properties: WriterProperties) -> WriterPropertiesFactoryRef;
 }
 
 /// Shared handle to a [`WriterPropertiesFactory`].
@@ -94,6 +106,10 @@ impl WriterPropertiesFactory for DefaultWriterPropertiesFactory {
     ) -> DeltaResult<WriterProperties> {
         Ok(self.writer_properties.clone())
     }
+
+    fn with_base_properties(&self, properties: WriterProperties) -> WriterPropertiesFactoryRef {
+        factory_from_writer_properties(properties)
+    }
 }
 
 /// A factory for the default delta-rs properties (SNAPPY, no encryption).
@@ -104,4 +120,110 @@ pub fn default_writer_properties_factory() -> WriterPropertiesFactoryRef {
 /// A factory that returns `wp` for every file.
 pub fn factory_from_writer_properties(wp: WriterProperties) -> WriterPropertiesFactoryRef {
     Arc::new(DefaultWriterPropertiesFactory::new(wp))
+}
+
+/// A factory for files written below `prefix` through a store rooted there, such as
+/// `_change_data`: it passes `factory` the table-relative path (`_change_data/part-….parquet`)
+/// rather than the path within that store.
+pub(crate) fn with_path_prefix(
+    factory: WriterPropertiesFactoryRef,
+    prefix: &str,
+) -> WriterPropertiesFactoryRef {
+    Arc::new(PrefixedWriterPropertiesFactory {
+        prefix: Path::from(prefix),
+        inner: factory,
+    })
+}
+
+#[derive(Debug)]
+struct PrefixedWriterPropertiesFactory {
+    prefix: Path,
+    inner: WriterPropertiesFactoryRef,
+}
+
+#[async_trait]
+impl WriterPropertiesFactory for PrefixedWriterPropertiesFactory {
+    fn compression(&self, column_path: &ColumnPath) -> Compression {
+        self.inner.compression(column_path)
+    }
+
+    fn max_row_group_row_count(&self) -> Option<usize> {
+        self.inner.max_row_group_row_count()
+    }
+
+    fn max_row_group_bytes(&self) -> Option<usize> {
+        self.inner.max_row_group_bytes()
+    }
+
+    async fn create_writer_properties(
+        &self,
+        file_path: &Path,
+        file_schema: &Arc<ArrowSchema>,
+    ) -> DeltaResult<WriterProperties> {
+        let table_path = Path::from_iter(self.prefix.parts().chain(file_path.parts()));
+        self.inner
+            .create_writer_properties(&table_path, file_schema)
+            .await
+    }
+
+    fn with_base_properties(&self, properties: WriterProperties) -> WriterPropertiesFactoryRef {
+        Arc::new(Self {
+            prefix: self.prefix.clone(),
+            inner: self.inner.with_base_properties(properties),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use arrow_schema::Schema as ArrowSchema;
+
+    use super::*;
+
+    /// Records the paths it is asked to create properties for.
+    #[derive(Debug, Default)]
+    struct RecordingFactory {
+        paths: Arc<Mutex<Vec<Path>>>,
+    }
+
+    #[async_trait]
+    impl WriterPropertiesFactory for RecordingFactory {
+        fn compression(&self, _column_path: &ColumnPath) -> Compression {
+            Compression::SNAPPY
+        }
+
+        async fn create_writer_properties(
+            &self,
+            file_path: &Path,
+            _file_schema: &Arc<ArrowSchema>,
+        ) -> DeltaResult<WriterProperties> {
+            self.paths.lock().unwrap().push(file_path.clone());
+            Ok(snappy_writer_properties())
+        }
+
+        fn with_base_properties(&self, _: WriterProperties) -> WriterPropertiesFactoryRef {
+            Arc::new(Self {
+                paths: Arc::clone(&self.paths),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn path_prefix_passes_table_relative_paths() {
+        let recording = RecordingFactory::default();
+        let paths = Arc::clone(&recording.paths);
+        let factory = with_path_prefix(Arc::new(recording), "_change_data")
+            .with_base_properties(snappy_writer_properties());
+        let schema = Arc::new(ArrowSchema::empty());
+        factory
+            .create_writer_properties(&Path::from("year=2024/part-0.parquet"), &schema)
+            .await
+            .unwrap();
+        assert_eq!(
+            *paths.lock().unwrap(),
+            [Path::from("_change_data/year=2024/part-0.parquet")]
+        );
+    }
 }

@@ -6,15 +6,17 @@
 //!
 //! # Usage
 //!
-//! 1. Create a [`MockKmsFactory`] and register it with a DataFusion session using
-//!    [`datafusion::execution::RuntimeEnv::register_parquet_encryption_factory`].
+//! 1. Create a [`MockKmsFactory`] and register it in the process-wide registry with
+//!    [`register_encryption_factory`](crate::operations::write::encryption::register_encryption_factory).
+//!    Operations that create their own DataFusion sessions, such as `table.write()`, only
+//!    find factories registered there.
 //! 2. Create a Delta table with `delta.encryption.kms_id` set to the same ID.
 //! 3. All subsequent read/write operations on the table will use the registered factory.
 //!
 //! ```rust,ignore
 //! // Register factory at startup
 //! let factory = Arc::new(MockKmsFactory::new());
-//! session.runtime_env().register_parquet_encryption_factory("test-kms", factory.clone());
+//! register_encryption_factory("test-kms", factory.clone());
 //!
 //! // Create encrypted table
 //! table.create()
@@ -46,11 +48,11 @@ use crate::table::config::{
 /// Supports footer-only encryption, column-level encryption, and plaintext-footer mode
 /// by reading the options forwarded from `delta.encryption.*` table properties.
 ///
-/// Keys are keyed by (basename, key_id) so path-prefix differences between write and read
-/// are handled correctly.
+/// Keys are stored by (file name, key id), and each file's AAD prefix is its file name; see
+/// [`file_name`] for why.
 #[derive(Debug, Default)]
 pub struct MockKmsFactory {
-    /// Stores the actual encryption key for each (filename, key_id) pair.
+    /// The encryption key for each (file name, key id) pair.
     key_store: Mutex<HashMap<(Path, String), Vec<u8>>>,
     counter: AtomicU64,
 }
@@ -64,11 +66,11 @@ impl MockKmsFactory {
         }
     }
 
-    /// Return the key for `(filename, key_id)`, creating a new one if it doesn't exist yet.
-    fn get_or_create_key(&self, filename: &Path, key_id: &str) -> Vec<u8> {
+    /// Return the key for `(file_name, key_id)`, creating a new one if it doesn't exist yet.
+    fn get_or_create_key(&self, file_name: &Path, key_id: &str) -> Vec<u8> {
         let mut store = self.key_store.lock().unwrap();
         store
-            .entry((filename.clone(), key_id.to_string()))
+            .entry((file_name.clone(), key_id.to_string()))
             .or_insert_with(|| {
                 let idx = self.counter.fetch_add(1, Ordering::Relaxed);
                 let mut key = [0u8; 16];
@@ -78,10 +80,10 @@ impl MockKmsFactory {
             .clone()
     }
 
-    /// Look up the key for `(filename, key_id)`. Returns `None` if not found.
-    fn lookup_key(&self, filename: &Path, key_id: &str) -> Option<Vec<u8>> {
+    /// Look up the key for `(file_name, key_id)`. Returns `None` if not found.
+    fn lookup_key(&self, file_name: &Path, key_id: &str) -> Option<Vec<u8>> {
         let store = self.key_store.lock().unwrap();
-        store.get(&(filename.clone(), key_id.to_string())).cloned()
+        store.get(&(file_name.clone(), key_id.to_string())).cloned()
     }
 
     /// Parse `"keyId:col1,col2;keyId2:col3"` into `Vec<(key_id, Vec<col_name>)>`.
@@ -106,6 +108,18 @@ impl MockKmsFactory {
     }
 }
 
+/// The file name of `file_path`, used for key lookup and as the file's AAD prefix.
+///
+/// Parquet modular encryption uses an AAD prefix to bind a file's ciphertext to that file,
+/// so encrypted modules cannot be swapped between files
+/// (<https://parquet.apache.org/docs/file-format/data-pages/encryption/>). The file name is
+/// enough for this: delta-rs file names are unique within a table. Unlike the full path it
+/// stays the same when the table is moved, so the files remain readable. The prefix is not
+/// stored in the file; the reader supplies it again from the file name.
+fn file_name(file_path: &Path) -> Path {
+    Path::from(file_path.filename().unwrap_or(file_path.as_ref()))
+}
+
 #[async_trait]
 impl EncryptionFactory for MockKmsFactory {
     async fn get_file_encryption_properties(
@@ -114,8 +128,6 @@ impl EncryptionFactory for MockKmsFactory {
         _schema: &Arc<ArrowSchema>,
         file_path: &Path,
     ) -> datafusion::error::Result<Option<Arc<FileEncryptionProperties>>> {
-        let filename = Path::from(file_path.filename().unwrap_or(file_path.as_ref()));
-
         let footer_key_id = config
             .options
             .get(FACTORY_OPT_FOOTER_KEY)
@@ -132,13 +144,16 @@ impl EncryptionFactory for MockKmsFactory {
             .cloned()
             .unwrap_or_default();
 
-        let footer_key = self.get_or_create_key(&filename, footer_key_id);
+        let file_name = file_name(file_path);
+        let footer_key = self.get_or_create_key(&file_name, footer_key_id);
 
-        let mut builder =
-            FileEncryptionProperties::builder(footer_key).with_plaintext_footer(plaintext_footer);
+        let mut builder = FileEncryptionProperties::builder(footer_key)
+            .with_plaintext_footer(plaintext_footer)
+            .with_aad_prefix(file_name.as_ref().as_bytes().to_vec())
+            .with_aad_prefix_storage(false);
 
         for (key_id, cols) in Self::parse_column_keys(&column_keys_str) {
-            let col_key = self.get_or_create_key(&filename, &key_id);
+            let col_key = self.get_or_create_key(&file_name, &key_id);
             for col in &cols {
                 builder = builder.with_column_key(col, col_key.clone());
             }
@@ -153,8 +168,6 @@ impl EncryptionFactory for MockKmsFactory {
         config: &EncryptionFactoryOptions,
         file_path: &Path,
     ) -> datafusion::error::Result<Option<Arc<FileDecryptionProperties>>> {
-        let filename = Path::from(file_path.filename().unwrap_or(file_path.as_ref()));
-
         let footer_key_id = config
             .options
             .get(FACTORY_OPT_FOOTER_KEY)
@@ -166,16 +179,18 @@ impl EncryptionFactory for MockKmsFactory {
             .cloned()
             .unwrap_or_default();
 
-        let footer_key = self.lookup_key(&filename, footer_key_id).ok_or_else(|| {
+        let file_name = file_name(file_path);
+        let footer_key = self.lookup_key(&file_name, footer_key_id).ok_or_else(|| {
             datafusion::error::DataFusionError::Execution(format!(
                 "No encryption key found for file {file_path:?}"
             ))
         })?;
 
-        let mut builder = FileDecryptionProperties::builder(footer_key);
+        let mut builder = FileDecryptionProperties::builder(footer_key)
+            .with_aad_prefix(file_name.as_ref().as_bytes().to_vec());
 
         for (key_id, cols) in Self::parse_column_keys(&column_keys_str) {
-            if let Some(col_key) = self.lookup_key(&filename, &key_id) {
+            if let Some(col_key) = self.lookup_key(&file_name, &key_id) {
                 for col in &cols {
                     builder = builder.with_column_key(col, col_key.clone());
                 }

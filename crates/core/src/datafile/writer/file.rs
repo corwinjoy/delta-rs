@@ -154,8 +154,7 @@ impl LazyArrowWriter {
     pub(super) async fn write_batch(&mut self, batch: &RecordBatch) -> DeltaResult<()> {
         match self {
             LazyArrowWriter::Initialized(path, object_store, config) => {
-                // Call the factory with the actual file path so that KMS implementations
-                // can incorporate the path into AAD encryption key derivation.
+                // Per-file properties, so a KMS can derive per-file keys and AAD.
                 let writer_properties = config
                     .writer_properties_factory
                     .create_writer_properties(path, &config.file_schema)

@@ -69,6 +69,14 @@ impl WriterPropertiesFactory for KmsWriterPropertiesFactory {
         self.base_properties.max_row_group_bytes()
     }
 
+    fn with_base_properties(&self, properties: WriterProperties) -> WriterPropertiesFactoryRef {
+        Arc::new(Self {
+            base_properties: properties,
+            encryption_factory: Arc::clone(&self.encryption_factory),
+            factory_options: self.factory_options.clone(),
+        })
+    }
+
     async fn create_writer_properties(
         &self,
         file_path: &Path,

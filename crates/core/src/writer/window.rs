@@ -38,9 +38,8 @@ pub(crate) struct SinkFactory {
     pub(crate) partition_columns: Vec<String>,
     pub(crate) writer_properties: WriterProperties,
     /// Encryption factory resolved from the table's `delta.encryption.*`
-    /// properties. When set it takes precedence over `writer_properties`
-    /// (including a later `set_writer_properties`), so an encrypted table can
-    /// never fall back to plaintext output through the legacy writers.
+    /// properties. Sinks use it with `writer_properties` as its base settings, so a
+    /// later `set_writer_properties` applies but cannot turn encryption off.
     pub(crate) writer_properties_factory:
         Option<crate::writer::writer_factory::WriterPropertiesFactoryRef>,
     pub(crate) target_file_size: Option<NonZeroU64>,
@@ -52,7 +51,7 @@ impl SinkFactory {
     /// Open a fresh streaming sink encoding under `schema`.
     fn build(&self, schema: ArrowSchemaRef) -> DatasetSink {
         let factory = match &self.writer_properties_factory {
-            Some(factory) => factory.clone(),
+            Some(factory) => factory.with_base_properties(self.writer_properties.clone()),
             None => crate::writer::writer_factory::factory_from_writer_properties(
                 self.writer_properties.clone(),
             ),
@@ -143,6 +142,19 @@ impl WriteWindow {
     /// Set the writer properties used for sinks opened from now on.
     pub(crate) fn set_writer_properties(&mut self, writer_properties: WriterProperties) {
         self.factory.writer_properties = writer_properties;
+    }
+
+    /// Set the encryption factory used for sinks opened from now on.
+    pub(crate) fn set_writer_properties_factory(
+        &mut self,
+        factory: Option<crate::writer::writer_factory::WriterPropertiesFactoryRef>,
+    ) {
+        self.factory.writer_properties_factory = factory;
+    }
+
+    /// Whether sinks are opened with an encryption factory.
+    pub(crate) fn has_writer_properties_factory(&self) -> bool {
+        self.factory.writer_properties_factory.is_some()
     }
 
     /// Schema widening rotates the whole window's sink, which only makes sense when

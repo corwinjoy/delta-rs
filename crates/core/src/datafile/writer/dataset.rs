@@ -22,7 +22,7 @@ use crate::logstore::ObjectStoreRef;
 use crate::writer::partition_split::{PartitionResult, divide_by_partition_values};
 use crate::writer::utils::{arrow_schema_without_partitions, record_batch_without_partitions};
 use crate::writer::writer_factory::{
-    WriterPropertiesFactoryRef, default_writer_properties_factory, factory_from_writer_properties,
+    WriterPropertiesFactoryRef, default_writer_properties_factory,
 };
 
 /// Configuration to write data into Delta tables
@@ -32,9 +32,7 @@ pub struct WriterConfig {
     table_schema: ArrowSchemaRef,
     /// Column names for columns the table is partitioned by
     partition_columns: Vec<String>,
-    /// Factory for creating per-file WriterProperties.  Supports async KMS key derivation
-    /// and AAD (Additional Authenticated Data) encryption where the file path is
-    /// incorporated into the encryption key material.
+    /// Creates each file's WriterProperties, including any per-file encryption keys.
     writer_properties_factory: WriterPropertiesFactoryRef,
     /// Size above which we will write a buffered parquet file to disk.
     /// If None, the writer will not create a new file until the writer is closed.
@@ -133,15 +131,13 @@ impl DeltaWriter {
         }
     }
 
-    /// Apply custom writer_properties to the underlying parquet writer.
-    ///
-    /// This **replaces** the configured writer-properties factory with a plain
-    /// (unencrypted) one wrapping `writer_properties`. Do not call it on a
-    /// config carrying an encryption factory — the table's files would silently
-    /// be written as plaintext; set the base properties when resolving the
-    /// factory instead (`WriterEncryptionConfig::from_config`).
+    /// Apply custom writer_properties to the underlying parquet writer. Encryption
+    /// configured on the writer is kept.
     pub fn with_writer_properties(mut self, writer_properties: WriterProperties) -> Self {
-        self.config.writer_properties_factory = factory_from_writer_properties(writer_properties);
+        self.config.writer_properties_factory = self
+            .config
+            .writer_properties_factory
+            .with_base_properties(writer_properties);
         self
     }
 
@@ -399,6 +395,7 @@ mod tests {
     use crate::logstore::tests::flatten_list_stream as list;
     use crate::table::config::DEFAULT_NUM_INDEX_COLS;
     use crate::writer::test_utils::get_record_batch;
+    use crate::writer::writer_factory::factory_from_writer_properties;
     use arrow::array::{Int32Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
     use std::sync::Arc;

@@ -45,6 +45,9 @@ pub struct RecordBatchWriter {
     /// it enforces.
     window: WriteWindow,
     commit_properties: Option<CommitProperties>,
+    /// The table [`try_new`](Self::try_new) could not load. Its encryption settings are
+    /// resolved on the first write, before anything is uploaded.
+    unloaded_table: Option<DeltaTable>,
 }
 
 impl std::fmt::Debug for RecordBatchWriter {
@@ -74,14 +77,17 @@ impl RecordBatchWriter {
             |_| HashMap::new(),
             |snapshot| snapshot.metadata().configuration().clone(),
         );
+        let unloaded_table = delta_table.snapshot().is_err().then(|| delta_table.clone());
 
-        Self::new_with_table(
+        let mut writer = Self::new_with_table(
             delta_table,
             schema,
             partition_columns,
             configuration,
             writer_properties,
-        )
+        )?;
+        writer.unloaded_table = unloaded_table;
+        Ok(writer)
     }
 
     /// Create a new [`RecordBatchWriter`] for an existing table after validating table metadata.
@@ -226,7 +232,32 @@ impl RecordBatchWriter {
         Ok(Self {
             window: WriteWindow::new(factory, arrow_schema_ref),
             commit_properties: None,
+            unloaded_table: None,
         })
+    }
+
+    /// Resolve the encryption settings of a table [`try_new`](Self::try_new) could not load,
+    /// so an encrypted table never gets plaintext files. A table that does not exist yet has
+    /// none; [`flush_and_commit`](DeltaWriter::flush_and_commit) checks again.
+    async fn resolve_unloaded_table_encryption(&mut self) -> Result<(), DeltaTableError> {
+        let Some(mut table) = self.unloaded_table.take() else {
+            return Ok(());
+        };
+        match table.load().await {
+            Ok(()) => {
+                let configuration = table.snapshot()?.metadata().configuration();
+                self.window
+                    .set_writer_properties_factory(super::resolve_legacy_writer_encryption(
+                        configuration,
+                    )?);
+                Ok(())
+            }
+            Err(DeltaTableError::NotATable(_)) => Ok(()),
+            Err(err) => {
+                self.unloaded_table = Some(table);
+                Err(err)
+            }
+        }
     }
 
     /// Approximate encoded (parquet) size written since the last flush,
@@ -295,6 +326,7 @@ impl RecordBatchWriter {
         partition_values: &IndexMap<String, Scalar>,
         mode: WriteMode,
     ) -> Result<ArrowSchemaRef, DeltaTableError> {
+        self.resolve_unloaded_table_encryption().await?;
         // Phase 1 — validate against the partition-stripped file schema (what the
         // sink encodes under), so bad caller data errors before any window state
         // changes. Merging against the stripped schema also keeps a batch that
@@ -338,6 +370,7 @@ impl DeltaWriter<RecordBatch> for RecordBatchWriter {
         values: RecordBatch,
         mode: WriteMode,
     ) -> Result<(), DeltaTableError> {
+        self.resolve_unloaded_table_encryption().await?;
         if mode == WriteMode::MergeSchema && !self.window.partition_columns().is_empty() {
             return Err(DeltaTableError::Generic(
                 "Merging Schemas with partition columns present is currently unsupported"
@@ -399,6 +432,20 @@ impl DeltaWriter<RecordBatch> for RecordBatchWriter {
         table: &mut DeltaTable,
     ) -> Result<Version, DeltaTableError> {
         use crate::kernel::StructType;
+        // Backstop for a table that became encrypted after the writer resolved its settings:
+        // the staged files are unencrypted and must not be committed to it.
+        if !self.window.has_writer_properties_factory()
+            && super::resolve_legacy_writer_encryption(
+                table.snapshot()?.metadata().configuration(),
+            )?
+            .is_some()
+        {
+            return Err(DeltaTableError::Generic(
+                "The table is encrypted but this writer was not set up to encrypt; \
+                 create the writer with RecordBatchWriter::for_table or try_new_checked"
+                    .to_owned(),
+            ));
+        }
         // Schema changes only via `MergeSchema` widening, so a difference from the
         // committed baseline is the signal to evolve the metadata. The window rejects
         // widening on partitioned tables at write time; this check (kept before
