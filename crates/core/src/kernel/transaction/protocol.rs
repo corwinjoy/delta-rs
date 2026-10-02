@@ -16,13 +16,12 @@ use crate::table::config::{EncryptionConfig, TablePropertiesExt as _};
 
 use tracing::log::*;
 
-/// Name of the table feature the encryption RFC (delta-io/delta#6195) defines.
+/// The table feature the encryption RFC (delta-io/delta#6195) defines.
 const PARQUET_ENCRYPTION_FEATURE: &str = "parquetEncryption";
 
-/// Whether this build can read and write tables with `delta.encryption.*` properties.
-/// The encryption read and write paths land in follow-up PRs, which enable these behind
-/// the `encryption` cargo feature. Until then such tables are refused, rather than having
-/// ciphertext handed to readers or plaintext files written into them.
+/// Whether this build can read and write tables with `delta.encryption.*` properties. Until
+/// the encryption read and write paths exist they are refused, so readers never get
+/// ciphertext and writers never add plaintext files.
 const READS_ENCRYPTED_TABLES: bool = false;
 const WRITES_ENCRYPTED_TABLES: bool = false;
 
@@ -212,11 +211,11 @@ impl ProtocolChecker {
         self.check_encryption(snapshot.config(), READS_ENCRYPTED_TABLES)
     }
 
-    /// Check that this build can read a table with the given properties.
+    /// Check that this build can read a table with these properties.
     ///
-    /// delta-kernel cannot open tables carrying the RFC's `parquetEncryption` table feature
-    /// yet, so encrypted tables are identified by their `delta.encryption.*` properties
-    /// and refused with the same error the feature would produce.
+    /// delta-kernel cannot open tables with the RFC's `parquetEncryption` feature yet, so
+    /// encrypted tables are recognised by their `delta.encryption.*` properties and refused
+    /// with the error the feature would produce.
     pub fn can_read_encryption(&self, config: &TableProperties) -> Result<(), TransactionError> {
         self.check_encryption(config, READS_ENCRYPTED_TABLES)
     }

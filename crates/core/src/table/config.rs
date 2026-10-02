@@ -491,14 +491,11 @@ mod tests {
 // EncryptionConfig — parsed from delta.encryption.* table properties
 // ---------------------------------------------------------------------------
 //
-// Property names and semantics follow the Parquet encryption protocol RFC:
-// https://github.com/delta-io/delta/issues/6195
+// Names and semantics follow the protocol RFC: https://github.com/delta-io/delta/issues/6195
 //
-// delta-kernel does not know these properties yet, so it leaves them in
-// `TableProperties::unknown_properties` (the catch-all for unrecognised keys,
-// also used for `delta.constraints.*`). We read them from there until support
-// for them is added to delta-kernel, at which point this should switch to the
-// typed fields.
+// delta-kernel does not know these properties yet, so they are read from
+// `TableProperties::unknown_properties` (as `delta.constraints.*` is). Switch to typed
+// fields once delta-kernel supports them.
 
 /// Prefix shared by all encryption table properties.
 pub const ENCRYPTION_PROP_PREFIX: &str = "delta.encryption.";
@@ -508,7 +505,7 @@ pub const ENCRYPTION_KMS_ID_PROP: &str = "delta.encryption.kms_id";
 pub const ENCRYPTION_KMS_CONFIGURATION_PROP: &str = "delta.encryption.kms_configuration";
 /// Table property holding the master key ID used for footer encryption.
 pub const ENCRYPTION_FOOTER_KEY_PROP: &str = "delta.encryption.footer_key";
-/// Table property controlling whether parquet footers are left unencrypted.
+/// Table property controlling whether Parquet footers are left unencrypted.
 pub const ENCRYPTION_PLAINTEXT_FOOTER_PROP: &str = "delta.encryption.plaintext_footer";
 /// Table property mapping master key IDs to columns, as `keyId:col1,col2;keyId2:col3`.
 pub const ENCRYPTION_COLUMN_KEYS_PROP: &str = "delta.encryption.column_keys";
@@ -521,11 +518,20 @@ const ENCRYPTION_PROPS: [&str; 5] = [
     ENCRYPTION_COLUMN_KEYS_PROP,
 ];
 
+/// Whether two dot-separated column paths are the same or one contains the other.
+fn column_paths_overlap(a: &str, b: &str) -> bool {
+    let (shorter, longer) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    longer
+        .strip_prefix(shorter)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+}
+
 fn invalid_encryption_config(msg: String) -> DeltaTableError {
     DeltaTableError::Generic(format!("Invalid table encryption configuration: {msg}"))
 }
 
-/// Key names forwarded to [`EncryptionFactoryOptions`] (suffix after `delta.encryption.` stripped).
+/// Option keys passed to the [`EncryptionFactoryOptions`]: the property names without the
+/// `delta.encryption.` prefix.
 #[cfg(all(feature = "datafusion", feature = "encryption"))]
 pub(crate) const FACTORY_OPT_KMS_CONFIGURATION: &str = "kms_configuration";
 #[cfg(all(feature = "datafusion", feature = "encryption"))]
@@ -535,61 +541,36 @@ pub(crate) const FACTORY_OPT_PLAINTEXT_FOOTER: &str = "plaintext_footer";
 #[cfg(all(feature = "datafusion", feature = "encryption"))]
 pub(crate) const FACTORY_OPT_COLUMN_KEYS: &str = "column_keys";
 
-/// Parquet encryption configuration derived from `delta.encryption.*` table properties.
+/// Parquet Modular Encryption settings from a table's `delta.encryption.*` properties.
 ///
-/// These properties are stored in the Delta log metadata and are automatically applied to
-/// all read and write operations — no per-operation configuration is needed.
-///
-/// Parsing is always available so that every build can recognise an encrypted table;
-/// actually encrypting or decrypting data requires the `encryption` cargo feature.
-///
-/// The properties are stored in plaintext in the Delta log, so they must only hold key
-/// *identifiers* and KMS settings — never key material or credentials.
+/// The properties live in the Delta log and apply to every read and write of the table.
+/// They are stored in plaintext, so they must hold only key IDs and KMS settings, never
+/// keys or credentials. Every build can parse them; encrypting or decrypting data needs the
+/// `encryption` cargo feature.
 ///
 /// # Protocol
-/// The RFC requires Reader Version 3, Writer Version 7 and a `parquetEncryption` reader
-/// feature, so that engines without encryption support refuse the table. delta-kernel
-/// rejects that feature until it gains support, so for now delta-rs does not add it;
-/// instead delta-rs's own protocol checks refuse any table with `delta.encryption.*`
-/// properties that the build cannot handle. Engines other than delta-rs are not protected
-/// until the feature is added. Data files use Parquet Modular Encryption (parquet-format 2.7+).
-///
-/// # Registering a KMS client
-/// Before operating on an encrypted table, register an [`EncryptionFactory`] whose ID
-/// matches `delta.encryption.kms_id` with DataFusion's `RuntimeEnv`:
-///
-/// ```rust,ignore
-/// session.runtime_env().register_parquet_encryption_factory("my-kms", factory);
-/// ```
-///
-/// [`EncryptionFactory`]: datafusion::execution::parquet_encryption::EncryptionFactory
+/// The RFC protects encrypted tables with Reader Version 3, Writer Version 7 and a
+/// `parquetEncryption` reader feature. delta-kernel rejects that feature until it supports
+/// it, so delta-rs does not add it yet; delta-rs's own protocol checks refuse encrypted
+/// tables the build cannot handle instead. Other engines are not protected until then.
 #[derive(Debug, Clone)]
 pub struct EncryptionConfig {
-    /// Identifies the `EncryptionFactory` registered in DataFusion's `RuntimeEnv`.
-    /// Corresponds to `delta.encryption.kms_id`.
+    /// The KMS client to use (`delta.encryption.kms_id`).
     pub kms_id: String,
-    /// Opaque KMS-specific configuration string (e.g. JSON) forwarded to the factory.
-    /// Corresponds to `delta.encryption.kms_configuration`.
+    /// Opaque KMS-specific configuration, e.g. JSON (`delta.encryption.kms_configuration`).
     pub kms_configuration: Option<String>,
-    /// Master key identifier for footer encryption.
-    /// Corresponds to `delta.encryption.footer_key`.
+    /// Master key ID for the footer (`delta.encryption.footer_key`).
     pub footer_key: String,
-    /// If `true` the parquet footer is left unencrypted (plaintext footer mode).
-    /// Defaults to `false`. Corresponds to `delta.encryption.plaintext_footer`.
+    /// Leave the footer unencrypted; defaults to `false` (`delta.encryption.plaintext_footer`).
     pub plaintext_footer: bool,
-    /// Per-column encryption: map from master key identifier → list of column names.
-    /// Empty means uniform encryption: every column is encrypted with the footer key.
-    /// Stored in the natural wire format (`keyId → [col1, col2]`) so serialisation is
-    /// a direct forward pass with no inversion.
-    /// Corresponds to `delta.encryption.column_keys` with format `keyId:col1,col2;keyId2:col3`.
+    /// Master key ID → columns it encrypts (`delta.encryption.column_keys`). Empty means
+    /// uniform encryption: every column is encrypted with the footer key.
     pub column_keys: HashMap<String, Vec<String>>,
 }
 
 impl EncryptionConfig {
-    /// Whether the table has any `delta.encryption.*` property set, valid or not.
-    ///
-    /// Use this to decide whether a table must be treated as encrypted: a table with a
-    /// broken configuration is still not safe to read or write as plaintext.
+    /// Whether any `delta.encryption.*` property is set, valid or not. A table with an
+    /// invalid configuration must still not be read or written as plaintext.
     pub fn is_configured(props: &TableProperties) -> bool {
         props
             .unknown_properties
@@ -597,21 +578,12 @@ impl EncryptionConfig {
             .any(|key| key.starts_with(ENCRYPTION_PROP_PREFIX))
     }
 
-    /// Parse encryption configuration from a table's `unknown_properties`
-    /// (see the module note above on why these are not typed kernel properties).
+    /// Parse and validate the encryption configuration.
     ///
-    /// Returns `None` if the table is not encrypted or its configuration is invalid. Use
-    /// [`try_from_properties`](Self::try_from_properties) to get the reason instead.
-    pub fn from_properties(props: &TableProperties) -> Option<Self> {
-        Self::try_from_properties(props).ok().flatten()
-    }
-
-    /// Parse and validate encryption configuration from a table's properties.
-    ///
-    /// Returns `Ok(None)` when no `delta.encryption.*` property is set. Per the RFC, the
-    /// presence of `delta.encryption.footer_key` is what turns encryption on, so any other
-    /// encryption property set without it is an error, as is a missing `kms_id`, an unknown
-    /// `delta.encryption.*` key, or a malformed value.
+    /// Returns `Ok(None)` when no `delta.encryption.*` property is set. Per the RFC,
+    /// `footer_key` turns encryption on, so any other encryption property without it is an
+    /// error, as are a missing `kms_id`, an unknown `delta.encryption.*` key, and malformed
+    /// values.
     pub fn try_from_properties(props: &TableProperties) -> DeltaResult<Option<Self>> {
         if !Self::is_configured(props) {
             return Ok(None);
@@ -664,10 +636,11 @@ impl EncryptionConfig {
 
     /// Parse `"keyId:col1,col2;keyId2:col3"` into `{keyId: [col1, col2], keyId2: [col3]}`.
     ///
-    /// Each column may be assigned to only one key.
+    /// A column may be named only once, and not alongside one of its ancestors: naming a
+    /// struct already covers all of its fields.
     fn parse_column_keys(value: Option<&str>) -> DeltaResult<HashMap<String, Vec<String>>> {
         let mut map: HashMap<String, Vec<String>> = HashMap::new();
-        let mut seen: HashMap<String, String> = HashMap::new();
+        let mut seen: Vec<(String, String)> = Vec::new();
         let Some(value) = value else { return Ok(map) };
         for segment in value.split(';').map(str::trim).filter(|s| !s.is_empty()) {
             let malformed = || {
@@ -687,22 +660,25 @@ impl EncryptionConfig {
                 return Err(malformed());
             }
             for col in &cols {
-                if let Some(other) = seen.insert(col.clone(), key_id.to_string()) {
+                if let Some((other, other_key)) = seen
+                    .iter()
+                    .find(|(other, _)| column_paths_overlap(col, other))
+                {
                     return Err(invalid_encryption_config(format!(
-                        "column '{col}' is assigned to both key '{other}' and key '{key_id}'"
+                        "column '{col}' (key '{key_id}') overlaps column '{other}' \
+                         (key '{other_key}'); each column may be covered by only one key"
                     )));
                 }
+                seen.push((col.clone(), key_id.to_string()));
             }
             map.entry(key_id.to_string()).or_default().extend(cols);
         }
         Ok(map)
     }
 
-    /// Check [`column_keys`](Self::column_keys) against the table schema.
-    ///
-    /// Every column must exist and none may be a partition column. Nested fields are named
-    /// with dots (`address.street`); naming a struct column covers all of its fields. When
-    /// column mapping is enabled, names must be the *physical* column names.
+    /// Check [`column_keys`](Self::column_keys) against the table schema: every column must
+    /// exist and none may be a partition column. Nested fields are dot-separated
+    /// (`address.street`), and with column mapping the names are physical names.
     pub fn validate_columns(
         &self,
         schema: &StructType,
@@ -796,8 +772,8 @@ impl EncryptionConfig {
             .join(";")
     }
 
-    /// Build a [`TableParquetOptions`] that tells DataFusion's parquet scan to look up the
-    /// decryption factory by [`kms_id`](EncryptionConfig::kms_id) in the `RuntimeEnv`.
+    /// [`TableParquetOptions`] telling a DataFusion Parquet scan to decrypt with the
+    /// factory registered as [`kms_id`](EncryptionConfig::kms_id).
     #[cfg(all(feature = "datafusion", feature = "encryption"))]
     pub fn to_table_parquet_options(&self) -> TableParquetOptions {
         let mut opts = TableParquetOptions::default();
@@ -806,7 +782,7 @@ impl EncryptionConfig {
         opts
     }
 
-    /// Build [`EncryptionFactoryOptions`] forwarded to the registered factory.
+    /// The options passed to the registered encryption factory.
     #[cfg(all(feature = "datafusion", feature = "encryption"))]
     pub fn factory_options(&self) -> EncryptionFactoryOptions {
         let mut opts = EncryptionFactoryOptions::default();
@@ -821,25 +797,13 @@ impl EncryptionConfig {
             self.plaintext_footer.to_string(),
         );
         if !self.column_keys.is_empty() {
-            // Sorted so the string is deterministic (factories may use it as a cache key).
+            // Sorted, so factories can use the string as a cache key.
             opts.options.insert(
                 FACTORY_OPT_COLUMN_KEYS.to_string(),
                 self.column_keys_property(),
             );
         }
         opts
-    }
-}
-
-/// Extension method for conveniently reading encryption config from any `TableProperties`.
-pub trait EncryptionExt {
-    /// Parse the table's encryption configuration, or `None` if the table is not encrypted.
-    fn encryption_config(&self) -> Option<EncryptionConfig>;
-}
-
-impl EncryptionExt for TableProperties {
-    fn encryption_config(&self) -> Option<EncryptionConfig> {
-        EncryptionConfig::from_properties(self)
     }
 }
 
@@ -909,10 +873,6 @@ mod encryption_tests {
             let err = try_parse(&[(prop, "kms:col")]).unwrap_err();
             assert!(err.contains(ENCRYPTION_FOOTER_KEY_PROP), "{err}");
         }
-        assert!(
-            EncryptionConfig::from_properties(&props_with(&[(ENCRYPTION_KMS_ID_PROP, "kms")]))
-                .is_none()
-        );
     }
 
     #[test]
@@ -1002,11 +962,21 @@ mod encryption_tests {
     }
 
     #[test]
-    fn parse_column_keys_rejects_column_under_two_keys() {
-        let err = EncryptionConfig::parse_column_keys(Some("k1:a,b;k2:b"))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("'b'"), "{err}");
+    fn parse_column_keys_rejects_overlapping_columns() {
+        // The same column twice, or a struct together with one of its fields, under the
+        // same key or different keys.
+        for value in ["k1:a,b;k2:b", "k1:a;k2:a.b", "k1:a.b;k2:a", "k1:a,a.b"] {
+            let err = EncryptionConfig::parse_column_keys(Some(value))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("overlaps"), "{value}: {err}");
+        }
+    }
+
+    #[test]
+    fn parse_column_keys_accepts_sibling_and_prefix_named_columns() {
+        // `ab` and `a.bc` are not inside `a.b`.
+        EncryptionConfig::parse_column_keys(Some("k1:a.b;k2:a.bc,ab")).unwrap();
     }
 
     #[test]
@@ -1017,7 +987,7 @@ mod encryption_tests {
 
     #[test]
     fn validate_columns_accepts_top_level_and_nested_columns() {
-        let enc = config_with_column_keys("pii:ssn,address.street;geo:address");
+        let enc = config_with_column_keys("pii:ssn,address.street;geo:address.city");
         enc.validate_columns(&schema(), &[], ColumnMappingMode::None)
             .unwrap();
     }
@@ -1097,7 +1067,8 @@ mod encryption_tests {
         let mut table = create_encrypted_table("pii-key:ssn", &[]).await.unwrap();
         table.load().await.unwrap();
 
-        let enc = EncryptionConfig::from_properties(table.snapshot().unwrap().table_config())
+        let enc = EncryptionConfig::try_from_properties(table.snapshot().unwrap().table_config())
+            .unwrap()
             .expect("should parse");
         assert_eq!(enc.kms_id, "test-kms");
         assert_eq!(enc.footer_key, "footer-key");
@@ -1134,7 +1105,9 @@ mod encryption_tests {
         .await
         .unwrap();
         let snapshot = table.snapshot().unwrap();
-        let enc = EncryptionConfig::from_properties(snapshot.table_config()).unwrap();
+        let enc = EncryptionConfig::try_from_properties(snapshot.table_config())
+            .unwrap()
+            .unwrap();
         let columns = &enc.column_keys["pii-key"];
 
         let physical_schema = snapshot.schema();
