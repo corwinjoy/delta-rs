@@ -586,7 +586,8 @@ pub struct EncryptionConfig {
     pub kms_id: String,
     /// Opaque KMS-specific configuration, e.g. JSON (`delta.encryption.kms_configuration`).
     pub kms_configuration: Option<String>,
-    /// Master key ID for the footer (`delta.encryption.footer_key`).
+    /// Master key ID for the footer (`delta.encryption.footer_key`). Always required: see
+    /// [`try_from_properties`](Self::try_from_properties).
     pub footer_key: String,
     /// Leave the footer unencrypted; defaults to `false` (`delta.encryption.plaintext_footer`).
     pub plaintext_footer: bool,
@@ -611,6 +612,18 @@ impl EncryptionConfig {
     /// `footer_key` turns encryption on, so any other encryption property without it is an
     /// error, as are a missing `kms_id`, an unknown `delta.encryption.*` key, and malformed
     /// values.
+    ///
+    /// # Why the footer key is required
+    /// Parquet Modular Encryption always needs a footer key, so there is no mode that
+    /// encrypts some columns and leaves the footer alone. By default the footer is
+    /// encrypted with it, which hides the schema, row counts, key-value metadata, sort
+    /// order, which columns are encrypted and their key metadata; the [Parquet
+    /// specification] recommends this whenever any column is sensitive. With
+    /// `plaintext_footer` the footer stays readable but is still signed with the footer
+    /// key, so tampering is detected. Column keys are therefore an optional refinement
+    /// on top of the footer key, never a replacement for it.
+    ///
+    /// [Parquet specification]: https://parquet.apache.org/docs/file-format/data-pages/encryption/
     pub fn try_from_properties(props: &TableProperties) -> DeltaResult<Option<Self>> {
         if !Self::is_configured(props) {
             return Ok(None);
@@ -630,9 +643,12 @@ impl EncryptionConfig {
                 "unknown property '{unknown}'; expected one of {ENCRYPTION_PROPS:?}"
             )));
         }
+        // Parquet always encrypts or signs the footer with this key; see the doc comment.
         let footer_key = get(ENCRYPTION_FOOTER_KEY_PROP).ok_or_else(|| {
             invalid_encryption_config(format!(
-                "'{ENCRYPTION_FOOTER_KEY_PROP}' must be set to enable encryption"
+                "'{ENCRYPTION_FOOTER_KEY_PROP}' must be set to enable encryption; Parquet \
+                 Modular Encryption always encrypts (or, with \
+                 '{ENCRYPTION_PLAINTEXT_FOOTER_PROP}', signs) the footer with it"
             ))
         })?;
         let kms_id = get(ENCRYPTION_KMS_ID_PROP).ok_or_else(|| {
@@ -892,7 +908,8 @@ mod encryption_tests {
     #[test]
     fn footer_key_is_required() {
         // The RFC makes footer_key the switch that enables encryption, so every other
-        // encryption property is an error without it.
+        // encryption property is an error without it. Parquet has no footer-less mode:
+        // column keys only refine what the footer key already protects.
         for prop in [ENCRYPTION_KMS_ID_PROP, ENCRYPTION_COLUMN_KEYS_PROP] {
             let err = try_parse(&[(prop, "kms:col")]).unwrap_err();
             assert!(err.contains(ENCRYPTION_FOOTER_KEY_PROP), "{err}");
