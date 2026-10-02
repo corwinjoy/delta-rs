@@ -570,6 +570,7 @@ async fn get_data_scan_plan(
     file_pruner: Option<Arc<RuntimeScanFilePruner>>,
     table_parquet_options: Option<&TableParquetOptions>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
+    let table_root = scan_plan.scan.table_root().clone();
     let ReplayedScanFiles {
         files,
         transforms,
@@ -743,7 +744,7 @@ async fn get_data_scan_plan(
         &file_id_field,
         predicate,
         file_pruner.as_ref().map(|pruner| pruner.predicate()),
-        table_parquet_options,
+        table_parquet_options.map(|options| (options, &table_root)),
     )
     .await?;
     let pq_plan = if has_deletion_vectors && pq_plan.properties().partitioning.partition_count() > 1
@@ -952,7 +953,9 @@ async fn get_read_plan(
     // rows, and the deletion vector of a file must see all rows of that file. This predicate is
     // always set, because it keeps or removes a file with all its rows.
     file_predicate: Option<Arc<dyn PhysicalExpr>>,
-    table_parquet_options: Option<&TableParquetOptions>,
+    // The table's decryption options, and its root, which decryption factories get file
+    // paths relative to.
+    encryption: Option<(&TableParquetOptions, &Url)>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
     let mut plans = Vec::new();
 
@@ -967,7 +970,7 @@ async fn get_read_plan(
     // overlay the crypto settings derived from `delta.encryption.*` table properties.
     let pq_options = {
         let mut opts = crate::datafile::ReaderProperties::default().to_table_parquet_options(state);
-        if let Some(enc_opts) = table_parquet_options {
+        if let Some((enc_opts, _)) = encryption {
             opts.crypto = enc_opts.crypto.clone();
         }
         opts
@@ -980,8 +983,11 @@ async fn get_read_plan(
     let adapter_factory = Arc::new(DeltaPhysicalExprAdapterFactory);
 
     // Resolve the decryption factory once — it is the same for every object-store group.
-    let decryption = Decryption::try_new(&pq_options, state)
-        .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+    let decryption = match encryption {
+        Some((_, table_root)) => Decryption::try_new(&pq_options, state, table_root)
+            .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?,
+        None => Decryption::default(),
+    };
 
     for (store_url, files, has_deletion_vectors, scan_cache) in files_by_store.into_iter() {
         let store = state.runtime_env().object_store(&store_url)?;

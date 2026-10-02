@@ -15,7 +15,10 @@ use deltalake::arrow::{
     datatypes::{DataType as ArrowDataType, Field, Schema, TimeUnit},
     record_batch::RecordBatch,
 };
-use deltalake::datafusion::{assert_batches_sorted_eq, prelude::SessionContext};
+use deltalake::datafusion::{
+    assert_batches_sorted_eq,
+    prelude::{SessionContext, col, lit},
+};
 use deltalake::kernel::{DataType, PrimitiveType, StructField};
 use deltalake::operations::optimize::OptimizeType;
 use deltalake::{DeltaTable, DeltaTableError};
@@ -137,7 +140,23 @@ async fn main() -> Result<(), DeltaTableError> {
     println!("Compact: {metrics:?}");
 
     // -----------------------------------------------------------------------
-    // Step 5: Read back — automatically decrypted.
+    // Step 5: Delete and update — rewritten files are encrypted too.
+    // -----------------------------------------------------------------------
+    let table = table_from_uri(uri).await;
+    let (table, metrics) = table.delete().with_predicate(col("int").eq(lit(2))).await?;
+    println!(
+        "Deleted {} rows",
+        metrics.num_deleted_rows.unwrap_or_default()
+    );
+    let (_table, metrics) = table
+        .update()
+        .with_predicate(col("int").eq(lit(10)))
+        .with_update("string", lit("C"))
+        .await?;
+    println!("Updated {} rows", metrics.num_updated_rows);
+
+    // -----------------------------------------------------------------------
+    // Step 6: Read back — automatically decrypted.
     // -----------------------------------------------------------------------
     let batches = read(uri).await;
     println!("Final table:");
@@ -148,12 +167,10 @@ async fn main() -> Result<(), DeltaTableError> {
             "+-----+--------+----------------------------+",
             "| 1   | A      | 1970-01-01T00:08:20.012305 |",
             "| 1   | A      | 1970-01-01T00:08:20.012305 |",
-            "| 2   | B      | 1970-01-01T00:08:20.012305 |",
-            "| 2   | B      | 1970-01-01T00:08:20.012305 |",
-            "| 10  | A      | 1970-01-01T00:08:20.012305 |",
-            "| 10  | A      | 1970-01-01T00:08:20.012305 |",
-            "| 10  | A      | 1970-01-01T00:08:20.012305 |",
-            "| 10  | A      | 1970-01-01T00:08:20.012305 |",
+            "| 10  | C      | 1970-01-01T00:08:20.012305 |",
+            "| 10  | C      | 1970-01-01T00:08:20.012305 |",
+            "| 10  | C      | 1970-01-01T00:08:20.012305 |",
+            "| 10  | C      | 1970-01-01T00:08:20.012305 |",
             "+-----+--------+----------------------------+",
         ],
         &batches
