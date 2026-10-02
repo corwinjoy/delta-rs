@@ -11,6 +11,7 @@
 //! let df = ctx.read_table(provider).await?;
 
 use crate::DeltaTableError;
+use crate::delta_datafusion::decryption::{Decryption, parquet_options_from_table_config};
 use crate::delta_datafusion::{
     DataFusionMixins, DeltaSessionExt, extract_partition_only_predicate,
 };
@@ -623,20 +624,10 @@ impl CdfLoadBuilder {
             global: session.config().options().execution.parquet.clone(),
             ..Default::default()
         };
-        if let Some(enc_opts) =
-            crate::delta_datafusion::table_provider::parquet_options_from_table_config(
-                snapshot.table_configuration(),
-            )?
-        {
+        if let Some(enc_opts) = parquet_options_from_table_config(snapshot.table_configuration())? {
             parquet_options.crypto = enc_opts.crypto;
         }
-        #[cfg(feature = "encryption")]
-        let encryption_factory = if let Some(factory_id) = &parquet_options.crypto.factory_id {
-            use crate::operations::write::encryption::resolve_encryption_factory_or_err;
-            Some(resolve_encryption_factory_or_err(factory_id, session)?)
-        } else {
-            None
-        };
+        let decryption = Decryption::try_new(&parquet_options, session)?;
 
         let mut cdc_source = ParquetSource::new(cdc_table_schema)
             .with_table_parquet_options(parquet_options.clone())
@@ -689,12 +680,9 @@ impl CdfLoadBuilder {
         )
         .await?;
 
-        #[cfg(feature = "encryption")]
-        if let Some(factory) = &encryption_factory {
-            cdc_source = cdc_source.with_encryption_factory(factory.clone());
-            add_source = add_source.with_encryption_factory(factory.clone());
-            remove_source = remove_source.with_encryption_factory(factory.clone());
-        }
+        cdc_source = decryption.apply(cdc_source);
+        add_source = decryption.apply(add_source);
+        remove_source = decryption.apply(remove_source);
 
         if let Some(filters) = filters {
             cdc_source = cdc_source.with_predicate(Arc::clone(filters));

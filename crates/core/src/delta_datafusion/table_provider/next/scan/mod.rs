@@ -82,6 +82,7 @@ use self::replay::{ScanFileContext, ScanFileStream};
 pub(crate) use self::runtime_filter::RuntimeFileFilter;
 use self::runtime_filter::RuntimeScanFilePruner;
 use super::{FileSelection, ResolvedFileSelection};
+use crate::delta_datafusion::decryption::Decryption;
 use crate::{
     DeltaTableError,
     delta_datafusion::{
@@ -978,17 +979,9 @@ async fn get_read_plan(
     let parquet_predicate_df_schema = parquet_predicate_schema.clone().to_dfschema()?;
     let adapter_factory = Arc::new(DeltaPhysicalExprAdapterFactory);
 
-    // Resolve the encryption factory once — it is the same for every object-store group.
-    #[cfg(feature = "encryption")]
-    let maybe_encryption_factory = if let Some(factory_id) = &pq_options.crypto.factory_id {
-        use crate::operations::write::encryption::resolve_encryption_factory_or_err;
-        Some(
-            resolve_encryption_factory_or_err(factory_id, state)
-                .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?,
-        )
-    } else {
-        None
-    };
+    // Resolve the decryption factory once — it is the same for every object-store group.
+    let decryption = Decryption::try_new(&pq_options, state)
+        .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 
     for (store_url, files, has_deletion_vectors, scan_cache) in files_by_store.into_iter() {
         let store = state.runtime_env().object_store(&store_url)?;
@@ -1012,14 +1005,11 @@ async fn get_read_plan(
             builder.build()
         };
         let full_table_schema = table_schema.table_schema().clone();
-        let mut file_source = ParquetSource::new(table_schema)
-            .with_table_parquet_options(pq_options.clone())
-            .with_parquet_file_reader_factory(reader_factory);
-
-        #[cfg(feature = "encryption")]
-        if let Some(factory) = &maybe_encryption_factory {
-            file_source = file_source.with_encryption_factory(factory.clone());
-        }
+        let mut file_source = decryption.apply(
+            ParquetSource::new(table_schema)
+                .with_table_parquet_options(pq_options.clone())
+                .with_parquet_file_reader_factory(reader_factory),
+        );
 
         // TODO(roeap); we might be able to also push selection vectors into the read plan
         // by creating parquet access plans. However we need to make sure this does not

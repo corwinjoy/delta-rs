@@ -88,6 +88,7 @@ pub mod bench_support;
 pub mod cdf;
 mod column_mapping;
 mod data_validation;
+pub(crate) mod decryption;
 /// DataFusion-backed kernel engine and its storage/format handlers.
 pub mod engine;
 pub mod expr;
