@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use delta_kernel::table_features::{ColumnMappingMode, TableFeature};
@@ -12,7 +12,10 @@ use crate::kernel::{
     contains_variant,
 };
 use crate::protocol::DeltaOperation;
-use crate::table::config::{EncryptionConfig, TablePropertiesExt as _};
+use crate::table::config::{
+    ENCRYPTION_COLUMN_KEYS_PROP, ENCRYPTION_FOOTER_KEY_PROP, ENCRYPTION_KMS_ID_PROP,
+    ENCRYPTION_PLAINTEXT_FOOTER_PROP, EncryptionConfig, TablePropertiesExt as _,
+};
 
 use tracing::log::*;
 
@@ -386,8 +389,11 @@ pub static INSTANCE: LazyLock<ProtocolChecker> = LazyLock::new(|| {
 ///
 /// Encryption can only be configured when the table is created (including create-or-replace,
 /// which replaces every data file): turning it on later would leave the existing files
-/// unencrypted, and removing it would leave a table mixing encrypted and plaintext files.
-/// A new configuration must also be valid.
+/// unencrypted, removing it would leave a table mixing encrypted and plaintext files, and
+/// changing the keys would leave files encrypted under different keys. Restore re-installs
+/// an earlier version's metadata together with its data files, so it may change any of them.
+/// `kms_configuration` only tells the KMS client how to reach the keys, so it may change at
+/// any time. A new configuration must also be valid.
 fn check_encryption_change(
     snapshot: &dyn TableReference,
     metadata: &Metadata,
@@ -396,9 +402,12 @@ fn check_encryption_change(
     let invalid =
         |err: crate::DeltaTableError| TransactionError::InvalidEncryptionConfig(err.to_string());
     let properties = TableProperties::from(metadata.configuration().iter());
-    let creates_table = matches!(operation, DeltaOperation::Create { .. });
+    let replaces_files = matches!(
+        operation,
+        DeltaOperation::Create { .. } | DeltaOperation::Restore { .. }
+    );
     let was_encrypted = EncryptionConfig::is_configured(snapshot.config());
-    if was_encrypted && !creates_table && !EncryptionConfig::is_configured(&properties) {
+    if was_encrypted && !replaces_files && !EncryptionConfig::is_configured(&properties) {
         return Err(TransactionError::InvalidEncryptionConfig(
             "Encryption properties cannot be removed from a table; to stop encrypting, copy \
              the data into a new table without them"
@@ -409,12 +418,33 @@ fn check_encryption_change(
     else {
         return Ok(());
     };
-    if !was_encrypted && !creates_table {
+    if !was_encrypted && !replaces_files {
         return Err(TransactionError::InvalidEncryptionConfig(
             "Encryption can only be configured when a table is created; the data files \
              already in this table would stay unencrypted"
                 .to_string(),
         ));
+    }
+    if !replaces_files {
+        let old = &snapshot.config().unknown_properties;
+        let new = &properties.unknown_properties;
+        let value = |props: &HashMap<String, String>, key: &str| {
+            props.get(key).map(|v| v.trim().to_string())
+        };
+        if let Some(changed) = [
+            ENCRYPTION_KMS_ID_PROP,
+            ENCRYPTION_FOOTER_KEY_PROP,
+            ENCRYPTION_PLAINTEXT_FOOTER_PROP,
+            ENCRYPTION_COLUMN_KEYS_PROP,
+        ]
+        .into_iter()
+        .find(|key| value(old, key) != value(new, key))
+        {
+            return Err(TransactionError::InvalidEncryptionConfig(format!(
+                "'{changed}' cannot be changed on an encrypted table; the data files already \
+                 in this table would stay encrypted under the old configuration"
+            )));
+        }
     }
     let schema = metadata.parse_schema().map_err(|err| invalid(err.into()))?;
     encryption
@@ -975,5 +1005,107 @@ mod tests {
                 .check_can_write_variant(preview_feature.snapshot(), &schema)
                 .is_ok()
         );
+    }
+
+    /// An encrypted table whose snapshot `check_encryption_change` can be run against.
+    async fn encrypted_table() -> crate::DeltaTable {
+        use crate::operations::create::CreateBuilder;
+
+        CreateBuilder::new()
+            .with_location("memory:///")
+            .with_columns(TestSchemas::simple().fields().cloned())
+            .with_configuration_property(TableProperty::EncryptionKmsId, Some("test-kms"))
+            .with_configuration_property(TableProperty::EncryptionFooterKey, Some("fk"))
+            .with_configuration_property(TableProperty::EncryptionColumnKeys, Some("pii:value"))
+            .with_configuration_property(
+                TableProperty::EncryptionKmsConfiguration,
+                Some(r#"{"endpoint":"a"}"#),
+            )
+            .await
+            .unwrap()
+    }
+
+    fn set_properties() -> DeltaOperation {
+        DeltaOperation::SetTableProperties {
+            properties: HashMap::new(),
+        }
+    }
+
+    /// Changing the keys of an encrypted table would leave its existing files encrypted
+    /// under the old ones, so only the KMS client configuration may change.
+    #[tokio::test]
+    async fn encryption_keys_cannot_change_on_an_encrypted_table() {
+        use crate::kernel::MetadataExt as _;
+
+        let table = encrypted_table().await;
+        let snapshot = table.snapshot().unwrap().snapshot();
+        let metadata = snapshot.metadata().clone();
+
+        for (key, value) in [
+            (TableProperty::EncryptionKmsId, "other-kms"),
+            (TableProperty::EncryptionFooterKey, "fk2"),
+            (TableProperty::EncryptionPlaintextFooter, "true"),
+            (TableProperty::EncryptionColumnKeys, "pii:id"),
+        ] {
+            let changed = metadata
+                .clone()
+                .add_config_key(key.as_ref().to_string(), value.to_string())
+                .unwrap();
+            let err = check_encryption_change(snapshot, &changed, &set_properties())
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("cannot be changed"), "{}: {err}", key.as_ref());
+            assert!(err.contains(key.as_ref()), "{err}");
+        }
+
+        // The same configuration, and a different KMS endpoint, are fine.
+        check_encryption_change(snapshot, &metadata, &set_properties()).unwrap();
+        let reconfigured = metadata
+            .add_config_key(
+                TableProperty::EncryptionKmsConfiguration
+                    .as_ref()
+                    .to_string(),
+                r#"{"endpoint":"b"}"#.to_string(),
+            )
+            .unwrap();
+        check_encryption_change(snapshot, &reconfigured, &set_properties()).unwrap();
+    }
+
+    /// Restore re-installs an earlier version's metadata along with its data files, so
+    /// it may remove or change encryption even though other operations may not.
+    #[tokio::test]
+    async fn restore_may_change_encryption() {
+        use crate::kernel::MetadataExt as _;
+
+        let table = encrypted_table().await;
+        let snapshot = table.snapshot().unwrap().snapshot();
+        let mut plaintext = snapshot.metadata().clone();
+        for key in [
+            TableProperty::EncryptionKmsId,
+            TableProperty::EncryptionFooterKey,
+            TableProperty::EncryptionColumnKeys,
+            TableProperty::EncryptionKmsConfiguration,
+        ] {
+            plaintext = plaintext.remove_config_key(key.as_ref()).unwrap();
+        }
+        let rekeyed = snapshot
+            .metadata()
+            .clone()
+            .add_config_key(
+                TableProperty::EncryptionFooterKey.as_ref().to_string(),
+                "fk-old".to_string(),
+            )
+            .unwrap();
+        let restore = DeltaOperation::Restore {
+            version: Some(0),
+            datetime: None,
+        };
+
+        let err = check_encryption_change(snapshot, &plaintext, &set_properties())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cannot be removed"), "{err}");
+        check_encryption_change(snapshot, &plaintext, &restore).unwrap();
+        check_encryption_change(snapshot, &rekeyed, &restore).unwrap();
     }
 }
