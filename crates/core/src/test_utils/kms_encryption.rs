@@ -1,8 +1,8 @@
 //! Mock KMS implementation for testing encryption via delta table properties.
 //!
-//! This module is **not part of the stable public API**. It lives in `test_utils` and is
-//! compiled in non-test builds only to allow downstream integration-test crates to depend on it
-//! without pulling in a separate crate. Do not rely on it for production use.
+//! This module is **not part of the stable public API**. It lives in `test_utils`, which is
+//! compiled for this crate's tests and, with the `integration_test` feature, for downstream
+//! crates' integration tests. Do not rely on it for production use.
 //!
 //! # Usage
 //!
@@ -190,10 +190,13 @@ impl EncryptionFactory for MockKmsFactory {
             .with_aad_prefix(file_name.as_ref().as_bytes().to_vec());
 
         for (key_id, cols) in Self::parse_column_keys(&column_keys_str) {
-            if let Some(col_key) = self.lookup_key(&file_name, &key_id) {
-                for col in &cols {
-                    builder = builder.with_column_key(col, col_key.clone());
-                }
+            let col_key = self.lookup_key(&file_name, &key_id).ok_or_else(|| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "No encryption key '{key_id}' found for file {file_path:?}"
+                ))
+            })?;
+            for col in &cols {
+                builder = builder.with_column_key(col, col_key.clone());
             }
         }
 

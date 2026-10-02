@@ -10,7 +10,9 @@ use delta_kernel::expressions::Scalar;
 use delta_kernel::table_properties::DataSkippingNumIndexedCols;
 use indexmap::IndexMap;
 use object_store::path::Path;
+use parquet::basic::Compression;
 use parquet::file::metadata::ParquetMetaData;
+#[cfg(test)]
 use parquet::file::properties::WriterProperties;
 use tokio::task::JoinSet;
 use tracing::*;
@@ -120,15 +122,11 @@ impl PartitionWriterConfig {
         })
     }
 
-    /// Properties carrying only the factory's default compression, which is all
-    /// [`next_data_path`] needs to choose the file extension.
-    fn path_properties(&self) -> WriterProperties {
-        let compression = self
-            .writer_properties_factory
-            .compression(&parquet::schema::types::ColumnPath::new(Vec::new()));
-        WriterProperties::builder()
-            .set_compression(compression)
-            .build()
+    /// The factory's default compression, which [`next_data_path`] needs to choose the file
+    /// extension.
+    fn compression(&self) -> Compression {
+        self.writer_properties_factory
+            .compression(&parquet::schema::types::ColumnPath::new(Vec::new()))
     }
 
     /// Draw on `budget` instead of the fresh one [`Self::try_new`] makes, so
@@ -187,7 +185,7 @@ impl PartitionWriter {
         stats_columns: Option<Vec<String>>,
     ) -> DeltaResult<Self> {
         let writer_id = uuid::Uuid::new_v4();
-        let first_path = next_data_path(&config.prefix, 0, &writer_id, &config.path_properties());
+        let first_path = next_data_path(&config.prefix, 0, &writer_id, config.compression());
         let writer = Self::create_writer(object_store.clone(), first_path.clone(), &config);
 
         Ok(Self {
@@ -225,7 +223,7 @@ impl PartitionWriter {
             &self.config.prefix,
             self.part_counter,
             &self.writer_id,
-            &self.config.path_properties(),
+            self.config.compression(),
         )
     }
 

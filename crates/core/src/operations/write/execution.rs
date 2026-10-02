@@ -536,14 +536,10 @@ pub(crate) async fn write_exec_plan(
     };
     // Table encryption always takes precedence to prevent accidental plaintext
     // writes; the base properties still supply compression/row-group settings.
-    let writer_factory = match WriterEncryptionConfig::from_config(
-        table_config,
-        session,
-        Some(base_properties.clone()),
-    )? {
-        enc if enc.factory.is_some() => enc.factory.unwrap(),
-        _ => factory_from_writer_properties(base_properties),
-    };
+    let writer_factory =
+        WriterEncryptionConfig::from_config(table_config, session, Some(base_properties.clone()))?
+            .factory
+            .unwrap_or_else(|| factory_from_writer_properties(base_properties));
     let object_store = log_store.object_store();
     let sink_config = WriteSinkConfig {
         partition_columns: table_config.metadata().partition_columns().to_vec(),

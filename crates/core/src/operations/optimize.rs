@@ -431,14 +431,13 @@ impl<'a> std::future::IntoFuture for OptimizeBuilder<'a> {
             // encrypted table's files as plaintext; the base properties still
             // supply compression/row-group settings.
             use crate::operations::write::encryption::WriterEncryptionConfig;
-            let writer_properties_factory = match WriterEncryptionConfig::from_config(
+            let writer_properties_factory = WriterEncryptionConfig::from_config(
                 snapshot.table_configuration(),
                 &session,
                 Some(base_properties.clone()),
-            )? {
-                enc if enc.factory.is_some() => enc.factory.unwrap(),
-                _ => factory_from_writer_properties(base_properties),
-            };
+            )?
+            .factory
+            .unwrap_or_else(|| factory_from_writer_properties(base_properties));
             let plan = create_merge_plan(
                 &this.log_store,
                 this.optimize_type,

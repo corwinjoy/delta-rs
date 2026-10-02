@@ -39,7 +39,6 @@ mod backend;
 #[cfg(feature = "encryption")]
 pub use backend::{
     get_encryption_factory, register_encryption_factory, resolve_encryption_factory,
-    resolve_encryption_factory_or_err,
 };
 // Re-export the factory types that are defined in the non-datafusion `writer_factory` module
 // so callers can keep importing them from this module.

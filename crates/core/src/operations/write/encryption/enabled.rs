@@ -18,19 +18,14 @@ use super::{WriterPropertiesFactory, WriterPropertiesFactoryRef, snappy_writer_p
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::table::config::EncryptionConfig;
 
-/// Build the writer factory for an encrypted table.
-///
-/// The [`EncryptionFactory`] named by `kms_id` is looked up in the `RuntimeEnv` first, then
-/// in the global registry, which operations that create their own internal sessions rely on.
+/// Build the writer factory for an encrypted table, with the [`EncryptionFactory`] named by
+/// its `kms_id` (see [`resolve_encryption_factory`]).
 pub(super) fn resolve(
     enc: EncryptionConfig,
     runtime_env: Option<&RuntimeEnv>,
     base_properties: Option<WriterProperties>,
 ) -> DeltaResult<WriterPropertiesFactoryRef> {
-    let encryption_factory = runtime_env
-        .and_then(|env| env.parquet_encryption_factory(&enc.kms_id).ok())
-        .or_else(|| get_encryption_factory(&enc.kms_id))
-        .ok_or_else(|| unregistered_factory_error(&enc.kms_id))?;
+    let encryption_factory = resolve_encryption_factory(&enc.kms_id, runtime_env)?;
     Ok(Arc::new(KmsWriterPropertiesFactory {
         base_properties: base_properties.unwrap_or_else(snappy_writer_properties),
         encryption_factory,
@@ -69,12 +64,15 @@ impl WriterPropertiesFactory for KmsWriterPropertiesFactory {
         self.base_properties.max_row_group_bytes()
     }
 
-    fn with_base_properties(&self, properties: WriterProperties) -> WriterPropertiesFactoryRef {
-        Arc::new(Self {
+    fn with_base_properties(
+        &self,
+        properties: WriterProperties,
+    ) -> Option<WriterPropertiesFactoryRef> {
+        Some(Arc::new(Self {
             base_properties: properties,
             encryption_factory: Arc::clone(&self.encryption_factory),
             factory_options: self.factory_options.clone(),
-        })
+        }))
     }
 
     async fn create_writer_properties(
@@ -158,31 +156,20 @@ pub fn get_encryption_factory(id: &str) -> Option<Arc<dyn EncryptionFactory>> {
         .map(|e| Arc::clone(e.value()))
 }
 
-/// Resolve an [`EncryptionFactory`] by looking in the session's `RuntimeEnv` first,
-/// then falling back to the global registry.
+/// The [`EncryptionFactory`] registered as `kms_id`: the one in `runtime_env`, if any, else
+/// the one in the global registry, which operations that create their own internal sessions
+/// rely on. Errors when neither has it.
 pub fn resolve_encryption_factory(
-    id: &str,
-    session: &dyn datafusion::catalog::Session,
-) -> Option<Arc<dyn EncryptionFactory>> {
-    session
-        .runtime_env()
-        .parquet_encryption_factory(id)
-        .ok()
-        .or_else(|| get_encryption_factory(id))
-}
-
-/// Build the standard "factory not registered" error for a given `kms_id`.
-pub(crate) fn unregistered_factory_error(id: &str) -> DeltaTableError {
-    DeltaTableError::Generic(format!(
-        "No EncryptionFactory registered for kms_id '{id}'. \
-         Register one via `deltalake_core::operations::write::encryption::register_encryption_factory`."
-    ))
-}
-
-/// Resolve an [`EncryptionFactory`] or return a descriptive error.
-pub fn resolve_encryption_factory_or_err(
-    id: &str,
-    session: &dyn datafusion::catalog::Session,
+    kms_id: &str,
+    runtime_env: Option<&RuntimeEnv>,
 ) -> DeltaResult<Arc<dyn EncryptionFactory>> {
-    resolve_encryption_factory(id, session).ok_or_else(|| unregistered_factory_error(id))
+    runtime_env
+        .and_then(|env| env.parquet_encryption_factory(kms_id).ok())
+        .or_else(|| get_encryption_factory(kms_id))
+        .ok_or_else(|| {
+            DeltaTableError::Generic(format!(
+                "No EncryptionFactory registered for kms_id '{kms_id}'. Register one via \
+                 `deltalake_core::operations::write::encryption::register_encryption_factory`."
+            ))
+        })
 }

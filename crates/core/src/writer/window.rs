@@ -51,7 +51,10 @@ impl SinkFactory {
     /// Open a fresh streaming sink encoding under `schema`.
     fn build(&self, schema: ArrowSchemaRef) -> DatasetSink {
         let factory = match &self.writer_properties_factory {
-            Some(factory) => factory.with_base_properties(self.writer_properties.clone()),
+            Some(factory) => crate::writer::writer_factory::with_base_properties(
+                factory,
+                self.writer_properties.clone(),
+            ),
             None => crate::writer::writer_factory::factory_from_writer_properties(
                 self.writer_properties.clone(),
             ),
@@ -155,6 +158,16 @@ impl WriteWindow {
     /// Whether sinks are opened with an encryption factory.
     pub(crate) fn has_writer_properties_factory(&self) -> bool {
         self.factory.writer_properties_factory.is_some()
+    }
+
+    /// Set the statistics settings used for sinks opened from now on.
+    pub(crate) fn set_stats_config(
+        &mut self,
+        num_indexed_cols: DataSkippingNumIndexedCols,
+        stats_columns: Option<Vec<String>>,
+    ) {
+        self.factory.num_indexed_cols = num_indexed_cols;
+        self.factory.stats_columns = stats_columns;
     }
 
     /// Schema widening rotates the whole window's sink, which only makes sense when

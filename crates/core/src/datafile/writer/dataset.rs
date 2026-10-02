@@ -22,7 +22,7 @@ use crate::logstore::ObjectStoreRef;
 use crate::writer::partition_split::{PartitionResult, divide_by_partition_values};
 use crate::writer::utils::{arrow_schema_without_partitions, record_batch_without_partitions};
 use crate::writer::writer_factory::{
-    WriterPropertiesFactoryRef, default_writer_properties_factory,
+    WriterPropertiesFactoryRef, default_writer_properties_factory, with_base_properties,
 };
 
 /// Configuration to write data into Delta tables
@@ -134,10 +134,8 @@ impl DeltaWriter {
     /// Apply custom writer_properties to the underlying parquet writer. Encryption
     /// configured on the writer is kept.
     pub fn with_writer_properties(mut self, writer_properties: WriterProperties) -> Self {
-        self.config.writer_properties_factory = self
-            .config
-            .writer_properties_factory
-            .with_base_properties(writer_properties);
+        self.config.writer_properties_factory =
+            with_base_properties(&self.config.writer_properties_factory, writer_properties);
         self
     }
 

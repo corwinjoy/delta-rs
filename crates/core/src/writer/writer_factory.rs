@@ -55,11 +55,33 @@ pub trait WriterPropertiesFactory: Send + Sync + Debug + 'static {
     /// A factory like this one, but with `properties` as the base settings (compression,
     /// row groups, statistics). Anything the factory adds on top, such as encryption, is
     /// kept, so callers' settings cannot turn it off.
-    fn with_base_properties(&self, properties: WriterProperties) -> WriterPropertiesFactoryRef;
+    ///
+    /// The default returns `None`: the factory cannot take new base settings, and writers
+    /// keep using it unchanged (see [`with_base_properties`]). That ignores the caller's
+    /// settings but never loses what the factory adds, so implementations that do not
+    /// override this stay safe.
+    fn with_base_properties(
+        &self,
+        properties: WriterProperties,
+    ) -> Option<WriterPropertiesFactoryRef> {
+        let _ = properties;
+        None
+    }
 }
 
 /// Shared handle to a [`WriterPropertiesFactory`].
 pub type WriterPropertiesFactoryRef = Arc<dyn WriterPropertiesFactory>;
+
+/// `factory` with `properties` as its base settings, or `factory` itself when it cannot take
+/// new base settings (see [`WriterPropertiesFactory::with_base_properties`]).
+pub fn with_base_properties(
+    factory: &WriterPropertiesFactoryRef,
+    properties: WriterProperties,
+) -> WriterPropertiesFactoryRef {
+    factory
+        .with_base_properties(properties)
+        .unwrap_or_else(|| Arc::clone(factory))
+}
 
 /// A [`WriterPropertiesFactory`] that returns the same [`WriterProperties`] for every file.
 #[derive(Clone, Debug)]
@@ -107,8 +129,11 @@ impl WriterPropertiesFactory for DefaultWriterPropertiesFactory {
         Ok(self.writer_properties.clone())
     }
 
-    fn with_base_properties(&self, properties: WriterProperties) -> WriterPropertiesFactoryRef {
-        factory_from_writer_properties(properties)
+    fn with_base_properties(
+        &self,
+        properties: WriterProperties,
+    ) -> Option<WriterPropertiesFactoryRef> {
+        Some(factory_from_writer_properties(properties))
     }
 }
 
@@ -166,11 +191,14 @@ impl WriterPropertiesFactory for PrefixedWriterPropertiesFactory {
             .await
     }
 
-    fn with_base_properties(&self, properties: WriterProperties) -> WriterPropertiesFactoryRef {
-        Arc::new(Self {
+    fn with_base_properties(
+        &self,
+        properties: WriterProperties,
+    ) -> Option<WriterPropertiesFactoryRef> {
+        Some(Arc::new(Self {
             prefix: self.prefix.clone(),
-            inner: self.inner.with_base_properties(properties),
-        })
+            inner: with_base_properties(&self.inner, properties),
+        }))
     }
 }
 
@@ -202,12 +230,19 @@ mod tests {
             self.paths.lock().unwrap().push(file_path.clone());
             Ok(snappy_writer_properties())
         }
+    }
 
-        fn with_base_properties(&self, _: WriterProperties) -> WriterPropertiesFactoryRef {
-            Arc::new(Self {
-                paths: Arc::clone(&self.paths),
-            })
-        }
+    /// A factory that does not override `with_base_properties` is used unchanged.
+    #[tokio::test]
+    async fn default_with_base_properties_keeps_the_factory() {
+        let factory: WriterPropertiesFactoryRef = Arc::new(RecordingFactory::default());
+        let rebased = with_base_properties(&factory, snappy_writer_properties());
+        assert!(Arc::ptr_eq(&factory, &rebased));
+        assert!(
+            factory
+                .with_base_properties(snappy_writer_properties())
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -215,7 +250,8 @@ mod tests {
         let recording = RecordingFactory::default();
         let paths = Arc::clone(&recording.paths);
         let factory = with_path_prefix(Arc::new(recording), "_change_data")
-            .with_base_properties(snappy_writer_properties());
+            .with_base_properties(snappy_writer_properties())
+            .expect("the prefixed factory takes base properties");
         let schema = Arc::new(ArrowSchema::empty());
         factory
             .create_writer_properties(&Path::from("year=2024/part-0.parquet"), &schema)

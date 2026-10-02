@@ -28,7 +28,7 @@ use crate::kernel::{Action, Add};
 use crate::kernel::{MetadataExt as _, Version};
 use crate::parquet_utils::default_writer_properties;
 use crate::table::builder::DeltaTableBuilder;
-use crate::table::config::DEFAULT_NUM_INDEX_COLS;
+use crate::table::config::{DEFAULT_NUM_INDEX_COLS, EncryptionConfig};
 use crate::writer::utils::{arrow_schema_without_partitions, record_batch_without_partitions};
 
 /// Writes messages to a delta lake table.
@@ -45,9 +45,52 @@ pub struct RecordBatchWriter {
     /// it enforces.
     window: WriteWindow,
     commit_properties: Option<CommitProperties>,
-    /// The table [`try_new`](Self::try_new) could not load. Its encryption settings are
-    /// resolved on the first write, before anything is uploaded.
-    unloaded_table: Option<DeltaTable>,
+    table_config: TableConfigState,
+}
+
+/// What the writer knows about its table's configuration.
+///
+/// [`try_new`](RecordBatchWriter::try_new) builds a writer without loading the table, so
+/// the configuration that decides whether files must be encrypted is not known until the
+/// first write. Files for an encrypted table must never be written in plaintext, so the
+/// table is loaded before the first upload, and a table that does not exist yet is checked
+/// again before any file is handed out, since the caller may create it in the meantime.
+enum TableConfigState {
+    /// The configuration has been applied to the writer.
+    Applied,
+    /// The table has not been loaded yet; load it before the first upload.
+    Unloaded(DeltaTable),
+    /// The table did not exist at the first write; check it again before handing out files.
+    Missing(DeltaTable),
+}
+
+impl TableConfigState {
+    fn set_missing(&mut self) {
+        if let Self::Unloaded(table) = std::mem::replace(self, Self::Applied) {
+            *self = Self::Missing(table);
+        }
+    }
+}
+
+/// The statistics settings from a table's configuration, with defaults for a table that has
+/// none.
+fn stats_config(
+    configuration: &HashMap<String, String>,
+) -> (DataSkippingNumIndexedCols, Option<Vec<String>>) {
+    let num_indexed_cols = configuration
+        .get("delta.dataSkippingNumIndexedCols")
+        .and_then(|v| {
+            v.parse::<u64>()
+                .ok()
+                .map(DataSkippingNumIndexedCols::NumColumns)
+        })
+        .unwrap_or(DataSkippingNumIndexedCols::NumColumns(
+            DEFAULT_NUM_INDEX_COLS,
+        ));
+    let stats_columns = configuration
+        .get("delta.dataSkippingStatsColumns")
+        .map(|v| v.split(',').map(|s| s.to_string()).collect());
+    (num_indexed_cols, stats_columns)
 }
 
 impl std::fmt::Debug for RecordBatchWriter {
@@ -57,7 +100,14 @@ impl std::fmt::Debug for RecordBatchWriter {
 }
 
 impl RecordBatchWriter {
-    /// Create a new [`RecordBatchWriter`] instance
+    /// Create a new [`RecordBatchWriter`] instance.
+    ///
+    /// The table is not loaded here. It is loaded on the first write, so that the writer
+    /// picks up its configuration, in particular whether its files must be encrypted,
+    /// before anything is uploaded. Callers that already hold a loaded table should use
+    /// [`for_table`](Self::for_table), which needs no extra load. A table that does not
+    /// exist yet is checked again when files are handed out; if it was created encrypted
+    /// in the meantime, the writer's plaintext files are refused.
     pub fn try_new(
         table_uri: impl AsRef<str>,
         schema: ArrowSchemaRef,
@@ -72,21 +122,15 @@ impl RecordBatchWriter {
         // Initialize writer properties for the underlying arrow writer
         let writer_properties = default_writer_properties(parquet::basic::Compression::SNAPPY);
 
-        // if metadata fails to load, use an empty hashmap and default values for num_indexed_cols and stats_columns
-        let configuration = delta_table.snapshot().map_or_else(
-            |_| HashMap::new(),
-            |snapshot| snapshot.metadata().configuration().clone(),
-        );
-        let unloaded_table = delta_table.snapshot().is_err().then(|| delta_table.clone());
-
+        // The configuration is applied on the first write, once the table is loaded.
         let mut writer = Self::new_with_table(
-            delta_table,
+            delta_table.clone(),
             schema,
             partition_columns,
-            configuration,
+            HashMap::new(),
             writer_properties,
         )?;
-        writer.unloaded_table = unloaded_table;
+        writer.table_config = TableConfigState::Unloaded(delta_table);
         Ok(writer)
     }
 
@@ -205,19 +249,7 @@ impl RecordBatchWriter {
         configuration: &HashMap<String, String>,
         writer_properties: WriterProperties,
     ) -> Result<Self, DeltaTableError> {
-        let num_indexed_cols = configuration
-            .get("delta.dataSkippingNumIndexedCols")
-            .and_then(|v| {
-                v.parse::<u64>()
-                    .ok()
-                    .map(DataSkippingNumIndexedCols::NumColumns)
-            })
-            .unwrap_or(DataSkippingNumIndexedCols::NumColumns(
-                DEFAULT_NUM_INDEX_COLS,
-            ));
-        let stats_columns = configuration
-            .get("delta.dataSkippingStatsColumns")
-            .map(|v| v.split(',').map(|s| s.to_string()).collect());
+        let (num_indexed_cols, stats_columns) = stats_config(configuration);
         let writer_properties_factory = super::resolve_legacy_writer_encryption(configuration)?;
 
         let factory = SinkFactory {
@@ -232,32 +264,69 @@ impl RecordBatchWriter {
         Ok(Self {
             window: WriteWindow::new(factory, arrow_schema_ref),
             commit_properties: None,
-            unloaded_table: None,
+            table_config: TableConfigState::Applied,
         })
     }
 
-    /// Resolve the encryption settings of a table [`try_new`](Self::try_new) could not load,
-    /// so an encrypted table never gets plaintext files. A table that does not exist yet has
-    /// none; [`flush_and_commit`](DeltaWriter::flush_and_commit) checks again.
-    async fn resolve_unloaded_table_encryption(&mut self) -> Result<(), DeltaTableError> {
-        let Some(mut table) = self.unloaded_table.take() else {
+    /// Load the table [`try_new`](Self::try_new) was given and apply its configuration.
+    /// Called before the first upload, so an encrypted table never gets plaintext files.
+    async fn load_table_config(&mut self) -> Result<(), DeltaTableError> {
+        let TableConfigState::Unloaded(table) = &mut self.table_config else {
             return Ok(());
         };
         match table.load().await {
             Ok(()) => {
-                let configuration = table.snapshot()?.metadata().configuration();
+                let configuration = table.snapshot()?.metadata().configuration().clone();
+                let (num_indexed_cols, stats_columns) = stats_config(&configuration);
+                self.window
+                    .set_stats_config(num_indexed_cols, stats_columns);
                 self.window
                     .set_writer_properties_factory(super::resolve_legacy_writer_encryption(
-                        configuration,
+                        &configuration,
                     )?);
-                Ok(())
+                self.table_config = TableConfigState::Applied;
             }
-            Err(DeltaTableError::NotATable(_)) => Ok(()),
-            Err(err) => {
-                self.unloaded_table = Some(table);
-                Err(err)
-            }
+            Err(DeltaTableError::NotATable(_)) => self.table_config.set_missing(),
+            Err(err) => return Err(err),
         }
+        Ok(())
+    }
+
+    /// Check a table that did not exist at the first write before handing out files: the
+    /// caller may have created it since, and if it is encrypted the files are plaintext.
+    async fn check_missing_table(&mut self) -> Result<(), DeltaTableError> {
+        let TableConfigState::Missing(table) = &mut self.table_config else {
+            return Ok(());
+        };
+        match table.load().await {
+            Ok(()) => {
+                let encrypted = EncryptionConfig::is_configured(table.snapshot()?.table_config());
+                self.refuse_plaintext_for_encrypted_table(encrypted)?;
+                self.table_config = TableConfigState::Applied;
+            }
+            Err(DeltaTableError::NotATable(_)) => {}
+            Err(err) => return Err(err),
+        }
+        Ok(())
+    }
+
+    /// Refuse to hand out this writer's files when `table_encrypted` but the writer does
+    /// not encrypt, which happens when the table was created, or replaced, with encryption
+    /// after the writer read its configuration.
+    fn refuse_plaintext_for_encrypted_table(
+        &self,
+        table_encrypted: bool,
+    ) -> Result<(), DeltaTableError> {
+        if table_encrypted && !self.window.has_writer_properties_factory() {
+            return Err(DeltaTableError::Generic(
+                "The table is encrypted but this writer wrote plaintext files, because the \
+                 table was created or replaced with encryption after the writer read its \
+                 configuration; create the table first, then the writer with \
+                 RecordBatchWriter::for_table or try_new_checked"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     /// Approximate encoded (parquet) size written since the last flush,
@@ -326,7 +395,7 @@ impl RecordBatchWriter {
         partition_values: &IndexMap<String, Scalar>,
         mode: WriteMode,
     ) -> Result<ArrowSchemaRef, DeltaTableError> {
-        self.resolve_unloaded_table_encryption().await?;
+        self.load_table_config().await?;
         // Phase 1 — validate against the partition-stripped file schema (what the
         // sink encodes under), so bad caller data errors before any window state
         // changes. Merging against the stripped schema also keeps a batch that
@@ -370,7 +439,7 @@ impl DeltaWriter<RecordBatch> for RecordBatchWriter {
         values: RecordBatch,
         mode: WriteMode,
     ) -> Result<(), DeltaTableError> {
-        self.resolve_unloaded_table_encryption().await?;
+        self.load_table_config().await?;
         if mode == WriteMode::MergeSchema && !self.window.partition_columns().is_empty() {
             return Err(DeltaTableError::Generic(
                 "Merging Schemas with partition columns present is currently unsupported"
@@ -423,6 +492,7 @@ impl DeltaWriter<RecordBatch> for RecordBatchWriter {
     /// Finalize all files written since the last flush and return their [`Add`]
     /// actions, resetting internal state to handle another flush window.
     async fn flush(&mut self) -> Result<Vec<Add>, DeltaTableError> {
+        self.check_missing_table().await?;
         self.window.drain().await
     }
 
@@ -432,20 +502,12 @@ impl DeltaWriter<RecordBatch> for RecordBatchWriter {
         table: &mut DeltaTable,
     ) -> Result<Version, DeltaTableError> {
         use crate::kernel::StructType;
-        // Backstop for a table that became encrypted after the writer resolved its settings:
-        // the staged files are unencrypted and must not be committed to it.
-        if !self.window.has_writer_properties_factory()
-            && super::resolve_legacy_writer_encryption(
-                table.snapshot()?.metadata().configuration(),
-            )?
-            .is_some()
-        {
-            return Err(DeltaTableError::Generic(
-                "The table is encrypted but this writer was not set up to encrypt; \
-                 create the writer with RecordBatchWriter::for_table or try_new_checked"
-                    .to_owned(),
-            ));
-        }
+        self.check_missing_table().await?;
+        // The caller's table may have been replaced with an encrypted one since the writer
+        // read its configuration.
+        self.refuse_plaintext_for_encrypted_table(EncryptionConfig::is_configured(
+            table.snapshot()?.table_config(),
+        ))?;
         // Schema changes only via `MergeSchema` widening, so a difference from the
         // committed baseline is the signal to evolve the metadata. The window rejects
         // widening on partitioned tables at write time; this check (kept before

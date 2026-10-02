@@ -332,6 +332,42 @@ async fn test_record_batch_writer_try_new_is_encrypted() -> DeltaResult<()> {
     Ok(())
 }
 
+/// A `try_new` writer whose table did not exist at the first write holds plaintext files.
+/// If the table is then created encrypted, neither `flush` nor `flush_and_commit` may hand
+/// them out.
+#[tokio::test]
+async fn test_record_batch_writer_refuses_plaintext_for_table_created_encrypted() -> DeltaResult<()>
+{
+    use deltalake_core::writer::{DeltaWriter as _, RecordBatchWriter};
+
+    let kms_id = register_fresh_factory();
+    let dir = TempDir::new()?;
+    let uri = dir.path().to_str().unwrap();
+
+    let batch = get_table_batches();
+    let mut writer =
+        RecordBatchWriter::try_new(table_url(uri).as_str(), batch.schema(), None, None)?;
+    writer.write(batch).await?;
+    create_encrypted_table(uri, &kms_id).await?;
+    let mut table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
+        .load()
+        .await?;
+    let version = table.version();
+
+    let err = writer
+        .flush()
+        .await
+        .expect_err("flush must refuse plaintext files for an encrypted table");
+    assert!(err.to_string().contains("encrypted"), "{err}");
+    let err = writer
+        .flush_and_commit(&mut table)
+        .await
+        .expect_err("flush_and_commit must refuse plaintext files for an encrypted table");
+    assert!(err.to_string().contains("encrypted"), "{err}");
+    assert_eq!(table.version(), version);
+    Ok(())
+}
+
 /// Replacing the base writer properties of an encrypting factory keeps the encryption and
 /// applies the new settings.
 #[tokio::test]
@@ -351,8 +387,9 @@ async fn test_base_properties_keep_encryption() -> DeltaResult<()> {
         .expect("table is encrypted");
 
     let zstd = Compression::ZSTD(ZstdLevel::try_new(3).unwrap());
-    let factory =
-        factory.with_base_properties(WriterProperties::builder().set_compression(zstd).build());
+    let factory = factory
+        .with_base_properties(WriterProperties::builder().set_compression(zstd).build())
+        .expect("the KMS factory takes base properties");
     assert_eq!(factory.compression(&ColumnPath::from("int")), zstd);
     let file_properties = factory
         .create_writer_properties(
