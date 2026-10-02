@@ -7,7 +7,7 @@
 //! Run with:
 //! ```shell
 //! cargo run --example basic_operations_encryption \
-//!     --features "datafusion integration-test" -p deltalake
+//!     --features "datafusion encryption integration-test" -p deltalake
 //! ```
 
 use deltalake::arrow::{
@@ -108,8 +108,8 @@ async fn main() -> Result<(), DeltaTableError> {
         .with_table_name("encrypted_table")
         // These properties are stored in the delta log and automatically applied to all
         // subsequent operations — no per-operation encryption config needed.
-        .with_property("delta.encryption.kms.id", KMS_ID)
-        .with_property("delta.encryption.footer.key", "my-footer-master-key")
+        .with_property("delta.encryption.kms_id", KMS_ID)
+        .with_property("delta.encryption.footer_key", "my-footer-master-key")
         .await?;
 
     println!("Created encrypted table at {uri}");
