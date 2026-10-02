@@ -1,9 +1,7 @@
-//! Async factory for creating per-file [`WriterProperties`].
+//! Per-file [`WriterProperties`] for Parquet writers.
 //!
-//! This module is intentionally free of `datafusion` dependencies so that the
-//! legacy writers (`JsonWriter`, `RecordBatchWriter`) can use the factory API
-//! without requiring the `datafusion` feature. KMS/encrypted factories live in
-//! `crate::operations::write::encryption` (datafusion-gated).
+//! Free of `datafusion` dependencies, so the legacy writers (`JsonWriter`,
+//! `RecordBatchWriter`) can use it without the `datafusion` feature.
 
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -18,22 +16,18 @@ use parquet::schema::types::ColumnPath;
 use crate::errors::DeltaResult;
 use crate::parquet_utils::default_writer_properties;
 
-/// Async factory for creating per-file [`WriterProperties`].
+/// Creates the [`WriterProperties`] for each Parquet file.
 ///
-/// The async signature allows implementations to fetch per-file encryption keys from a
-/// remote KMS based on the file path (required for AAD encryption where the file path
-/// is incorporated into the key material).
+/// It is async so implementations can fetch per-file keys from a KMS, using the file path
+/// as additional authenticated data (AAD).
 #[async_trait]
 pub trait WriterPropertiesFactory: Send + Sync + Debug + 'static {
-    /// Returns the compression for a given column path. Called synchronously before
-    /// the async key fetch so callers can compute the file-name extension.
+    /// The compression for `column_path`; the writer uses it to pick the file extension
+    /// before any properties are created.
     fn compression(&self, column_path: &ColumnPath) -> Compression;
 
-    /// Create [`WriterProperties`] for the given `file_path` and `file_schema`.
-    ///
-    /// Called once per new parquet file, immediately before the `AsyncArrowWriter` is
-    /// constructed. KMS implementations that use AAD must incorporate `file_path` into
-    /// key derivation to bind ciphertext to the correct file location.
+    /// The [`WriterProperties`] for a new file, called once just before it is opened.
+    /// Implementations using AAD must derive keys from `file_path`.
     async fn create_writer_properties(
         &self,
         file_path: &Path,
@@ -41,11 +35,10 @@ pub trait WriterPropertiesFactory: Send + Sync + Debug + 'static {
     ) -> DeltaResult<WriterProperties>;
 }
 
-/// Convenience type alias.
+/// Shared handle to a [`WriterPropertiesFactory`].
 pub type WriterPropertiesFactoryRef = Arc<dyn WriterPropertiesFactory>;
 
-/// A [`WriterPropertiesFactory`] that returns the same static [`WriterProperties`] for
-/// every file (no encryption, no per-file key derivation).
+/// A [`WriterPropertiesFactory`] that returns the same [`WriterProperties`] for every file.
 #[derive(Clone, Debug)]
 pub struct DefaultWriterPropertiesFactory {
     writer_properties: WriterProperties,
@@ -63,8 +56,8 @@ impl DefaultWriterPropertiesFactory {
     }
 }
 
-/// Build the standard delta-rs base [`WriterProperties`]: SNAPPY compression with
-/// the delta-rs `created_by` tag. Used as the base for both plain and encrypted writers.
+/// The default delta-rs [`WriterProperties`]: SNAPPY compression and the delta-rs
+/// `created_by` tag.
 pub fn snappy_writer_properties() -> WriterProperties {
     default_writer_properties(Compression::SNAPPY)
 }
@@ -84,12 +77,12 @@ impl WriterPropertiesFactory for DefaultWriterPropertiesFactory {
     }
 }
 
-/// Build a default [`WriterPropertiesFactoryRef`] (SNAPPY compression, no encryption).
+/// A factory for the default delta-rs properties (SNAPPY, no encryption).
 pub fn default_writer_properties_factory() -> WriterPropertiesFactoryRef {
     Arc::new(DefaultWriterPropertiesFactory::snappy())
 }
 
-/// Wrap a static [`WriterProperties`] in a factory.
+/// A factory that returns `wp` for every file.
 pub fn factory_from_writer_properties(wp: WriterProperties) -> WriterPropertiesFactoryRef {
     Arc::new(DefaultWriterPropertiesFactory::new(wp))
 }
