@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use delta_kernel::schema::{ColumnMetadataKey, MetadataValue};
 use delta_kernel::table_features::{ColumnMappingMode, assign_column_mapping_metadata};
+use delta_kernel::table_properties::TableProperties;
 use futures::TryStreamExt as _;
 use futures::future::BoxFuture;
 use serde_json::Value;
@@ -18,7 +19,7 @@ use crate::logstore::LogStoreRef;
 use crate::logstore::with_operation;
 use crate::protocol::{DeltaOperation, SaveMode};
 use crate::table::builder::ensure_table_uri;
-use crate::table::config::TableProperty;
+use crate::table::config::{ENCRYPTION_COLUMN_KEYS_PROP, EncryptionConfig, TableProperty};
 use crate::table::normalize_table_url;
 use crate::{DeltaTable, DeltaTableBuilder};
 
@@ -346,11 +347,32 @@ impl CreateBuilder {
             schema
         };
 
-        let mut metadata = new_metadata(
-            &schema,
-            self.partition_columns.unwrap_or_default(),
-            configuration,
-        )?;
+        let partition_columns = self.partition_columns.unwrap_or_default();
+        // Validate the encryption settings, storing column names as physical names (RFC).
+        if let Some(encryption) =
+            EncryptionConfig::try_from_properties(&TableProperties::from(configuration.iter()))?
+        {
+            // Files registered at creation (e.g. by CONVERT TO DELTA) were written before
+            // the table existed, so nothing encrypted them; committing them under an
+            // encrypted configuration would mix plaintext files into an encrypted table.
+            if self.actions.iter().any(|a| matches!(a, Action::Add(_))) {
+                return Err(DeltaTableError::Generic(
+                    "Invalid table encryption configuration: encryption cannot be configured \
+                     on a table created from existing data files, which are not encrypted"
+                        .to_string(),
+                ));
+            }
+            let encryption = encryption.with_physical_column_names(&schema, column_mapping_mode)?;
+            encryption.validate_columns(&schema, &partition_columns, column_mapping_mode)?;
+            if !encryption.column_keys.is_empty() {
+                configuration.insert(
+                    ENCRYPTION_COLUMN_KEYS_PROP.to_string(),
+                    encryption.column_keys_property(),
+                );
+            }
+        }
+
+        let mut metadata = new_metadata(&schema, partition_columns, configuration)?;
         if let Some(name) = self.name {
             metadata = metadata.with_name(name)?;
         }
