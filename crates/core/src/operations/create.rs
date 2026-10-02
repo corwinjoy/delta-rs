@@ -348,7 +348,7 @@ impl CreateBuilder {
         };
 
         let partition_columns = self.partition_columns.unwrap_or_default();
-        // Users name encrypted columns by display name; the RFC stores physical names.
+        // Validate the encryption settings, storing column names as physical names (RFC).
         if let Some(encryption) =
             EncryptionConfig::try_from_properties(&TableProperties::from(configuration.iter()))?
         {
