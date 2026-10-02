@@ -1,7 +1,7 @@
 mod factories;
 /// In-memory log store that isolates every operation, for scope tests.
 pub mod isolating_store;
-#[cfg(feature = "datafusion")]
+#[cfg(all(feature = "datafusion", feature = "encryption"))]
 pub mod kms_encryption;
 
 #[cfg(all(test, feature = "datafusion"))]

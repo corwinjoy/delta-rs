@@ -137,7 +137,8 @@ impl AsyncFileWriter for ParquetObjectWriter {
 
 pub(super) enum LazyArrowWriter {
     Initialized(Path, ObjectStoreRef, PartitionWriterConfig),
-    Writing(Path, AsyncArrowWriter<ParquetObjectWriter>),
+    // Boxed: the parquet writer dwarfs the `Initialized` state.
+    Writing(Path, Box<AsyncArrowWriter<ParquetObjectWriter>>),
 }
 
 impl LazyArrowWriter {
@@ -185,7 +186,7 @@ impl LazyArrowWriter {
                     }
                     return Err(e.into());
                 }
-                *self = LazyArrowWriter::Writing(path.clone(), arrow_writer);
+                *self = LazyArrowWriter::Writing(path.clone(), Box::new(arrow_writer));
             }
             LazyArrowWriter::Writing(_, arrow_writer) => {
                 arrow_writer.write(batch).await?;
@@ -246,7 +247,7 @@ impl LazyArrowWriter {
         match self {
             LazyArrowWriter::Initialized(_, _, _) => None,
             LazyArrowWriter::Writing(path, arrow_writer) => {
-                Some(finish_parquet_file(arrow_writer, path, permit))
+                Some(finish_parquet_file(*arrow_writer, path, permit))
             }
         }
     }

@@ -11,30 +11,45 @@
 //! 1. [`WriterEncryptionConfig::from_config`] reads `delta.encryption.*` from the
 //!    table's [`TableConfiguration`].
 //! 2. It looks up the user-registered [`EncryptionFactory`] from DataFusion's
-//!    `RuntimeEnv` using the `delta.encryption.kms.id` property value.
+//!    `RuntimeEnv` using the `delta.encryption.kms_id` property value.
 //! 3. It wraps the factory in a [`KmsWriterPropertiesFactory`], which implements
 //!    [`WriterPropertiesFactory`].
 //! 4. Each new parquet file calls [`WriterPropertiesFactory::create_writer_properties`]
 //!    **with the actual file path** so that the factory can derive the encryption key
 //!    from the path (AAD — Additional Authenticated Data).
+//!
+//! Encrypting requires the `encryption` cargo feature. Without it, resolving the
+//! configuration of an encrypted table fails instead of writing plaintext.
 
+#[cfg(feature = "encryption")]
 use std::sync::{Arc, LazyLock};
 
-use dashmap::DashMap;
-
+#[cfg(feature = "encryption")]
 use arrow_schema::Schema as ArrowSchema;
+#[cfg(feature = "encryption")]
 use async_trait::async_trait;
+#[cfg(feature = "encryption")]
+use dashmap::DashMap;
 use datafusion::catalog::Session;
+#[cfg(feature = "encryption")]
 use datafusion::config::EncryptionFactoryOptions;
+#[cfg(feature = "encryption")]
 use datafusion::execution::parquet_encryption::EncryptionFactory;
+use datafusion::execution::runtime_env::RuntimeEnv;
+use delta_kernel::table_configuration::TableConfiguration;
+use delta_kernel::table_properties::TableProperties;
+#[cfg(feature = "encryption")]
 use object_store::path::Path;
+#[cfg(feature = "encryption")]
 use parquet::basic::Compression;
-use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
+use parquet::file::properties::WriterProperties;
+#[cfg(feature = "encryption")]
+use parquet::file::properties::WriterPropertiesBuilder;
+#[cfg(feature = "encryption")]
 use parquet::schema::types::ColumnPath;
 
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::table::config::EncryptionConfig;
-use delta_kernel::table_configuration::TableConfiguration;
 
 // Re-export the factory types that are defined in the non-datafusion `writer_factory` module
 // so callers can keep importing them from this module.
@@ -53,6 +68,7 @@ pub use crate::writer::writer_factory::{
 /// Key material (footer key, column keys, plaintext-footer flag) is encoded in
 /// `factory_options` and forwarded to the factory — see [`EncryptionConfig::factory_options`].
 /// The factory itself is responsible for deriving the actual per-file key material.
+#[cfg(feature = "encryption")]
 #[derive(Debug)]
 struct KmsWriterPropertiesFactory {
     base_properties: WriterProperties,
@@ -60,6 +76,7 @@ struct KmsWriterPropertiesFactory {
     factory_options: EncryptionFactoryOptions,
 }
 
+#[cfg(feature = "encryption")]
 #[async_trait]
 impl WriterPropertiesFactory for KmsWriterPropertiesFactory {
     fn compression(&self, column_path: &ColumnPath) -> Compression {
@@ -68,6 +85,10 @@ impl WriterPropertiesFactory for KmsWriterPropertiesFactory {
 
     fn max_row_group_row_count(&self) -> Option<usize> {
         self.base_properties.max_row_group_row_count()
+    }
+
+    fn max_row_group_bytes(&self) -> Option<usize> {
+        self.base_properties.max_row_group_bytes()
     }
 
     async fn create_writer_properties(
@@ -139,15 +160,24 @@ impl WriterEncryptionConfig {
     /// (e.g. the legacy writers, which have no DataFusion context), the factory
     /// is looked up in the global registry only.
     pub fn from_table_properties(
-        properties: &delta_kernel::table_properties::TableProperties,
-        runtime_env: Option<&datafusion::execution::runtime_env::RuntimeEnv>,
+        properties: &TableProperties,
+        runtime_env: Option<&RuntimeEnv>,
         base_properties: Option<WriterProperties>,
     ) -> DeltaResult<Self> {
         // try_from_properties errors when the encryption configuration is
-        // partial, preventing silent plaintext writes on misconfigured tables.
+        // invalid, preventing silent plaintext writes on misconfigured tables.
         let Some(enc) = EncryptionConfig::try_from_properties(properties)? else {
             return Ok(Self { factory: None });
         };
+        Self::resolve(enc, runtime_env, base_properties)
+    }
+
+    #[cfg(feature = "encryption")]
+    fn resolve(
+        enc: EncryptionConfig,
+        runtime_env: Option<&RuntimeEnv>,
+        base_properties: Option<WriterProperties>,
+    ) -> DeltaResult<Self> {
         // Check the RuntimeEnv first, then the global process-wide registry.
         // The global registry is needed because operations create their own internal sessions
         // that don't inherit the user's session factory registrations.
@@ -164,6 +194,16 @@ impl WriterEncryptionConfig {
         })
     }
 
+    #[cfg(not(feature = "encryption"))]
+    fn resolve(
+        _enc: EncryptionConfig,
+        _runtime_env: Option<&RuntimeEnv>,
+        _base_properties: Option<WriterProperties>,
+    ) -> DeltaResult<Self> {
+        Err(encryption_feature_required())
+    }
+
+    #[cfg(feature = "encryption")]
     fn build_factory(
         encryption_factory: Arc<dyn EncryptionFactory>,
         factory_options: EncryptionFactoryOptions,
@@ -181,6 +221,7 @@ impl WriterEncryptionConfig {
 // Global EncryptionFactory registry
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "encryption")]
 /// Process-wide registry for [`EncryptionFactory`] implementations.
 ///
 /// Delta-rs operations create their own internal DataFusion sessions, which do not
@@ -196,9 +237,10 @@ impl WriterEncryptionConfig {
 static GLOBAL_FACTORY_REGISTRY: LazyLock<DashMap<String, Arc<dyn EncryptionFactory>>> =
     LazyLock::new(DashMap::new);
 
+#[cfg(feature = "encryption")]
 /// Register an [`EncryptionFactory`] in the process-wide registry.
 ///
-/// The `id` must match the value of `delta.encryption.kms.id` on any table that should
+/// The `id` must match the value of `delta.encryption.kms_id` on any table that should
 /// use this factory.  Registration persists for the lifetime of the process; there is
 /// no unregistration, so a factory (and any credentials it holds) lives until exit.
 ///
@@ -216,12 +258,13 @@ pub fn register_encryption_factory(id: impl Into<String>, factory: Arc<dyn Encry
         .is_some()
     {
         tracing::warn!(
-            "replaced the previously registered EncryptionFactory for kms.id '{id}'; \
+            "replaced the previously registered EncryptionFactory for kms_id '{id}'; \
              all future key-derivation requests for that id go to the new factory"
         );
     }
 }
 
+#[cfg(feature = "encryption")]
 /// Look up a previously registered [`EncryptionFactory`] by id.
 ///
 /// Returns `None` if no factory with that id has been registered.
@@ -231,6 +274,7 @@ pub fn get_encryption_factory(id: &str) -> Option<Arc<dyn EncryptionFactory>> {
         .map(|e| Arc::clone(e.value()))
 }
 
+#[cfg(feature = "encryption")]
 /// Resolve an [`EncryptionFactory`] by looking in the session's `RuntimeEnv` first,
 /// then falling back to the global registry.
 pub fn resolve_encryption_factory(
@@ -244,18 +288,30 @@ pub fn resolve_encryption_factory(
         .or_else(|| get_encryption_factory(id))
 }
 
-/// Build the standard "factory not registered" error for a given `kms.id`.
+#[cfg(feature = "encryption")]
+/// Build the standard "factory not registered" error for a given `kms_id`.
 pub(crate) fn unregistered_factory_error(id: &str) -> DeltaTableError {
     DeltaTableError::Generic(format!(
-        "No EncryptionFactory registered for kms.id '{id}'. \
+        "No EncryptionFactory registered for kms_id '{id}'. \
          Register one via `deltalake_core::operations::write::encryption::register_encryption_factory`."
     ))
 }
 
+#[cfg(feature = "encryption")]
 /// Resolve an [`EncryptionFactory`] or return a descriptive error.
 pub fn resolve_encryption_factory_or_err(
     id: &str,
     session: &dyn datafusion::catalog::Session,
 ) -> DeltaResult<Arc<dyn EncryptionFactory>> {
     resolve_encryption_factory(id, session).ok_or_else(|| unregistered_factory_error(id))
+}
+
+/// Error for an encrypted table in a build without the `encryption` feature.
+#[cfg(not(feature = "encryption"))]
+fn encryption_feature_required() -> DeltaTableError {
+    DeltaTableError::Generic(
+        "This table is encrypted (delta.encryption.* properties are set), but delta-rs was \
+         built without the `encryption` feature"
+            .to_string(),
+    )
 }

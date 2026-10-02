@@ -1,4 +1,3 @@
-#![cfg(feature = "datafusion")]
 //! Integration tests for Parquet encryption via `delta.encryption.*` table properties.
 //!
 //! Tests are split across branches:
@@ -71,8 +70,8 @@ async fn create_encrypted_table(uri: &str, kms_id: &str) -> DeltaResult<()> {
         .create()
         .with_columns(get_table_columns())
         .with_table_name("test")
-        .with_property("delta.encryption.kms.id", kms_id)
-        .with_property("delta.encryption.footer.key", "test-footer-key")
+        .with_property("delta.encryption.kms_id", kms_id)
+        .with_property("delta.encryption.footer_key", "test-footer-key")
         .await?;
 
     let table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
@@ -236,9 +235,9 @@ async fn test_create_with_data_in_one_call_is_encrypted() -> DeltaResult<()> {
     table
         .write(vec![get_table_batches()])
         .with_configuration(vec![
-            ("delta.encryption.kms.id".to_string(), Some(kms_id.clone())),
+            ("delta.encryption.kms_id".to_string(), Some(kms_id.clone())),
             (
-                "delta.encryption.footer.key".to_string(),
+                "delta.encryption.footer_key".to_string(),
                 Some("test-footer-key".to_string()),
             ),
         ])
@@ -248,31 +247,33 @@ async fn test_create_with_data_in_one_call_is_encrypted() -> DeltaResult<()> {
     Ok(())
 }
 
-/// A partially-configured table (either encryption property alone) must fail
-/// writes instead of silently writing plaintext.
+/// A partially-configured table (either encryption property alone) is rejected when
+/// it is created, so no write can treat it as unencrypted.
 #[tokio::test]
-async fn test_partially_configured_encryption_errors_on_write() -> DeltaResult<()> {
-    for props in [
-        vec![("delta.encryption.kms.id", "some-kms")],
-        vec![("delta.encryption.footer.key", "some-key")],
+async fn test_partially_configured_encryption_is_rejected() -> DeltaResult<()> {
+    for (prop, value, missing) in [
+        (
+            "delta.encryption.kms_id",
+            "some-kms",
+            "delta.encryption.footer_key",
+        ),
+        (
+            "delta.encryption.footer_key",
+            "some-key",
+            "delta.encryption.kms_id",
+        ),
     ] {
         let dir = TempDir::new()?;
         let uri = dir.path().to_str().unwrap();
         let table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?.build()?;
-        let mut create = table.create().with_columns(get_table_columns());
-        for (k, v) in &props {
-            create = create.with_property(*k, *v);
-        }
-        create.await?;
-
-        let table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
-            .load()
-            .await?;
-        let result = table.write(vec![get_table_batches()]).await;
-        assert!(
-            result.is_err(),
-            "write on a partially-configured table ({props:?}) must error, not write plaintext"
-        );
+        let err = table
+            .create()
+            .with_columns(get_table_columns())
+            .with_property(prop, value)
+            .await
+            .expect_err("a partial encryption configuration must be rejected")
+            .to_string();
+        assert!(err.contains(missing), "{err}");
     }
     Ok(())
 }
@@ -288,8 +289,8 @@ async fn test_unregistered_factory_errors_on_write() -> DeltaResult<()> {
     table
         .create()
         .with_columns(get_table_columns())
-        .with_property("delta.encryption.kms.id", unregistered.as_str())
-        .with_property("delta.encryption.footer.key", "test-footer-key")
+        .with_property("delta.encryption.kms_id", unregistered.as_str())
+        .with_property("delta.encryption.footer_key", "test-footer-key")
         .await?;
 
     let table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?

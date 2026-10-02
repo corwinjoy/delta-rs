@@ -8,7 +8,7 @@
 //!
 //! 1. Create a [`MockKmsFactory`] and register it with a DataFusion session using
 //!    [`datafusion::execution::RuntimeEnv::register_parquet_encryption_factory`].
-//! 2. Create a Delta table with `delta.encryption.kms.id` set to the same ID.
+//! 2. Create a Delta table with `delta.encryption.kms_id` set to the same ID.
 //! 3. All subsequent read/write operations on the table will use the registered factory.
 //!
 //! ```rust,ignore
@@ -18,8 +18,8 @@
 //!
 //! // Create encrypted table
 //! table.create()
-//!     .with_property("delta.encryption.kms.id", "test-kms")
-//!     .with_property("delta.encryption.footer.key", "my-key")
+//!     .with_property("delta.encryption.kms_id", "test-kms")
+//!     .with_property("delta.encryption.footer_key", "my-key")
 //!     .await?;
 //! ```
 

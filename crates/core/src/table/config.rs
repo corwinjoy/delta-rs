@@ -1355,23 +1355,34 @@ mod encryption_tests {
         assert!(err.contains("cannot be removed"), "{err}");
     }
 
-    /// Until the encryption read and write paths land, delta-rs refuses encrypted tables
-    /// instead of reading ciphertext or writing plaintext into them.
-    #[tokio::test]
-    async fn protocol_checker_refuses_encrypted_tables() {
-        let table = create_encrypted_table("pii-key:ssn", &[]).await.unwrap();
-        let snapshot = table.snapshot().unwrap().snapshot();
-        for result in [
-            PROTOCOL.can_read_from(snapshot),
-            PROTOCOL.can_write_to(snapshot),
-        ] {
-            match result {
-                Err(TransactionError::UnsupportedTableFeatures(features)) => {
-                    assert_eq!(features.len(), 1);
-                    assert!(format!("{features:?}").contains("parquetEncryption"));
-                }
-                other => panic!("expected UnsupportedTableFeatures, got {other:?}"),
+    fn assert_refused(result: Result<(), TransactionError>) {
+        match result {
+            Err(TransactionError::UnsupportedTableFeatures(features)) => {
+                assert_eq!(features.len(), 1);
+                assert!(format!("{features:?}").contains("parquetEncryption"));
             }
+            other => panic!("expected UnsupportedTableFeatures, got {other:?}"),
+        }
+    }
+
+    /// Until the encryption read path lands, delta-rs refuses to read encrypted tables
+    /// rather than hand out ciphertext.
+    #[tokio::test]
+    async fn protocol_checker_refuses_reading_encrypted_tables() {
+        let table = create_encrypted_table("pii-key:ssn", &[]).await.unwrap();
+        assert_refused(PROTOCOL.can_read_from(table.snapshot().unwrap().snapshot()));
+    }
+
+    /// Writing an encrypted table needs the KMS-backed writer, so builds without it
+    /// refuse rather than write plaintext files.
+    #[tokio::test]
+    async fn protocol_checker_writes_encrypted_tables_only_with_encryption_support() {
+        let table = create_encrypted_table("pii-key:ssn", &[]).await.unwrap();
+        let result = PROTOCOL.can_write_to(table.snapshot().unwrap().snapshot());
+        if cfg!(all(feature = "datafusion", feature = "encryption")) {
+            result.unwrap();
+        } else {
+            assert_refused(result);
         }
     }
 }
