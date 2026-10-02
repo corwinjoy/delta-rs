@@ -19,9 +19,7 @@ use crate::logstore::LogStoreRef;
 use crate::logstore::with_operation;
 use crate::protocol::{DeltaOperation, SaveMode};
 use crate::table::builder::ensure_table_uri;
-use crate::table::config::{
-    ENCRYPTION_COLUMN_KEYS_PROP, ENCRYPTION_PROP_PREFIX, EncryptionConfig, TableProperty,
-};
+use crate::table::config::{ENCRYPTION_COLUMN_KEYS_PROP, EncryptionConfig, TableProperty};
 use crate::table::normalize_table_url;
 use crate::{DeltaTable, DeltaTableBuilder};
 
@@ -237,8 +235,7 @@ impl CreateBuilder {
         self
     }
 
-    /// Specify a table property by string key, for properties the [`TableProperty`] enum
-    /// does not cover, such as `delta.encryption.*`.
+    /// Specify a table property by its string key, e.g. `delta.encryption.footer_key`.
     pub fn with_property(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.configuration.insert(key.into(), Some(value.into()));
         self
@@ -326,15 +323,8 @@ impl CreateBuilder {
 
         let schema = StructType::try_new(self.columns)?;
 
-        // `delta.encryption.*` keys are validated by `EncryptionConfig` below, so the
-        // check for unknown keys only sees the others.
-        let checked_properties: HashMap<String, String> = configuration
-            .iter()
-            .filter(|(key, _)| !key.starts_with(ENCRYPTION_PROP_PREFIX))
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect();
         let protocol = protocol
-            .apply_properties_to_protocol(&checked_properties, self.raise_if_key_not_exists)?
+            .apply_properties_to_protocol(&configuration, self.raise_if_key_not_exists)?
             .apply_column_metadata_to_protocol(&schema)?
             .move_table_properties_into_features(&configuration);
 
