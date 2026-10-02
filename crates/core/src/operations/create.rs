@@ -345,6 +345,16 @@ impl CreateBuilder {
         if let Some(encryption) =
             EncryptionConfig::try_from_properties(&TableProperties::from(configuration.iter()))?
         {
+            // Files registered at creation (e.g. by CONVERT TO DELTA) were written before
+            // the table existed, so nothing encrypted them; committing them under an
+            // encrypted configuration would mix plaintext files into an encrypted table.
+            if self.actions.iter().any(|a| matches!(a, Action::Add(_))) {
+                return Err(DeltaTableError::Generic(
+                    "Invalid table encryption configuration: encryption cannot be configured \
+                     on a table created from existing data files, which are not encrypted"
+                        .to_string(),
+                ));
+            }
             let encryption = encryption.with_physical_column_names(&schema, column_mapping_mode)?;
             encryption.validate_columns(&schema, &partition_columns, column_mapping_mode)?;
             if !encryption.column_keys.is_empty() {

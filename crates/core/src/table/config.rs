@@ -124,6 +124,23 @@ pub enum TableProperty {
 
     /// 'classic' for classic Delta Lake checkpoints. 'v2' for v2 checkpoints.
     CheckpointPolicy,
+
+    /// The KMS client used to encrypt the table's Parquet files. See [`EncryptionConfig`].
+    EncryptionKmsId,
+
+    /// Opaque, KMS-specific configuration for the encryption KMS client. See [`EncryptionConfig`].
+    EncryptionKmsConfiguration,
+
+    /// The master key ID used for Parquet footer encryption; setting it enables encryption.
+    /// See [`EncryptionConfig`].
+    EncryptionFooterKey,
+
+    /// true to leave Parquet footers unencrypted. See [`EncryptionConfig`].
+    EncryptionPlaintextFooter,
+
+    /// Master key IDs mapped to the columns they encrypt, as `keyId:col1,col2;keyId2:col3`.
+    /// See [`EncryptionConfig`].
+    EncryptionColumnKeys,
 }
 
 impl AsRef<str> for TableProperty {
@@ -153,6 +170,11 @@ impl AsRef<str> for TableProperty {
             Self::SetTransactionRetentionDuration => "delta.setTransactionRetentionDuration",
             Self::TargetFileSize => "delta.targetFileSize",
             Self::TuneFileSizesForRewrites => "delta.tuneFileSizesForRewrites",
+            Self::EncryptionKmsId => ENCRYPTION_KMS_ID_PROP,
+            Self::EncryptionKmsConfiguration => ENCRYPTION_KMS_CONFIGURATION_PROP,
+            Self::EncryptionFooterKey => ENCRYPTION_FOOTER_KEY_PROP,
+            Self::EncryptionPlaintextFooter => ENCRYPTION_PLAINTEXT_FOOTER_PROP,
+            Self::EncryptionColumnKeys => ENCRYPTION_COLUMN_KEYS_PROP,
         }
     }
 }
@@ -190,6 +212,11 @@ impl FromStr for TableProperty {
             "delta.setTransactionRetentionDuration" => Ok(Self::SetTransactionRetentionDuration),
             "delta.targetFileSize" => Ok(Self::TargetFileSize),
             "delta.tuneFileSizesForRewrites" => Ok(Self::TuneFileSizesForRewrites),
+            ENCRYPTION_KMS_ID_PROP => Ok(Self::EncryptionKmsId),
+            ENCRYPTION_KMS_CONFIGURATION_PROP => Ok(Self::EncryptionKmsConfiguration),
+            ENCRYPTION_FOOTER_KEY_PROP => Ok(Self::EncryptionFooterKey),
+            ENCRYPTION_PLAINTEXT_FOOTER_PROP => Ok(Self::EncryptionPlaintextFooter),
+            ENCRYPTION_COLUMN_KEYS_PROP => Ok(Self::EncryptionColumnKeys),
             _ => Err(DeltaTableError::Generic("unknown config key".into())),
         }
     }
@@ -624,10 +651,7 @@ impl EncryptionConfig {
 
         Ok(Some(Self {
             kms_id: kms_id.to_string(),
-            kms_configuration: props
-                .unknown_properties
-                .get(ENCRYPTION_KMS_CONFIGURATION_PROP)
-                .cloned(),
+            kms_configuration: get(ENCRYPTION_KMS_CONFIGURATION_PROP).map(str::to_string),
             footer_key: footer_key.to_string(),
             plaintext_footer,
             column_keys: Self::parse_column_keys(get(ENCRYPTION_COLUMN_KEYS_PROP))?,
@@ -816,8 +840,8 @@ mod encryption_tests {
     use delta_kernel::table_properties::TableProperties;
 
     use super::{
-        ENCRYPTION_COLUMN_KEYS_PROP, ENCRYPTION_FOOTER_KEY_PROP, ENCRYPTION_KMS_ID_PROP,
-        ENCRYPTION_PLAINTEXT_FOOTER_PROP, EncryptionConfig,
+        ENCRYPTION_COLUMN_KEYS_PROP, ENCRYPTION_FOOTER_KEY_PROP, ENCRYPTION_KMS_CONFIGURATION_PROP,
+        ENCRYPTION_KMS_ID_PROP, ENCRYPTION_PLAINTEXT_FOOTER_PROP, EncryptionConfig, TableProperty,
     };
     use crate::kernel::transaction::{PROTOCOL, TransactionError};
     use crate::operations::create::CreateBuilder;
@@ -912,6 +936,30 @@ mod encryption_tests {
         assert!(enc.kms_configuration.is_none());
         assert!(!enc.plaintext_footer);
         assert!(enc.column_keys.is_empty());
+    }
+
+    /// Like every other property, a blank `kms_configuration` means unset, so the KMS
+    /// factory is not handed an empty string to parse.
+    #[test]
+    fn blank_kms_configuration_is_unset() {
+        for blank in ["", "  "] {
+            let enc = try_parse(&[
+                (ENCRYPTION_KMS_ID_PROP, "kms"),
+                (ENCRYPTION_FOOTER_KEY_PROP, "fk"),
+                (ENCRYPTION_KMS_CONFIGURATION_PROP, blank),
+            ])
+            .unwrap()
+            .unwrap();
+            assert!(enc.kms_configuration.is_none(), "{blank:?}");
+        }
+        let enc = try_parse(&[
+            (ENCRYPTION_KMS_ID_PROP, "kms"),
+            (ENCRYPTION_FOOTER_KEY_PROP, "fk"),
+            (ENCRYPTION_KMS_CONFIGURATION_PROP, " {} "),
+        ])
+        .unwrap()
+        .unwrap();
+        assert_eq!(enc.kms_configuration.as_deref(), Some("{}"));
     }
 
     #[test]
@@ -1056,9 +1104,54 @@ mod encryption_tests {
         CreateBuilder::new()
             .with_location("memory:///")
             .with_columns(schema().fields().cloned())
-            // delta.encryption.* keys are not in the TableProperty enum yet.
-            .with_raise_if_key_not_exists(false)
             .with_configuration(configuration)
+    }
+
+    /// The encryption keys are typed table properties, so the default unknown-key check
+    /// accepts them on every creation path (including the write path, which cannot disable
+    /// that check).
+    #[test]
+    fn encryption_properties_are_typed_table_properties() {
+        for (property, key) in [
+            (TableProperty::EncryptionKmsId, ENCRYPTION_KMS_ID_PROP),
+            (
+                TableProperty::EncryptionKmsConfiguration,
+                ENCRYPTION_KMS_CONFIGURATION_PROP,
+            ),
+            (
+                TableProperty::EncryptionFooterKey,
+                ENCRYPTION_FOOTER_KEY_PROP,
+            ),
+            (
+                TableProperty::EncryptionPlaintextFooter,
+                ENCRYPTION_PLAINTEXT_FOOTER_PROP,
+            ),
+            (
+                TableProperty::EncryptionColumnKeys,
+                ENCRYPTION_COLUMN_KEYS_PROP,
+            ),
+        ] {
+            assert_eq!(property.as_ref(), key);
+            assert!(key.parse::<TableProperty>().unwrap() == property, "{key}");
+        }
+    }
+
+    /// Files registered at creation (CONVERT TO DELTA, `with_actions`) are plaintext, so
+    /// they cannot be committed under an encrypted configuration.
+    #[tokio::test]
+    async fn create_with_existing_files_rejects_encryption() {
+        use crate::kernel::{Action, Add};
+
+        let err = create_encrypted_table("pii-key:ssn", &[])
+            .with_actions(vec![Action::Add(Add {
+                path: "part-00000.parquet".to_string(),
+                data_change: true,
+                ..Default::default()
+            })])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("existing data files"), "{err}");
     }
 
     /// Encryption properties written at table creation survive a commit and reload.
@@ -1150,7 +1243,6 @@ mod encryption_tests {
         let err = table
             .set_tbl_properties()
             .with_properties(encryption_properties(ENCRYPTION_FOOTER_KEY_PROP))
-            .with_raise_if_not_exists(false)
             .await
             .unwrap_err()
             .to_string();
@@ -1191,7 +1283,6 @@ mod encryption_tests {
         let table = CreateBuilder::new()
             .with_log_store(table.log_store())
             .with_columns(schema().fields().cloned())
-            .with_raise_if_key_not_exists(false)
             .with_configuration(configuration)
             .with_save_mode(crate::protocol::SaveMode::Overwrite)
             .await
