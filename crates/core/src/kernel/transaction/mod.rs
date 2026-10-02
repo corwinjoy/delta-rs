@@ -202,6 +202,10 @@ pub enum TransactionError {
     )]
     DeltaTableAppendOnly,
 
+    /// The commit would install an invalid or disallowed `delta.encryption.*` configuration.
+    #[error("{0}")]
+    InvalidEncryptionConfig(String),
+
     /// Error returned when unsupported table features are required
     #[error("Unsupported table features required: {0:?}")]
     UnsupportedTableFeatures(Vec<TableFeature>),

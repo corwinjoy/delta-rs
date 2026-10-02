@@ -1,14 +1,14 @@
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
-use delta_kernel::table_features::TableFeature;
+use delta_kernel::table_features::{ColumnMappingMode, TableFeature};
 use delta_kernel::table_properties::TableProperties;
 
 use super::{TableReference, TransactionError};
 #[cfg(feature = "nanosecond-timestamps")]
 use crate::kernel::contains_timestamp_nanos;
 use crate::kernel::{
-    Action, EagerSnapshot, Protocol, ProtocolExt as _, Schema, contains_timestampntz,
+    Action, EagerSnapshot, Metadata, Protocol, ProtocolExt as _, Schema, contains_timestampntz,
     contains_variant,
 };
 use crate::protocol::DeltaOperation;
@@ -297,6 +297,13 @@ impl ProtocolChecker {
         actions: &[Action],
         operation: &DeltaOperation,
     ) -> Result<(), TransactionError> {
+        let new_metadata = actions.iter().find_map(|action| match action {
+            Action::Metadata(metadata) => Some(metadata),
+            _ => None,
+        });
+        if let Some(metadata) = new_metadata {
+            check_encryption_change(snapshot, metadata, operation)?;
+        }
         self.can_write_to(snapshot)?;
 
         // https://github.com/delta-io/delta/blob/master/PROTOCOL.md#append-only-tables
@@ -380,6 +387,52 @@ pub static INSTANCE: LazyLock<ProtocolChecker> = LazyLock::new(|| {
 
     ProtocolChecker::new(reader_features, writer_features)
 });
+
+/// Check the encryption configuration a commit installs on an existing table.
+///
+/// Encryption can only be configured when the table is created (including create-or-replace,
+/// which replaces every data file): turning it on later would leave the existing files
+/// unencrypted, and removing it would leave a table mixing encrypted and plaintext files.
+/// A new configuration must also be valid.
+fn check_encryption_change(
+    snapshot: &dyn TableReference,
+    metadata: &Metadata,
+    operation: &DeltaOperation,
+) -> Result<(), TransactionError> {
+    let invalid =
+        |err: crate::DeltaTableError| TransactionError::InvalidEncryptionConfig(err.to_string());
+    let properties = TableProperties::from(metadata.configuration().iter());
+    let creates_table = matches!(operation, DeltaOperation::Create { .. });
+    let was_encrypted = EncryptionConfig::is_configured(snapshot.config());
+    if was_encrypted && !creates_table && !EncryptionConfig::is_configured(&properties) {
+        return Err(TransactionError::InvalidEncryptionConfig(
+            "Encryption properties cannot be removed from a table; to stop encrypting, copy \
+             the data into a new table without them"
+                .to_string(),
+        ));
+    }
+    let Some(encryption) = EncryptionConfig::try_from_properties(&properties).map_err(invalid)?
+    else {
+        return Ok(());
+    };
+    if !was_encrypted && !creates_table {
+        return Err(TransactionError::InvalidEncryptionConfig(
+            "Encryption can only be configured when a table is created; the data files \
+             already in this table would stay unencrypted"
+                .to_string(),
+        ));
+    }
+    let schema = metadata.parse_schema().map_err(|err| invalid(err.into()))?;
+    encryption
+        .validate_columns(
+            &schema,
+            metadata.partition_columns(),
+            properties
+                .column_mapping_mode
+                .unwrap_or(ColumnMappingMode::None),
+        )
+        .map_err(invalid)
+}
 
 #[cfg(test)]
 mod tests {

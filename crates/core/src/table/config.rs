@@ -1130,6 +1130,110 @@ mod encryption_tests {
             .unwrap();
     }
 
+    fn plaintext_table() -> CreateBuilder {
+        CreateBuilder::new()
+            .with_location("memory:///")
+            .with_columns(schema().fields().cloned())
+    }
+
+    fn encryption_properties(footer_key_prop: &str) -> HashMap<String, String> {
+        HashMap::from([
+            (ENCRYPTION_KMS_ID_PROP.to_string(), "test-kms".to_string()),
+            (footer_key_prop.to_string(), "footer-key".to_string()),
+        ])
+    }
+
+    /// Turning encryption on for an existing table would leave its data files unencrypted.
+    #[tokio::test]
+    async fn commit_cannot_add_encryption_to_existing_table() {
+        let table = plaintext_table().await.unwrap();
+        let err = table
+            .set_tbl_properties()
+            .with_properties(encryption_properties(ENCRYPTION_FOOTER_KEY_PROP))
+            .with_raise_if_not_exists(false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("only be configured when a table is created"),
+            "{err}"
+        );
+    }
+
+    /// An invalid `delta.encryption.*` property is refused, rather than committed and
+    /// leaving a table that delta-rs then refuses to read or write.
+    #[tokio::test]
+    async fn commit_cannot_add_invalid_encryption_properties() {
+        let table = plaintext_table().await.unwrap();
+        let err = table
+            .set_tbl_properties()
+            .with_properties(encryption_properties("delta.encryption.footerkey"))
+            .with_raise_if_not_exists(false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("delta.encryption.footerkey"), "{err}");
+    }
+
+    /// Create-or-replace may configure encryption: it replaces all existing data files.
+    #[tokio::test]
+    async fn create_or_replace_can_add_encryption() {
+        let table = plaintext_table().await.unwrap();
+        let mut configuration: HashMap<String, Option<String>> =
+            encryption_properties(ENCRYPTION_FOOTER_KEY_PROP)
+                .into_iter()
+                .map(|(k, v)| (k, Some(v)))
+                .collect();
+        configuration.insert(
+            ENCRYPTION_COLUMN_KEYS_PROP.to_string(),
+            Some("pii-key:ssn".to_string()),
+        );
+        let table = CreateBuilder::new()
+            .with_log_store(table.log_store())
+            .with_columns(schema().fields().cloned())
+            .with_raise_if_key_not_exists(false)
+            .with_configuration(configuration)
+            .with_save_mode(crate::protocol::SaveMode::Overwrite)
+            .await
+            .unwrap();
+        assert!(EncryptionConfig::is_configured(
+            table.snapshot().unwrap().table_config()
+        ));
+    }
+
+    /// Removing encryption would leave a table mixing encrypted and plaintext files, so it is
+    /// refused; the data has to be copied into a new table instead.
+    #[tokio::test]
+    async fn commit_cannot_remove_encryption() {
+        use crate::kernel::transaction::CommitBuilder;
+        use crate::kernel::{Action, MetadataExt as _};
+        use crate::protocol::DeltaOperation;
+
+        let table = create_encrypted_table("pii-key:ssn", &[]).await.unwrap();
+        let snapshot = table.snapshot().unwrap().snapshot();
+        let mut metadata = snapshot.metadata().clone();
+        for key in [
+            ENCRYPTION_KMS_ID_PROP,
+            ENCRYPTION_FOOTER_KEY_PROP,
+            ENCRYPTION_COLUMN_KEYS_PROP,
+        ] {
+            metadata = metadata.remove_config_key(key).unwrap();
+        }
+        let err = CommitBuilder::default()
+            .with_actions(vec![Action::Metadata(metadata)])
+            .build(
+                Some(snapshot),
+                table.log_store(),
+                DeltaOperation::SetTableProperties {
+                    properties: HashMap::new(),
+                },
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cannot be removed"), "{err}");
+    }
+
     /// Until the encryption read and write paths land, delta-rs refuses encrypted tables
     /// instead of reading ciphertext or writing plaintext into them.
     #[tokio::test]
