@@ -70,6 +70,7 @@ pub(crate) fn resolve_file_column_name(
 }
 
 /// Derive [`TableParquetOptions`] from `delta.encryption.*` table properties.
+#[cfg(feature = "encryption")]
 pub(crate) fn parquet_options_from_table_config(
     config: &delta_kernel::table_configuration::TableConfiguration,
 ) -> crate::DeltaResult<Option<TableParquetOptions>> {
@@ -77,6 +78,15 @@ pub(crate) fn parquet_options_from_table_config(
         crate::table::config::EncryptionConfig::try_from_properties(config.table_properties())?
             .map(|enc| enc.to_table_parquet_options()),
     )
+}
+
+/// Without the `encryption` feature there are no decryption options to derive: the
+/// protocol checker refuses to read encrypted tables before any scan is planned.
+#[cfg(not(feature = "encryption"))]
+pub(crate) fn parquet_options_from_table_config(
+    _config: &delta_kernel::table_configuration::TableConfiguration,
+) -> crate::DeltaResult<Option<TableParquetOptions>> {
+    Ok(None)
 }
 
 fn parquet_options_from_snapshot(

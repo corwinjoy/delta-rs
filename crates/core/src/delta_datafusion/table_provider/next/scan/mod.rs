@@ -979,6 +979,7 @@ async fn get_read_plan(
     let adapter_factory = Arc::new(DeltaPhysicalExprAdapterFactory);
 
     // Resolve the encryption factory once — it is the same for every object-store group.
+    #[cfg(feature = "encryption")]
     let maybe_encryption_factory = if let Some(factory_id) = &pq_options.crypto.factory_id {
         use crate::operations::write::encryption::resolve_encryption_factory_or_err;
         Some(
@@ -1015,6 +1016,7 @@ async fn get_read_plan(
             .with_table_parquet_options(pq_options.clone())
             .with_parquet_file_reader_factory(reader_factory);
 
+        #[cfg(feature = "encryption")]
         if let Some(factory) = &maybe_encryption_factory {
             file_source = file_source.with_encryption_factory(factory.clone());
         }

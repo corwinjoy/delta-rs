@@ -252,7 +252,7 @@ async fn test_encrypted_update() -> DeltaResult<()> {
 // Negative test: missing factory must produce a clear error
 // ---------------------------------------------------------------------------
 
-/// Guards against silent encryption skip: verifies that an unregistered kms.id
+/// Guards against silent encryption skip: verifies that an unregistered kms_id
 /// is not present in the global registry.
 #[tokio::test]
 async fn test_missing_factory_returns_error() {

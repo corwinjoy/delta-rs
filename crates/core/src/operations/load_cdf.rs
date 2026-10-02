@@ -630,6 +630,7 @@ impl CdfLoadBuilder {
         {
             parquet_options.crypto = enc_opts.crypto;
         }
+        #[cfg(feature = "encryption")]
         let encryption_factory = if let Some(factory_id) = &parquet_options.crypto.factory_id {
             use crate::operations::write::encryption::resolve_encryption_factory_or_err;
             Some(resolve_encryption_factory_or_err(factory_id, session)?)
@@ -688,6 +689,7 @@ impl CdfLoadBuilder {
         )
         .await?;
 
+        #[cfg(feature = "encryption")]
         if let Some(factory) = &encryption_factory {
             cdc_source = cdc_source.with_encryption_factory(factory.clone());
             add_source = add_source.with_encryption_factory(factory.clone());
