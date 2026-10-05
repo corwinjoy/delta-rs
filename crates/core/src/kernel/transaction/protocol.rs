@@ -19,7 +19,7 @@ use crate::table::config::{
 
 use tracing::log::*;
 
-/// The table feature the encryption RFC (delta-io/delta#6195) defines.
+/// The table feature for Parquet modular encryption of data files.
 const PARQUET_ENCRYPTION_FEATURE: &str = "parquetEncryption";
 
 /// Whether this build can read and write tables with `delta.encryption.*` properties. Until
