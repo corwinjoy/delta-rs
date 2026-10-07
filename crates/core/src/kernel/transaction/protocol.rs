@@ -22,7 +22,7 @@ const PARQUET_ENCRYPTION_FEATURE: &str = "parquetEncryption";
 /// Whether this build can read and write tables with `delta.encryption.*` properties.
 /// Until the read and write paths land, both are refused.
 pub(crate) const READS_ENCRYPTED_TABLES: bool = false;
-const WRITES_ENCRYPTED_TABLES: bool = false;
+pub(crate) const WRITES_ENCRYPTED_TABLES: bool = false;
 
 static READER_V2: LazyLock<HashSet<TableFeature>> =
     LazyLock::new(|| HashSet::from_iter([TableFeature::ColumnMapping]));
