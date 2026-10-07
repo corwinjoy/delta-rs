@@ -440,10 +440,9 @@ impl WriteBuilder {
                     }
                     _ => {
                         // `configuration` only applies when the write creates the table.
-                        // Keys that match the table are fine, so a pipeline can pass the
-                        // same configuration on every run; encryption keys that differ
-                        // would be dropped silently and leave the user believing the
-                        // table is encrypted, so refuse those.
+                        // Matching keys pass, so a pipeline can send the same configuration
+                        // every run; differing encryption keys would be dropped silently and
+                        // leave the user believing the table is encrypted, so refuse them.
                         let current = snapshot.metadata().configuration();
                         fn value(v: Option<&String>) -> Option<&str> {
                             v.map(|v| v.trim()).filter(|v| !v.is_empty())

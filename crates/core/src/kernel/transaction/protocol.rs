@@ -387,14 +387,13 @@ pub static INSTANCE: LazyLock<ProtocolChecker> = LazyLock::new(|| {
 /// every data file in the same commit, and is frozen after that: turning it on or off and
 /// changing `kms_id`, `footer_key`, `plaintext_footer` or `column_keys` are refused until
 /// an operation exists that rewrites every data file under the new configuration in one
-/// commit. Without it, a later rewrite (optimize, update, delete, merge) would re-emit old
-/// rows under a possibly weaker configuration, and old plaintext files and log statistics
-/// would stay behind. Mixed files are valid Parquet and the RFC says writers "should
-/// allow" these changes, so this is implementation behaviour, to be relaxed later.
+/// commit. Until then a later rewrite would re-emit old rows under a possibly weaker
+/// configuration, and old plaintext files and log statistics would stay behind. The RFC
+/// allows these changes, so this is implementation behaviour, to be relaxed later.
 ///
 /// Restore is not exempt: restoring past a replace would re-add plaintext files.
-/// `kms_configuration` is not frozen. Configurations are compared as parsed values. A new
-/// configuration must also be valid.
+/// `kms_configuration` is not frozen. Configurations are compared as parsed values, and a
+/// new configuration must be valid.
 fn check_encryption_change(
     snapshot: &dyn TableReference,
     metadata: &Metadata,

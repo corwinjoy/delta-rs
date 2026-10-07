@@ -516,16 +516,6 @@ mod tests {
     }
 }
 
-// ---------------------------------------------------------------------------
-// EncryptionConfig — parsed from delta.encryption.* table properties
-// ---------------------------------------------------------------------------
-//
-// Names and semantics follow the protocol RFC: https://github.com/delta-io/delta/issues/6195
-//
-// The properties are read from the raw metadata `configuration` map, not from kernel's
-// `TableProperties`: kernel keeps only keys it does not recognise in `unknown_properties`,
-// so once it types these keys an encrypted table would look plaintext to the writer.
-
 /// Prefix shared by all encryption table properties.
 pub const ENCRYPTION_PROP_PREFIX: &str = "delta.encryption.";
 /// Table property naming the KMS client used to encrypt the table.
@@ -590,11 +580,14 @@ pub(crate) const FACTORY_OPT_PLAINTEXT_FOOTER: &str = "plaintext_footer";
 #[cfg(all(feature = "datafusion", feature = "encryption"))]
 pub(crate) const FACTORY_OPT_COLUMN_KEYS: &str = "column_keys";
 
-/// Parquet Modular Encryption settings from a table's `delta.encryption.*` properties.
+/// Parquet Modular Encryption settings from a table's `delta.encryption.*` properties, with
+/// the names and semantics of the [protocol RFC](https://github.com/delta-io/delta/issues/6195).
 ///
 /// The properties are plaintext in the Delta log, so they hold only key IDs and KMS
 /// settings, never keys or credentials. Every build can parse them; encrypting or
-/// decrypting needs the `encryption` cargo feature.
+/// decrypting needs the `encryption` cargo feature. They are read from the raw metadata
+/// `configuration` map, not kernel's `TableProperties`, which keeps only the keys it does
+/// not recognise: once kernel types these keys, an encrypted table would look plaintext.
 ///
 /// # Protocol
 /// The RFC guards encrypted tables with a `parquetEncryption` reader/writer feature.
@@ -634,10 +627,9 @@ impl EncryptionConfig {
     /// key, and malformed values.
     ///
     /// # Why the footer key is required
-    /// Parquet Modular Encryption always encrypts the footer with it, or signs the footer
-    /// with it under `plaintext_footer`; there is no footer-less mode. Column keys refine
-    /// what the footer key protects, they never replace it. See the [Parquet
-    /// specification].
+    /// Parquet always encrypts the footer with it, or signs the footer with it under
+    /// `plaintext_footer`; there is no footer-less mode. Column keys refine what the footer
+    /// key protects, they never replace it. See the [Parquet specification].
     ///
     /// [Parquet specification]: https://parquet.apache.org/docs/file-format/data-pages/encryption/
     pub fn try_from_configuration(
@@ -660,7 +652,6 @@ impl EncryptionConfig {
                 "unknown property '{unknown}'; expected one of {ENCRYPTION_PROPS:?}"
             )));
         }
-        // Parquet always encrypts or signs the footer with this key; see the doc comment.
         let footer_key = get(ENCRYPTION_FOOTER_KEY_PROP).ok_or_else(|| {
             invalid_encryption_config(format!(
                 "'{ENCRYPTION_FOOTER_KEY_PROP}' must be set to enable encryption; Parquet \
@@ -768,10 +759,9 @@ impl EncryptionConfig {
     }
 
     /// Refuse a `delta.dataSkippingStatsColumns` that names an encrypted column: the Delta
-    /// log is plaintext, so the RFC forbids statistics for encrypted columns in it. The
-    /// writer leaves them out regardless; this makes the conflict an error instead of a
-    /// silent no-op. Stats columns are display names and are resolved to physical names;
-    /// unknown names are left for the stats-column validation to report.
+    /// log is plaintext, so the RFC forbids their statistics in it. The writer leaves them
+    /// out regardless; this turns the conflict into an error. Stats columns are display
+    /// names, resolved to physical names; unknown ones are left to the stats validation.
     pub fn validate_stats_columns(
         &self,
         configuration: &HashMap<String, String>,
@@ -975,9 +965,8 @@ mod encryption_tests {
 
     #[test]
     fn footer_key_is_required() {
-        // The RFC makes footer_key the switch that enables encryption, so every other
-        // encryption property is an error without it. Parquet has no footer-less mode:
-        // column keys only refine what the footer key already protects.
+        // `footer_key` is the switch (RFC): every other encryption property is an error
+        // without it.
         for prop in [ENCRYPTION_KMS_ID_PROP, ENCRYPTION_COLUMN_KEYS_PROP] {
             let err = try_parse(&[(prop, "kms:col")]).unwrap_err();
             assert!(err.contains(ENCRYPTION_FOOTER_KEY_PROP), "{err}");
