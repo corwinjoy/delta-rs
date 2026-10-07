@@ -538,3 +538,38 @@ async fn test_schema_evolution_adds_plaintext_columns_to_column_keyed_table() ->
     assert_all_parquets_encrypted(tmp.path()).await;
     Ok(())
 }
+
+/// A write may carry the table's own encryption configuration, so a pipeline that creates
+/// the table if missing and appends otherwise can pass the same configuration every run.
+#[tokio::test]
+async fn test_write_with_matching_encryption_configuration_is_idempotent() -> DeltaResult<()> {
+    let kms_id = register_fresh_factory();
+    let tmp = TempDir::new().unwrap();
+    let url = table_url(tmp.path().to_str().unwrap());
+    let configuration = [
+        ("delta.encryption.kms_id", Some(kms_id.as_str())),
+        ("delta.encryption.footer_key", Some("test-footer-key")),
+    ];
+    // First run creates the table.
+    deltalake_core::DeltaTableBuilder::from_url(url.clone())?
+        .build()?
+        .write(vec![get_table_batches()])
+        .with_configuration(configuration)
+        .await?;
+    // A later run loads it and sends the same configuration again.
+    let table = deltalake_core::DeltaTableBuilder::from_url(url)?
+        .load()
+        .await?
+        .write(vec![get_table_batches()])
+        .with_configuration(configuration)
+        .await?;
+    let err = table
+        .write(vec![get_table_batches()])
+        .with_configuration([("delta.encryption.footer_key", Some("other-key"))])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("differs from the table's"), "{err}");
+    assert_all_parquets_encrypted(tmp.path()).await;
+    Ok(())
+}
