@@ -41,6 +41,34 @@ The log holds no statistics for encrypted columns, so `delta.dataSkippingStatsCo
 name one, and data skipping is not available on them. Under uniform encryption no column
 statistics are written at all.
 
+## Registering a KMS
+
+delta-rs never holds master keys. It ships a reference `KmsEncryptionFactory` that generates a
+fresh data key for every file, asks a key management system (KMS) to wrap it under the master
+key ID named in the table properties, and stores the wrapped key in the file's own Parquet key
+metadata. Readers ask the same KMS to unwrap it. The KMS is a two-method trait, `KmsClient`,
+with `wrap_key` and `unwrap_key`; implement it for your service and register the factory under
+the table's `kms_id` before using the table:
+
+```rust
+use deltalake::operations::write::encryption::{KmsEncryptionFactory, register_encryption_factory};
+
+register_encryption_factory("my-kms", Arc::new(KmsEncryptionFactory::new(Arc::new(MyKms::new()))));
+```
+
+The key metadata uses the key material format of the parquet-mr and PyArrow key toolkit, so
+files written by delta-rs can be read by those engines through an equivalent KMS client, and the
+other way round. Decryption depends only on the KMS and the key metadata in each file, never on
+the table's current `footer_key` or `column_keys`, so files written under earlier key settings
+stay readable.
+
+The `basic_operations_encryption` example in the `deltalake` crate shows a complete round trip
+with an in-memory stand-in for a KMS:
+
+```shell
+cargo run --example basic_operations_encryption -p deltalake --features "datafusion encryption"
+```
+
 ## Changing the configuration
 
 Encryption is set when a table is created and is frozen after that. Every commit is checked:

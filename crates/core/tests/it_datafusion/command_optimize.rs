@@ -27,6 +27,7 @@ use deltalake_core::logstore::{
 use deltalake_core::operations::optimize::{
     MetricDetails, Metrics, OptimizeType, PlannerStrategy, create_merge_plan,
 };
+use deltalake_core::operations::write::encryption::factory_from_writer_properties;
 use deltalake_core::protocol::DeltaOperation;
 use deltalake_core::test_utils::TestTables;
 use deltalake_core::writer::{DeltaWriter, RecordBatchWriter};
@@ -855,9 +856,7 @@ async fn test_optimize_execute_reads_and_writes_through_given_log_store()
         tracked_table.snapshot()?.snapshot(),
         &[],
         Some(NonZeroU64::new(1_000_000).unwrap()),
-        deltalake_core::operations::write::encryption::factory_from_writer_properties(
-            WriterProperties::builder().build(),
-        ),
+        factory_from_writer_properties(WriterProperties::builder().build()),
         ArrowWriterOptions::default(),
         df_context.state(),
     )
@@ -1003,9 +1002,7 @@ async fn test_conflict_for_remove_actions() -> Result<(), Box<dyn Error>> {
         dt.snapshot()?.snapshot(),
         &filter,
         None,
-        deltalake_core::operations::write::encryption::factory_from_writer_properties(
-            WriterProperties::builder().build(),
-        ),
+        factory_from_writer_properties(WriterProperties::builder().build()),
         ArrowWriterOptions::default(),
         df_context.state(),
     )
@@ -1071,9 +1068,7 @@ async fn test_no_conflict_for_append_actions() -> Result<(), Box<dyn Error>> {
         dt.snapshot()?.snapshot(),
         &filter,
         None,
-        deltalake_core::operations::write::encryption::factory_from_writer_properties(
-            WriterProperties::builder().build(),
-        ),
+        factory_from_writer_properties(WriterProperties::builder().build()),
         ArrowWriterOptions::default(),
         df_context.state(),
     )
@@ -1136,9 +1131,7 @@ async fn test_commit_interval() -> Result<(), Box<dyn Error>> {
         dt.snapshot()?.snapshot(),
         &[],
         None,
-        deltalake_core::operations::write::encryption::factory_from_writer_properties(
-            WriterProperties::builder().build(),
-        ),
+        factory_from_writer_properties(WriterProperties::builder().build()),
         ArrowWriterOptions::default(),
         context.state(),
     )
