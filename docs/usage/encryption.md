@@ -6,10 +6,6 @@ following the Delta protocol RFC for
 [Parquet encryption](https://github.com/delta-io/delta/issues/6195).
 Encryption is configured with table properties when the table is created.
 
-This page describes the feature as a whole. The properties and their rules land first; the
-write and read paths follow in separate changes, and until they land every build refuses
-encrypted tables.
-
 Support is an opt-in cargo feature (`encryption`) of the Rust crates. Builds without it refuse
 to read or write encrypted tables, so they never return ciphertext or add plaintext files.
 

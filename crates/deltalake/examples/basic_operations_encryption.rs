@@ -105,7 +105,7 @@ fn batch() -> RecordBatch {
 }
 
 fn table_url(uri: &str) -> url::Url {
-    url::Url::parse(&format!("file://{}", uri)).unwrap()
+    url::Url::from_directory_path(uri).unwrap()
 }
 
 async fn table_from_uri(uri: &str) -> DeltaTable {

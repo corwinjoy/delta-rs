@@ -34,7 +34,6 @@ use datafusion::{
         ColumnStatistics, HashMap, Result, Statistics, ToDFSchema, internal_datafusion_err,
         plan_err, stats::Precision,
     },
-    config::TableParquetOptions,
     datasource::physical_plan::{
         ParquetSource,
         parquet::{CachedParquetFileReaderFactory, metadata::DFParquetMetadata},
@@ -82,7 +81,7 @@ use self::replay::{ScanFileContext, ScanFileStream};
 pub(crate) use self::runtime_filter::RuntimeFileFilter;
 use self::runtime_filter::RuntimeScanFilePruner;
 use super::{FileSelection, ResolvedFileSelection};
-use crate::delta_datafusion::decryption::{Decryption, parquet_options_from_table_config};
+use crate::delta_datafusion::decryption::Decryption;
 use crate::{
     DeltaTableError,
     delta_datafusion::{
@@ -211,19 +210,7 @@ pub(super) async fn execution_plan(
         ))
     });
 
-    // The decryption options follow from the snapshot's `delta.encryption.*` properties,
-    // which is what survives serialization (DeltaLogicalCodec), so derive them per scan.
-    let table_parquet_options = parquet_options_from_table_config(scan_plan.table_configuration())?;
-
-    get_data_scan_plan(
-        session,
-        scan_plan,
-        replayed,
-        limit,
-        file_pruner,
-        table_parquet_options.as_ref(),
-    )
-    .await
+    get_data_scan_plan(session, scan_plan, replayed, limit, file_pruner).await
 }
 
 /// Load deletion-vector keep masks for the selected files.
@@ -559,9 +546,13 @@ async fn get_data_scan_plan(
     replayed: ReplayedScanFiles,
     limit: Option<usize>,
     file_pruner: Option<Arc<RuntimeScanFilePruner>>,
-    table_parquet_options: Option<&TableParquetOptions>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
     let table_root = scan_plan.scan.table_root().clone();
+    // Resolve the decryption factory once, from the snapshot's `delta.encryption.*`
+    // properties (what survives serialization through DeltaLogicalCodec): the
+    // deletion-vector footer reads below and the Parquet sources share it.
+    let decryption =
+        Decryption::from_table_config(scan_plan.table_configuration(), session, &table_root)?;
     let ReplayedScanFiles {
         files,
         transforms,
@@ -571,12 +562,6 @@ async fn get_data_scan_plan(
         ..
     } = replayed;
     let has_deletion_vectors = !dvs.is_empty();
-    // Resolve the decryption factory once: the deletion-vector footer reads below and the
-    // Parquet sources share it.
-    let decryption = match table_parquet_options {
-        Some(options) => Decryption::try_new(options, session, &table_root)?,
-        None => Decryption::default(),
-    };
     let mut partition_stats = HashMap::new();
     let log_counts: Vec<_> = files.iter().map(|file| file.num_records).collect();
 
@@ -745,7 +730,6 @@ async fn get_data_scan_plan(
         &file_id_field,
         predicate,
         file_pruner.as_ref().map(|pruner| pruner.predicate()),
-        table_parquet_options,
         &decryption,
     )
     .await?;
@@ -955,8 +939,7 @@ async fn get_read_plan(
     // rows, and the deletion vector of a file must see all rows of that file. This predicate is
     // always set, because it keeps or removes a file with all its rows.
     file_predicate: Option<Arc<dyn PhysicalExpr>>,
-    // The table's decryption options, and the factory resolved from them.
-    table_parquet_options: Option<&TableParquetOptions>,
+    // The table's decryption factory and crypto options.
     decryption: &Decryption,
 ) -> Result<Arc<dyn ExecutionPlan>> {
     let mut plans = Vec::new();
@@ -968,15 +951,9 @@ async fn get_read_plan(
     let parquet_read_schema = Arc::new(relax_schema_nested_nullability(parquet_read_schema));
     let parquet_read_schema = &parquet_read_schema;
 
-    // Start from the Delta reader defaults (the session's parquet settings), then
-    // overlay the crypto settings derived from `delta.encryption.*` table properties.
-    let pq_options = {
-        let mut opts = crate::datafile::ReaderProperties::default().to_table_parquet_options(state);
-        if let Some(enc_opts) = table_parquet_options {
-            opts.crypto = enc_opts.crypto.clone();
-        }
-        opts
-    };
+    // The Delta reader defaults (the session's parquet settings); `decryption.apply` adds
+    // the crypto settings of an encrypted table.
+    let pq_options = crate::datafile::ReaderProperties::default().to_table_parquet_options(state);
 
     let mut full_read_schema = SchemaBuilder::from(parquet_read_schema.as_ref().clone());
     full_read_schema.push(file_id_field.as_ref().clone().with_nullable(true));
@@ -1743,7 +1720,6 @@ mod tests {
             &file_id_field,
             None,
             None,
-            None,
             &Decryption::default(),
         )
         .await?;
@@ -1767,7 +1743,6 @@ mod tests {
             &parquet_predicate_schema,
             Some(1),
             &file_id_field,
-            None,
             None,
             None,
             &Decryption::default(),
@@ -1798,7 +1773,6 @@ mod tests {
             &parquet_predicate_schema_extended,
             Some(1),
             &file_id_field,
-            None,
             None,
             None,
             &Decryption::default(),
@@ -1877,7 +1851,6 @@ mod tests {
             &file_id_field,
             None,
             None,
-            None,
             &Decryption::default(),
         )
         .await?;
@@ -1916,7 +1889,6 @@ mod tests {
             &parquet_predicate_schema_extended,
             None,
             &file_id_field,
-            None,
             None,
             None,
             &Decryption::default(),
@@ -2108,7 +2080,6 @@ mod tests {
             &file_id_field,
             None,
             None,
-            None,
             &Decryption::default(),
         )
         .await?;
@@ -2175,7 +2146,6 @@ mod tests {
             &file_id_field,
             Some(&predicate),
             None,
-            None,
             &Decryption::default(),
         )
         .await?;
@@ -2240,7 +2210,6 @@ mod tests {
             None,
             &file_id_field,
             Some(&predicate),
-            None,
             None,
             &Decryption::default(),
         )
@@ -2320,7 +2289,6 @@ mod tests {
             &file_id_field,
             Some(&predicate),
             None,
-            None,
             &Decryption::default(),
         )
         .await?;
@@ -2395,7 +2363,6 @@ mod tests {
             None,
             &file_id_field,
             Some(&predicate),
-            None,
             None,
             &Decryption::default(),
         )
@@ -2472,7 +2439,6 @@ mod tests {
             None,
             &file_id_field,
             Some(&predicate),
-            None,
             None,
             &Decryption::default(),
         )
@@ -2561,7 +2527,6 @@ mod tests {
             None,
             &file_id_field,
             Some(&predicate),
-            None,
             None,
             &Decryption::default(),
         )

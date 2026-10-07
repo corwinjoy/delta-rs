@@ -6,7 +6,7 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 #[cfg(all(feature = "datafusion", feature = "encryption"))]
-use datafusion::config::{EncryptionFactoryOptions, TableParquetOptions};
+use datafusion::config::EncryptionFactoryOptions;
 use delta_kernel::expressions::ColumnName;
 use delta_kernel::schema::{DataType, StructField, StructType};
 use delta_kernel::table_features::ColumnMappingMode;
@@ -871,17 +871,6 @@ impl EncryptionConfig {
             })
             .collect::<Vec<_>>()
             .join(";")
-    }
-
-    /// [`TableParquetOptions`] telling a DataFusion Parquet scan to decrypt with the
-    /// factory registered as [`kms_id`](EncryptionConfig::kms_id), carrying the
-    /// [reader options](Self::reader_factory_options) only.
-    #[cfg(all(feature = "datafusion", feature = "encryption"))]
-    pub fn to_table_parquet_options(&self) -> TableParquetOptions {
-        let mut opts = TableParquetOptions::default();
-        opts.crypto.factory_id = Some(self.kms_id.clone());
-        opts.crypto.factory_options = self.reader_factory_options();
-        opts
     }
 
     /// The options a registered encryption factory gets when decrypting a file: `kms_id`

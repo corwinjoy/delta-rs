@@ -2,7 +2,6 @@
 //! decrypt with, and the protocol checker refuses encrypted tables before a scan is planned.
 
 use datafusion::catalog::Session;
-use datafusion::config::TableParquetOptions;
 use datafusion::datasource::physical_plan::ParquetSource;
 use datafusion::datasource::physical_plan::parquet::metadata::DFParquetMetadata;
 use delta_kernel::table_configuration::TableConfiguration;
@@ -12,20 +11,13 @@ use url::Url;
 
 use crate::errors::DeltaResult;
 
-/// No decryption options can be derived without the `encryption` feature.
-pub(crate) fn parquet_options_from_table_config(
-    _config: &TableConfiguration,
-) -> DeltaResult<Option<TableParquetOptions>> {
-    Ok(None)
-}
-
 /// Stand-in for the scan's decryption factory; leaves sources and options unchanged.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Decryption {}
 
 impl Decryption {
-    pub(crate) fn try_new(
-        _options: &TableParquetOptions,
+    pub(crate) fn from_table_config(
+        _config: &TableConfiguration,
         _session: &dyn Session,
         _table_root: &Url,
     ) -> DeltaResult<Self> {

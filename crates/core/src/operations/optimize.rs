@@ -45,7 +45,7 @@ use parquet::file::properties::WriterProperties;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as DeError};
 use tracing::*;
 
-use super::write::encryption::{WriterPropertiesFactoryRef, factory_from_writer_properties};
+use super::write::encryption::WriterPropertiesFactoryRef;
 use crate::datafile::writer::{
     ArrowWriterOptions, PartitionWriter, PartitionWriterConfig, UploadBudget,
 };

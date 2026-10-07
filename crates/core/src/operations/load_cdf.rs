@@ -11,7 +11,7 @@
 //! let df = ctx.read_table(provider).await?;
 
 use crate::DeltaTableError;
-use crate::delta_datafusion::decryption::{Decryption, parquet_options_from_table_config};
+use crate::delta_datafusion::decryption::Decryption;
 use crate::delta_datafusion::{
     DataFusionMixins, DeltaSessionExt, extract_partition_only_predicate,
 };
@@ -611,20 +611,18 @@ impl CdfLoadBuilder {
             .with_table_partition_cols(add_remove_partition_fields)
             .build();
 
-        // Start from the session's parquet options, then overlay the crypto settings
-        // derived from `delta.encryption.*` so the change feed of an encrypted
-        // table can be decrypted like every other read path. Applies to all three
-        // sources: `_change_data` files and the regular add/remove data files are
-        // encrypted alike.
-        let mut parquet_options = TableParquetOptions {
+        // The session's parquet options. `decryption.apply` below adds the crypto settings
+        // of an encrypted table to all three sources: `_change_data` files and the regular
+        // add/remove data files are encrypted alike.
+        let parquet_options = TableParquetOptions {
             global: session.config().options().execution.parquet.clone(),
             ..Default::default()
         };
-        if let Some(enc_opts) = parquet_options_from_table_config(snapshot.table_configuration())? {
-            parquet_options.crypto = enc_opts.crypto;
-        }
-        let decryption =
-            Decryption::try_new(&parquet_options, session, &self.log_store.table_root_url())?;
+        let decryption = Decryption::from_table_config(
+            snapshot.table_configuration(),
+            session,
+            &self.log_store.table_root_url(),
+        )?;
 
         let mut cdc_source = ParquetSource::new(cdc_table_schema)
             .with_table_parquet_options(parquet_options.clone())

@@ -153,6 +153,8 @@ async fn assert_all_parquets_encrypted(dir: &std::path::Path) {
     }
 }
 
+/// The files of an encrypted table are encrypted on disk (opening one without keys fails)
+/// and readable through the registered factory.
 #[tokio::test]
 async fn test_encrypted_create_and_read() -> DeltaResult<()> {
     let kms_id = register_fresh_factory();
@@ -170,11 +172,7 @@ async fn test_encrypted_optimize_compact() -> DeltaResult<()> {
     let kms_id = register_fresh_factory();
     let dir = TempDir::new()?;
     let uri = dir.path().to_str().unwrap();
-    create_encrypted_table(uri, "test", &kms_id).await?;
-
-    let table: DeltaTable = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
-        .load()
-        .await?;
+    let table = create_encrypted_table(uri, "test", &kms_id).await?;
     let (_table, metrics) = table.optimize().await?;
     assert!(
         metrics.num_files_added > 0 || metrics.num_files_removed > 0,
@@ -191,11 +189,7 @@ async fn test_encrypted_optimize_zorder() -> DeltaResult<()> {
     let kms_id = register_fresh_factory();
     let dir = TempDir::new()?;
     let uri = dir.path().to_str().unwrap();
-    create_encrypted_table(uri, "test", &kms_id).await?;
-
-    let table: DeltaTable = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
-        .load()
-        .await?;
+    let table = create_encrypted_table(uri, "test", &kms_id).await?;
     let (_table, metrics) = table
         .optimize()
         .with_type(OptimizeType::ZOrder(vec!["int".to_string()]))
@@ -212,11 +206,7 @@ async fn test_encrypted_delete() -> DeltaResult<()> {
     let kms_id = register_fresh_factory();
     let dir = TempDir::new()?;
     let uri = dir.path().to_str().unwrap();
-    create_encrypted_table(uri, "test", &kms_id).await?;
-
-    let table: DeltaTable = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
-        .load()
-        .await?;
+    let table = create_encrypted_table(uri, "test", &kms_id).await?;
     let (_table, metrics) = table.delete().with_predicate(col("int").eq(lit(1))).await?;
     assert!(metrics.num_deleted_rows.unwrap_or(0) > 0);
     assert_all_parquets_encrypted(dir.path()).await;
@@ -230,11 +220,7 @@ async fn test_encrypted_update() -> DeltaResult<()> {
     let kms_id = register_fresh_factory();
     let dir = TempDir::new()?;
     let uri = dir.path().to_str().unwrap();
-    create_encrypted_table(uri, "test", &kms_id).await?;
-
-    let table: DeltaTable = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
-        .load()
-        .await?;
+    let table = create_encrypted_table(uri, "test", &kms_id).await?;
     let (_table, metrics) = table
         .update()
         .with_predicate(col("int").eq(lit(1)))
@@ -244,23 +230,6 @@ async fn test_encrypted_update() -> DeltaResult<()> {
     assert_all_parquets_encrypted(dir.path()).await;
     let batches = read_table(uri).await?;
     assert!(!batches.is_empty());
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Negative test: missing factory must produce a clear error
-// ---------------------------------------------------------------------------
-
-/// Critical correctness test: verify files are physically encrypted on disk.
-/// Opens each parquet file with the raw reader (no decryption) and asserts
-/// the read fails, proving the encryption was applied to the footer.
-#[tokio::test]
-async fn test_parquet_files_are_physically_encrypted() -> DeltaResult<()> {
-    let kms_id = register_fresh_factory();
-    let dir = TempDir::new()?;
-    let uri = dir.path().to_str().unwrap();
-    create_encrypted_table(uri, "test", &kms_id).await?;
-    assert_all_parquets_encrypted(dir.path()).await;
     Ok(())
 }
 
@@ -308,7 +277,7 @@ async fn test_encrypted_columnar_plaintext_footer() -> DeltaResult<()> {
         .await?;
     let batch = get_table_batches();
     let table = table.write(vec![batch.clone()]).await?;
-    let table = table.write(vec![batch.clone()]).await?;
+    table.write(vec![batch]).await?;
 
     // Round-trip: read back with the factory registered and verify row count.
     let batches = read_table(uri).await?;
@@ -363,10 +332,6 @@ async fn test_encrypted_columnar_plaintext_footer() -> DeltaResult<()> {
         );
     }
 
-    // Verify the "timestamp" column is NOT listed in the encryption properties
-    // so the write path respected the per-column config.
-    let _ = table; // silence unused warning
-
     Ok(())
 }
 
@@ -383,11 +348,7 @@ async fn test_caller_writer_properties_cannot_defeat_encryption() -> DeltaResult
     let kms_id = register_fresh_factory();
     let dir = TempDir::new()?;
     let uri = dir.path().to_str().unwrap();
-    create_encrypted_table(uri, "test", &kms_id).await?;
-
-    let table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
-        .load()
-        .await?;
+    let table = create_encrypted_table(uri, "test", &kms_id).await?;
     table
         .write(vec![get_table_batches()])
         .with_writer_properties(WriterProperties::builder().build())
@@ -406,11 +367,7 @@ async fn test_legacy_record_batch_writer_is_encrypted() -> DeltaResult<()> {
     let kms_id = register_fresh_factory();
     let dir = TempDir::new()?;
     let uri = dir.path().to_str().unwrap();
-    create_encrypted_table(uri, "test", &kms_id).await?;
-
-    let mut table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
-        .load()
-        .await?;
+    let mut table = create_encrypted_table(uri, "test", &kms_id).await?;
     let mut writer = RecordBatchWriter::for_table(&table)?;
     writer.write(get_table_batches()).await?;
     writer.flush_and_commit(&mut table).await?;
@@ -428,11 +385,7 @@ async fn test_insert_into_datasink_is_encrypted() -> DeltaResult<()> {
     let kms_id = register_fresh_factory();
     let dir = TempDir::new()?;
     let uri = dir.path().to_str().unwrap();
-    create_encrypted_table(uri, "test", &kms_id).await?;
-
-    let table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
-        .load()
-        .await?;
+    let table = create_encrypted_table(uri, "test", &kms_id).await?;
     let ctx = SessionContext::new();
     ctx.register_table("t", table.table_provider().await?)?;
     ctx.sql("INSERT INTO t (int, string) VALUES (42, 'Z')")
@@ -952,11 +905,7 @@ async fn test_serde_round_tripped_provider_still_decrypts() -> DeltaResult<()> {
     let kms_id = register_fresh_factory();
     let dir = TempDir::new()?;
     let uri = dir.path().to_str().unwrap();
-    create_encrypted_table(uri, "test", &kms_id).await?;
-
-    let table: DeltaTable = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
-        .load()
-        .await?;
+    let table = create_encrypted_table(uri, "test", &kms_id).await?;
     let provider = table.table_provider().await?;
     let scan = provider
         .downcast_ref::<DeltaScanNext>()

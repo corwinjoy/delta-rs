@@ -5,7 +5,7 @@ use std::sync::Arc;
 use arrow_schema::SchemaRef;
 use async_trait::async_trait;
 use datafusion::catalog::Session;
-use datafusion::config::{EncryptionFactoryOptions, TableParquetOptions};
+use datafusion::config::{EncryptionFactoryOptions, ParquetEncryptionOptions};
 use datafusion::datasource::physical_plan::ParquetSource;
 use datafusion::datasource::physical_plan::parquet::metadata::DFParquetMetadata;
 use datafusion::execution::parquet_encryption::EncryptionFactory;
@@ -20,58 +20,54 @@ use crate::errors::DeltaResult;
 use crate::operations::write::encryption::resolve_encryption_factory;
 use crate::table::config::EncryptionConfig;
 
-/// Derive [`TableParquetOptions`] from `delta.encryption.*` table properties, or `None`
-/// for an unencrypted table.
-pub(crate) fn parquet_options_from_table_config(
-    config: &TableConfiguration,
-) -> DeltaResult<Option<TableParquetOptions>> {
-    Ok(
-        EncryptionConfig::try_from_configuration(config.metadata().configuration())?
-            .map(|enc| enc.to_table_parquet_options()),
-    )
-}
-
-/// The KMS factory a scan decrypts its files with, resolved once per scan.
+/// The KMS factory a scan decrypts its files with, and the crypto options its Parquet
+/// sources carry, resolved once per scan from the table's `delta.encryption.*` properties.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Decryption {
     factory: Option<Arc<dyn EncryptionFactory>>,
-    factory_options: EncryptionFactoryOptions,
+    crypto: ParquetEncryptionOptions,
 }
 
 impl Decryption {
-    /// Resolve the factory named in `options` from the session's `RuntimeEnv` or the global
-    /// registry. Options without a factory (an unencrypted table) need no decryption.
+    /// Resolve the factory named by the table's `kms_id` from the session's `RuntimeEnv` or
+    /// the global registry. An unencrypted table needs no decryption.
     ///
     /// The factory is given file paths relative to `table_root`, the same paths the writer
     /// gave it.
-    pub(crate) fn try_new(
-        options: &TableParquetOptions,
+    pub(crate) fn from_table_config(
+        config: &TableConfiguration,
         session: &dyn Session,
         table_root: &Url,
     ) -> DeltaResult<Self> {
+        let Some(enc) =
+            EncryptionConfig::try_from_configuration(config.metadata().configuration())?
+        else {
+            return Ok(Self::default());
+        };
         let runtime_env = session.runtime_env();
         let table_root = Path::from_url_path(table_root.path())?;
-        let factory = options
-            .crypto
-            .factory_id
-            .as_deref()
-            .map(|id| resolve_encryption_factory(id, Some(runtime_env)))
-            .transpose()?
-            .map(|inner| {
-                Arc::new(TableRelativePaths { inner, table_root }) as Arc<dyn EncryptionFactory>
-            });
+        let inner = resolve_encryption_factory(&enc.kms_id, Some(runtime_env))?;
         Ok(Self {
-            factory,
-            factory_options: options.crypto.factory_options.clone(),
+            factory: Some(Arc::new(TableRelativePaths { inner, table_root })),
+            crypto: ParquetEncryptionOptions {
+                factory_id: Some(enc.kms_id.clone()),
+                factory_options: enc.reader_factory_options(),
+                ..Default::default()
+            },
         })
     }
 
-    /// Attach the factory, if any, to `source` so it can decrypt the files it reads.
+    /// Give `source` the factory and crypto options, if any, so it can decrypt the files it
+    /// reads.
     pub(crate) fn apply(&self, source: ParquetSource) -> ParquetSource {
-        match &self.factory {
-            Some(factory) => source.with_encryption_factory(Arc::clone(factory)),
-            None => source,
-        }
+        let Some(factory) = &self.factory else {
+            return source;
+        };
+        let mut options = source.table_parquet_options().clone();
+        options.crypto = self.crypto.clone();
+        source
+            .with_table_parquet_options(options)
+            .with_encryption_factory(Arc::clone(factory))
     }
 
     /// The decryption keys for `file_path`, if the table is encrypted.
@@ -83,7 +79,7 @@ impl Decryption {
             return Ok(None);
         };
         Ok(factory
-            .get_file_decryption_properties(&self.factory_options, file_path)
+            .get_file_decryption_properties(&self.crypto.factory_options, file_path)
             .await?)
     }
 
@@ -239,12 +235,13 @@ mod tests {
             .unwrap();
 
         let snapshot = table.snapshot().unwrap();
-        let options = parquet_options_from_table_config(snapshot.snapshot().table_configuration())
-            .unwrap()
-            .unwrap();
         let session = SessionContext::new().state();
-        let decryption =
-            Decryption::try_new(&options, &session, &table.log_store().table_root_url()).unwrap();
+        let decryption = Decryption::from_table_config(
+            snapshot.snapshot().table_configuration(),
+            &session,
+            &table.log_store().table_root_url(),
+        )
+        .unwrap();
 
         let file = snapshot.log_data().into_iter().next().unwrap();
         let path = Path::from(file.path().as_ref());
