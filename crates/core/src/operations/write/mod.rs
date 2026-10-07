@@ -44,6 +44,8 @@ use futures::future::BoxFuture;
 use parquet::file::properties::WriterProperties;
 use serde::{Deserialize, Serialize};
 use tracing::Instrument;
+
+use crate::table::config::ENCRYPTION_PROP_PREFIX;
 use url::Url;
 
 pub use self::configs::WriterStatsConfig;
@@ -423,6 +425,22 @@ impl WriteBuilder {
                     PROTOCOL.check_append_only(snapshot)?;
                 }
 
+                // `configuration` only applies when this write creates the table. Silently
+                // dropping encryption properties would leave a user believing the table
+                // is encrypted, so refuse them here rather than ignore them.
+                if let Some(key) = self
+                    .configuration
+                    .keys()
+                    .find(|key| key.starts_with(ENCRYPTION_PROP_PREFIX))
+                {
+                    return Err(DeltaTableError::Generic(format!(
+                        "'{key}' was given in the write configuration, but the table already \
+                         exists and its configuration is not changed by a write; to encrypt \
+                         an existing table, recreate it with create-or-replace, or write to \
+                         a new table"
+                    )));
+                }
+
                 PROTOCOL.can_write_to(snapshot)?;
 
                 if self.schema_mode.is_none() {
@@ -786,6 +804,26 @@ mod tests {
     fn assert_common_write_metrics(write_metrics: WriteMetrics) {
         // assert!(write_metrics.execution_time_ms > 0);
         assert!(write_metrics.num_added_files > 0);
+    }
+
+    /// `configuration` only applies when a write creates the table. Encryption properties
+    /// in it for a table that already exists are refused rather than silently dropped.
+    #[tokio::test]
+    async fn test_write_refuses_encryption_configuration_on_existing_table() {
+        let table = setup_table_with_configuration(TableProperty::AppendOnly, Some("false")).await;
+        let batch = get_record_batch(None, false);
+        for mode in [SaveMode::Append, SaveMode::Overwrite] {
+            let err = table
+                .clone()
+                .write(vec![batch.clone()])
+                .with_save_mode(mode)
+                .with_configuration([("delta.encryption.footer_key", Some("fk"))])
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("delta.encryption.footer_key"), "{err}");
+            assert!(err.contains("create-or-replace"), "{err}");
+        }
     }
 
     #[tokio::test]

@@ -607,7 +607,7 @@ impl DeltaScan {
     fn validate_supported_reader_features(
         snapshot: &SnapshotWrapper,
     ) -> std::result::Result<(), TransactionError> {
-        PROTOCOL.can_read_encryption(snapshot.snapshot().table_properties())?;
+        PROTOCOL.can_read_encryption(snapshot.snapshot().metadata().configuration())?;
         match PROTOCOL.can_read_from_protocol(snapshot.snapshot().protocol()) {
             Ok(()) => Ok(()),
             Err(TransactionError::UnsupportedTableFeatures(features))
