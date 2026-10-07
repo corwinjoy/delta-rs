@@ -607,7 +607,7 @@ impl PlannerStats {
 pub struct MergeTaskParameters {
     /// Schema of written files
     file_schema: SchemaRef,
-    /// Factory for creating per-file WriterProperties (supports KMS encryption / AAD).
+    /// Creates each file's `WriterProperties`, including any per-file encryption keys.
     writer_properties_factory: crate::operations::write::encryption::WriterPropertiesFactoryRef,
     /// Options passed to arrow writer
     arrow_options: ArrowWriterOptions,

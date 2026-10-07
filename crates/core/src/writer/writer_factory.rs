@@ -24,7 +24,8 @@ use crate::parquet_utils::default_writer_properties;
 /// File paths are relative to the table root, as in the Delta log, and readers pass
 /// decryption factories the same paths. A factory should use only the file name as the AAD
 /// prefix (additional authenticated data), which binds encrypted modules to their file:
-/// file names are unique within a table and, unlike full paths, survive moving it. The reference `KmsEncryptionFactory` does this.
+/// file names are unique within a table and, unlike full paths, survive moving it. The
+/// reference `KmsEncryptionFactory` does this.
 #[async_trait]
 pub trait WriterPropertiesFactory: Send + Sync + Debug + 'static {
     /// The base settings every file is written with (compression, row-group limits).
@@ -42,10 +43,9 @@ pub trait WriterPropertiesFactory: Send + Sync + Debug + 'static {
     /// row groups, statistics). Anything the factory adds on top, such as encryption, is
     /// kept, so callers' settings cannot turn it off.
     ///
-    /// The default returns `None`: the factory cannot take new base settings, and writers
-    /// keep using it unchanged (see [`with_base_properties`]). That ignores the caller's
-    /// settings but never loses what the factory adds, so implementations that do not
-    /// override this stay safe.
+    /// The default returns `None`: the factory cannot take new base settings and is used
+    /// unchanged (see [`with_base_properties`]), which ignores the caller's settings but
+    /// never loses what the factory adds.
     fn with_base_properties(
         &self,
         properties: WriterProperties,

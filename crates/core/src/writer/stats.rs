@@ -211,10 +211,9 @@ fn stats_from_metadata(
             continue;
         }
 
-        // The Delta log is plaintext, so the encryption RFC forbids per-file statistics
-        // for encrypted columns. The file's own column chunk metadata says which columns
-        // are encrypted, whether uniformly with the footer key or with a column key, so
-        // this holds whatever the stats configuration asks for.
+        // The Delta log is plaintext, so the RFC forbids per-file statistics for encrypted
+        // columns. The file's own column chunk metadata says which columns those are, under
+        // uniform or column-key encryption, whatever the stats configuration asks for.
         #[cfg(feature = "encryption")]
         if row_group_metadata
             .iter()

@@ -1,28 +1,11 @@
 //! An in-memory KMS for testing encryption via `delta.encryption.*` table properties.
 //!
-//! This module is **not part of the stable public API**. It lives in `test_utils`, which is
-//! compiled for this crate's tests and, with the `integration_test` feature, for downstream
-//! crates' integration tests. Do not rely on it for production use.
-//!
-//! # Usage
-//!
-//! 1. Register [`mock_kms_factory`] in the process-wide registry with
-//!    [`register_encryption_factory`](crate::operations::write::encryption::register_encryption_factory).
-//!    Operations that create their own DataFusion sessions, such as `table.write()`, only
-//!    find factories registered there.
-//! 2. Create a Delta table with `delta.encryption.kms_id` set to the same ID.
-//! 3. All subsequent read/write operations on the table will use the registered factory.
-//!
-//! ```rust,ignore
-//! // Register factory at startup
-//! register_encryption_factory("test-kms", mock_kms_factory());
-//!
-//! // Create encrypted table
-//! table.create()
-//!     .with_property("delta.encryption.kms_id", "test-kms")
-//!     .with_property("delta.encryption.footer_key", "my-key")
-//!     .await?;
-//! ```
+//! Not part of the stable public API: `test_utils` is compiled for this crate's tests and,
+//! with the `integration_test` feature, for downstream crates' tests. Register
+//! [`mock_kms_factory`] with
+//! [`register_encryption_factory`](crate::operations::write::encryption::register_encryption_factory)
+//! under the `kms_id` of the tables under test; operations that create their own DataFusion
+//! sessions only find factories registered there.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

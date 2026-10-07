@@ -174,9 +174,8 @@ impl DeltaDataSink {
                     )
                 }
             };
-        // An encrypted table must never fall back to the plaintext default
-        // factory: resolve encryption from the table's delta.encryption.*
-        // properties (task RuntimeEnv first, then the global registry).
+        // The table's own factory, encrypting if its properties say so; the task's
+        // RuntimeEnv is checked for the KMS factory first, then the global registry.
         let runtime_env = context.runtime_env();
         let writer_factory =
             crate::operations::write::encryption::writer_factory_from_configuration(

@@ -58,8 +58,7 @@ pub struct WriterConfig {
 impl WriterConfig {
     /// Create a new instance of [WriterConfig].
     ///
-    /// Pass `writer_properties_factory: None` to use the default SNAPPY factory (no encryption).
-    /// Pass an explicit factory (e.g. from `WriterEncryptionConfig`) to enable encryption.
+    /// `writer_properties_factory: None` means the default SNAPPY factory, without encryption.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         table_schema: ArrowSchemaRef,

@@ -49,13 +49,10 @@ pub struct RecordBatchWriter {
     table_config: TableConfigState,
 }
 
-/// What the writer knows about its table's configuration.
-///
-/// [`try_new`](RecordBatchWriter::try_new) builds a writer without loading the table, so
-/// the configuration that decides whether files must be encrypted is not known until the
-/// first write. Files for an encrypted table must never be written in plaintext, so the
-/// table is loaded before the first upload, and a table that does not exist yet is checked
-/// again before any file is handed out, since the caller may create it in the meantime.
+/// What the writer knows about its table's configuration. [`RecordBatchWriter::try_new`]
+/// does not load the table, so whether files must be encrypted is unknown until the first
+/// write: the table is loaded before the first upload, and one that did not exist then is
+/// checked again before files are handed out, since the caller may create it meanwhile.
 enum TableConfigState {
     /// The configuration has been applied to the writer.
     Applied,
@@ -95,11 +92,10 @@ impl std::fmt::Debug for RecordBatchWriter {
 impl RecordBatchWriter {
     /// Create a new [`RecordBatchWriter`] instance.
     ///
-    /// The table is not loaded here. It is loaded on the first write, so that the writer
-    /// picks up its configuration, in particular whether its files must be encrypted,
-    /// before anything is uploaded. Callers that already hold a loaded table should use
-    /// [`for_table`](Self::for_table), which needs no extra load. A table that does not
-    /// exist yet is checked again when files are handed out; if it was created encrypted
+    /// The table is loaded on the first write rather than here, before anything is
+    /// uploaded, so the writer picks up whether its files must be encrypted. Callers that
+    /// hold a loaded table should use [`for_table`](Self::for_table). A table that does not
+    /// exist then is checked again when files are handed out; if it was created encrypted
     /// in the meantime, the writer's plaintext files are refused.
     pub fn try_new(
         table_uri: impl AsRef<str>,

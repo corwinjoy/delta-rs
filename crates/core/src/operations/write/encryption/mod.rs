@@ -1,27 +1,15 @@
-//! Writer-side encryption support driven by Delta table properties.
+//! Writer-side encryption, driven by a table's `delta.encryption.*` properties.
 //!
-//! Encryption configuration is read from the table's `delta.encryption.*` properties
-//! (stored in the Delta log) rather than passed as a runtime API parameter.
-//! This means that once a table is created with encryption properties all subsequent
-//! write operations automatically encrypt output files — no per-operation configuration
-//! is required from the caller.
+//! [`writer_factory`] reads the properties from the raw metadata configuration, finds the
+//! `EncryptionFactory` registered as `delta.encryption.kms_id` (in the session's
+//! `RuntimeEnv`, else the process-wide registry) and wraps it in a
+//! [`WriterPropertiesFactory`] that asks it for each file's encryption keys, passing the
+//! file's table-relative path. Nothing is configured per operation: once a table is created
+//! encrypted, every write encrypts.
 //!
-//! # Write-time key flow
-//!
-//! 1. [`writer_factory`] reads `delta.encryption.*` from the raw metadata configuration
-//!    of the table's [`TableConfiguration`].
-//! 2. It looks up the user-registered `EncryptionFactory` from DataFusion's
-//!    `RuntimeEnv` using the `delta.encryption.kms_id` property value.
-//! 3. It wraps the factory in a `KmsWriterPropertiesFactory`, which implements
-//!    [`WriterPropertiesFactory`].
-//! 4. Each new parquet file calls [`WriterPropertiesFactory::create_writer_properties`]
-//!    **with the actual file path** so that the factory can derive the encryption key
-//!    from the path (AAD — Additional Authenticated Data).
-//!
-//! Encrypting requires the `encryption` cargo feature: `enabled.rs` holds the KMS
-//! factory and the factory registry, and `disabled.rs` stands in for builds without
-//! the feature, where resolving an encrypted table's configuration fails instead of
-//! writing plaintext. This module holds what both builds share.
+//! Encrypting needs the `encryption` cargo feature: `enabled.rs` holds the KMS-backed
+//! factory and the registry, `disabled.rs` refuses encrypted tables instead of writing
+//! plaintext. This module holds what both builds share.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -54,12 +42,11 @@ pub use crate::writer::writer_factory::{
 
 /// The [`WriterPropertiesFactory`] a table's files are written with.
 ///
-/// Table encryption always takes precedence: for a table with `delta.encryption.*`
-/// properties the factory encrypts every file, with `base_properties` (the caller's
-/// `WriterProperties`, or the delta-rs SNAPPY defaults) supplying the non-crypto settings
-/// such as compression and row-group sizing. For any other table the factory hands out
-/// `base_properties` unchanged. Errors on an invalid encryption configuration or an
-/// unregistered KMS factory rather than writing plaintext into an encrypted table.
+/// For a table with `delta.encryption.*` properties it encrypts every file, with
+/// `base_properties` (the caller's `WriterProperties`, or the delta-rs SNAPPY defaults) as
+/// the non-crypto settings: table encryption always wins over the caller's settings. For
+/// any other table it hands out `base_properties` unchanged. An invalid configuration or
+/// an unregistered KMS factory is an error, never a plaintext write.
 pub fn writer_factory(
     config: &TableConfiguration,
     session: &dyn Session,

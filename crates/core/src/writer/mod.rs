@@ -47,16 +47,11 @@ pub(crate) fn ensure_legacy_writer_supports_table(
     Ok(())
 }
 
-/// Resolve the encryption writer-properties factory for a legacy writer from
-/// the table's configuration.
-///
-/// The legacy writers carry no DataFusion session, so the factory is looked up
-/// in the process-wide registry only (see
-/// [`register_encryption_factory`](crate::operations::write::encryption::register_encryption_factory)
-/// when the `datafusion` and `encryption` features are enabled). Returns `Ok(None)`
-/// for unencrypted tables; errors on an invalid configuration, an unregistered
-/// factory, or (without both features) any encrypted table, never silently writing
-/// plaintext into an encrypted table.
+/// The encryption factory for a legacy writer, from the table's configuration: `None` for
+/// an unencrypted table. The legacy writers have no DataFusion session, so the factory
+/// comes from the process-wide registry only. An invalid configuration, an unregistered
+/// factory, or an encrypted table in a build without `datafusion` + `encryption` is an
+/// error, never a plaintext write.
 pub(crate) fn resolve_legacy_writer_encryption(
     configuration: &std::collections::HashMap<String, String>,
 ) -> Result<Option<writer_factory::WriterPropertiesFactoryRef>, DeltaTableError> {

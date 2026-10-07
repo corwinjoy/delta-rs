@@ -291,7 +291,7 @@ struct WriteSinkConfig {
     object_store: ObjectStoreRef,
     target_file_size: Option<NonZeroU64>,
     write_batch_size: Option<usize>,
-    /// Factory for creating per-file WriterProperties (supports async KMS key derivation / AAD).
+    /// Creates each file's `WriterProperties`, including any per-file encryption keys.
     writer_properties_factory: Option<WriterPropertiesFactoryRef>,
     writer_stats_config: WriterStatsConfig,
     column_mapping: Option<ColumnMappingState>,

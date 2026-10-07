@@ -584,16 +584,8 @@ fn fields_along_path<'a, 'p>(
 /// and recognises encrypted tables by their properties instead. Other engines are not
 /// protected until then.
 ///
-/// # Registering a KMS client
-/// Register an [`EncryptionFactory`] under the table's `delta.encryption.kms_id` before using
-/// the table, preferably in the process-wide registry, which operations that create their
-/// own DataFusion sessions also use:
-///
-/// ```rust,ignore
-/// deltalake_core::operations::write::encryption::register_encryption_factory("my-kms", factory);
-/// ```
-///
-/// [`EncryptionFactory`]: datafusion::execution::parquet_encryption::EncryptionFactory
+/// Before using an encrypted table, register an `EncryptionFactory` under its
+/// `delta.encryption.kms_id` (`operations::write::encryption::register_encryption_factory`).
 #[derive(Debug, Clone)]
 pub struct EncryptionConfig {
     /// The KMS client to use (`delta.encryption.kms_id`).

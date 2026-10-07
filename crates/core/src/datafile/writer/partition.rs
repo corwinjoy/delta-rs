@@ -67,7 +67,7 @@ pub struct PartitionWriterConfig {
     prefix: Path,
     /// Values for all partition columns
     partition_values: IndexMap<String, Scalar>,
-    /// Factory for creating per-file WriterProperties (supports async KMS key derivation / AAD).
+    /// Creates each file's `WriterProperties`, including any per-file encryption keys.
     pub(super) writer_properties_factory: WriterPropertiesFactoryRef,
     /// Options passed to the underlying arrow writer
     pub(super) arrow_options: ArrowWriterOptions,
@@ -91,7 +91,7 @@ pub struct PartitionWriterConfig {
 impl PartitionWriterConfig {
     /// Create a new instance of [PartitionWriterConfig].
     ///
-    /// Pass `writer_properties_factory: None` to use the default SNAPPY factory (no encryption).
+    /// `writer_properties_factory: None` means the default SNAPPY factory, without encryption.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         file_schema: ArrowSchemaRef,
