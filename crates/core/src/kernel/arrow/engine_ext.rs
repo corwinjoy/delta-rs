@@ -190,7 +190,7 @@ pub(crate) fn stats_table_properties<'a>(
 }
 
 /// Returns a physical column path, or `None` if the logical path cannot be resolved.
-fn physical_column_name(
+pub(crate) fn physical_column_name(
     logical_schema: &StructType,
     column: &ColumnName,
     column_mapping_mode: ColumnMappingMode,

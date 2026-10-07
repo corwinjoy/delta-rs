@@ -14,6 +14,7 @@ use delta_kernel::table_properties::{DataSkippingNumIndexedCols, IsolationLevel,
 
 use super::Constraint;
 use crate::errors::{DeltaResult, DeltaTableError};
+use crate::kernel::arrow::engine_ext::physical_column_name;
 
 /// Typed property keys that can be defined on a delta table
 ///
@@ -578,23 +579,6 @@ fn fields_along_path<'a, 'p>(
     Some(found)
 }
 
-/// The physical, dot-joined path of the display-name `path`, or `None` if it is not in
-/// `schema`.
-fn physical_path<'p>(
-    schema: &StructType,
-    column_mapping_mode: ColumnMappingMode,
-    path: impl IntoIterator<Item = &'p str>,
-) -> Option<String> {
-    let fields = fields_along_path(schema, path, |field, name| field.name() == name)?;
-    Some(
-        fields
-            .iter()
-            .map(|field| field.physical_name(column_mapping_mode))
-            .collect::<Vec<_>>()
-            .join("."),
-    )
-}
-
 /// Option keys passed to the [`EncryptionFactoryOptions`]: the property names without the
 /// `delta.encryption.` prefix.
 #[cfg(all(feature = "datafusion", feature = "encryption"))]
@@ -806,10 +790,11 @@ impl EncryptionConfig {
             .map_err(|e| invalid_encryption_config(format!("'{stats_prop}' is malformed: {e}")))?;
         for stats_column in stats_columns {
             let display = &stats_column;
-            let parts = stats_column.path().iter().map(String::as_str);
-            let Some(physical) = physical_path(schema, column_mapping_mode, parts) else {
+            let Some(physical) = physical_column_name(schema, &stats_column, column_mapping_mode)
+            else {
                 continue;
             };
+            let physical = physical.path().join(".");
             if self.column_keys.is_empty() {
                 return Err(invalid_encryption_config(format!(
                     "'{stats_prop}' names column '{display}', but every column of this table \
@@ -863,12 +848,15 @@ impl EncryptionConfig {
         }
         for (key_id, columns) in self.column_keys.iter_mut() {
             for column in columns.iter_mut() {
-                *column = physical_path(schema, column_mapping_mode, column.split('.'))
+                let logical = ColumnName::new(column.split('.'));
+                *column = physical_column_name(schema, &logical, column_mapping_mode)
                     .ok_or_else(|| {
                         invalid_encryption_config(format!(
                             "key '{key_id}' names column '{column}', which is not in the table"
                         ))
-                    })?;
+                    })?
+                    .path()
+                    .join(".");
             }
         }
         Ok(self)
