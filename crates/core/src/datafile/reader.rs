@@ -110,8 +110,8 @@ impl ParquetTableReader {
     pub async fn try_new(table: &DeltaTable) -> DeltaResult<Self> {
         let snapshot = table.snapshot()?;
 
-        // Guard: this reader has no decryption keys, so it would fail inside the parquet
-        // decoder, or read a plaintext footer's unencrypted columns, instead of erroring.
+        // This reader has no decryption keys: it would fail inside the parquet decoder, or
+        // read the plaintext columns of a plaintext-footer file without an error.
         if EncryptionConfig::is_configured(snapshot.metadata().configuration()) {
             return Err(not_supported("encryption"));
         }
