@@ -227,6 +227,12 @@ impl CreateBuilder {
         self
     }
 
+    /// Specify a table property by its string key, e.g. `delta.encryption.footer_key`.
+    pub fn with_property(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.configuration.insert(key.into(), Some(value.into()));
+        self
+    }
+
     /// Additional metadata to be added to commit info
     pub fn with_commit_properties(mut self, commit_properties: CommitProperties) -> Self {
         self.commit_properties = commit_properties;

@@ -38,6 +38,11 @@ pub(crate) struct SinkFactory {
     pub(crate) partition_columns: Vec<String>,
     pub(crate) writer_properties: WriterProperties,
     pub(crate) arrow_options: ArrowWriterOptions,
+    /// Encryption factory resolved from the table's `delta.encryption.*`
+    /// properties. Sinks use it with `writer_properties` as its base settings, so a
+    /// later `set_writer_properties` applies but cannot turn encryption off.
+    pub(crate) writer_properties_factory:
+        Option<crate::writer::writer_factory::WriterPropertiesFactoryRef>,
     pub(crate) target_file_size: Option<NonZeroU64>,
     pub(crate) num_indexed_cols: DataSkippingNumIndexedCols,
     pub(crate) stats_columns: Option<Vec<String>>,
@@ -46,10 +51,19 @@ pub(crate) struct SinkFactory {
 impl SinkFactory {
     /// Open a fresh streaming sink encoding under `schema`.
     fn build(&self, schema: ArrowSchemaRef) -> DatasetSink {
+        let factory = match &self.writer_properties_factory {
+            Some(factory) => crate::writer::writer_factory::with_base_properties(
+                factory,
+                self.writer_properties.clone(),
+            ),
+            None => crate::writer::writer_factory::factory_from_writer_properties(
+                self.writer_properties.clone(),
+            ),
+        };
         let config = WriterConfig::new(
             schema,
             self.partition_columns.clone(),
-            Some(self.writer_properties.clone()),
+            Some(factory),
             Some(self.arrow_options.clone()),
             self.target_file_size,
             None,
@@ -138,6 +152,29 @@ impl WriteWindow {
     /// Set the arrow writer options used for sinks opened from now on.
     pub(crate) fn set_arrow_options(&mut self, arrow_options: ArrowWriterOptions) {
         self.factory.arrow_options = arrow_options;
+    }
+
+    /// Set the encryption factory used for sinks opened from now on.
+    pub(crate) fn set_writer_properties_factory(
+        &mut self,
+        factory: Option<crate::writer::writer_factory::WriterPropertiesFactoryRef>,
+    ) {
+        self.factory.writer_properties_factory = factory;
+    }
+
+    /// Whether sinks are opened with an encryption factory.
+    pub(crate) fn has_writer_properties_factory(&self) -> bool {
+        self.factory.writer_properties_factory.is_some()
+    }
+
+    /// Set the statistics settings used for sinks opened from now on.
+    pub(crate) fn set_stats_config(
+        &mut self,
+        num_indexed_cols: DataSkippingNumIndexedCols,
+        stats_columns: Option<Vec<String>>,
+    ) {
+        self.factory.num_indexed_cols = num_indexed_cols;
+        self.factory.stats_columns = stats_columns;
     }
 
     /// Schema widening rotates the whole window's sink, which only makes sense when
@@ -361,6 +398,7 @@ mod tests {
             partition_columns: vec![],
             writer_properties: WriterProperties::builder().build(),
             arrow_options: ArrowWriterOptions::default(),
+            writer_properties_factory: None,
             target_file_size: None,
             num_indexed_cols: DataSkippingNumIndexedCols::AllColumns,
             stats_columns: None,
@@ -468,6 +506,7 @@ mod tests {
                 .set_dictionary_enabled(false)
                 .build(),
             arrow_options: ArrowWriterOptions::default(),
+            writer_properties_factory: None,
             target_file_size: None,
             num_indexed_cols: DataSkippingNumIndexedCols::AllColumns,
             stats_columns: None,

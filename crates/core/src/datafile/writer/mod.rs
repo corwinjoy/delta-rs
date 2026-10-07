@@ -131,11 +131,27 @@ impl From<WriteError> for DeltaTableError {
 
 #[cfg(test)]
 mod test_utils {
-    use parquet::file::properties::WriterProperties;
+    use arrow_schema::SchemaRef as ArrowSchemaRef;
+    use object_store::path::Path;
+    use parquet::basic::Compression;
+    use parquet::schema::types::ColumnPath;
 
     use crate::crate_version;
+    use crate::writer::writer_factory::WriterPropertiesFactoryRef;
 
-    pub(super) fn assert_default_created_by(writer_properties: &WriterProperties) {
+    /// Assert `factory` hands out the delta-rs defaults: SNAPPY and the `created_by` tag.
+    pub(super) async fn assert_default_writer_properties(
+        factory: &WriterPropertiesFactoryRef,
+        schema: &ArrowSchemaRef,
+    ) {
+        assert_eq!(
+            factory.compression(&ColumnPath::from("id")),
+            Compression::SNAPPY
+        );
+        let writer_properties = factory
+            .create_writer_properties(&Path::from("test"), schema)
+            .await
+            .unwrap();
         assert_eq!(
             writer_properties.created_by(),
             format!("delta-rs version {}", crate_version())
