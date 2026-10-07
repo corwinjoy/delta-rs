@@ -342,9 +342,8 @@ impl CreateBuilder {
         let partition_columns = self.partition_columns.unwrap_or_default();
         // Validate the encryption settings, storing column names as physical names (RFC).
         if let Some(encryption) = EncryptionConfig::try_from_configuration(&configuration)? {
-            // Files registered at creation (e.g. by CONVERT TO DELTA) were written before
-            // the table existed, so nothing encrypted them; committing them under an
-            // encrypted configuration would mix plaintext files into an encrypted table.
+            // Files registered at creation (CONVERT TO DELTA) are plaintext, so they cannot
+            // be committed under an encrypted configuration.
             if self.actions.iter().any(|a| matches!(a, Action::Add(_))) {
                 return Err(DeltaTableError::Generic(
                     "Invalid table encryption configuration: encryption cannot be configured \
@@ -418,11 +417,9 @@ impl std::future::IntoFuture for CreateBuilder {
                             .try_collect::<Vec<_>>()
                             .await?;
                         actions.extend(remove_actions);
-                        // Replacing a table is the one way to change its encryption, since
-                        // every data file is removed in this commit. The removed files and
-                        // the old log entries with their statistics are still in storage
-                        // until vacuum and log cleanup, so say so when the encryption
-                        // changes.
+                        // Replace is the one way to change encryption, since every data
+                        // file is removed here; warn that the removed files and old log
+                        // statistics stay in storage until vacuum and log cleanup.
                         let old_configuration = table.snapshot()?.metadata().configuration();
                         let new_configuration = actions.iter().find_map(|action| match action {
                             Action::Metadata(metadata) => Some(metadata.configuration()),
