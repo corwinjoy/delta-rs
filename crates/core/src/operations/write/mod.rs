@@ -45,6 +45,7 @@ use parquet::file::properties::WriterProperties;
 use serde::{Deserialize, Serialize};
 use tracing::Instrument;
 
+use crate::kernel::transaction::WRITES_ENCRYPTED_TABLES;
 use crate::table::config::ENCRYPTION_PROP_PREFIX;
 use url::Url;
 
@@ -492,6 +493,10 @@ impl WriteBuilder {
                 else {
                     unreachable!("CreateBuilder always yields a Create operation")
                 };
+                // A first write creates the table and commits without a snapshot, so
+                // `can_commit` never checks it: refuse encryption here while this build
+                // cannot encrypt, or the new table would hold plaintext files.
+                PROTOCOL.check_encryption(metadata.configuration(), WRITES_ENCRYPTED_TABLES)?;
                 Ok((
                     actions,
                     TableConfiguration::try_new(metadata, protocol, location, 0)?,
@@ -853,6 +858,41 @@ mod tests {
             matches!(expect_write_error(&err), WriteError::AlreadyExists(_)),
             "{err}"
         );
+    }
+
+    /// A first write creates the table and commits without a snapshot, bypassing
+    /// `can_commit`, so the encryption write check runs in the write itself: until this
+    /// build can encrypt, the table is not created and no file is uploaded.
+    #[tokio::test]
+    async fn test_first_write_with_encryption_needs_write_support() {
+        use futures::TryStreamExt as _;
+
+        use crate::kernel::transaction::{TransactionError, WRITES_ENCRYPTED_TABLES};
+
+        if WRITES_ENCRYPTED_TABLES {
+            return;
+        }
+        let table = DeltaTable::new_in_memory();
+        let store = table.object_store();
+        let err = table
+            .write(vec![get_record_batch(None, false)])
+            .with_configuration([
+                ("delta.encryption.kms_id", Some("kms")),
+                ("delta.encryption.footer_key", Some("fk")),
+            ])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DeltaTableError::Transaction {
+                    source: TransactionError::UnsupportedTableFeatures(_)
+                }
+            ),
+            "{err:?}"
+        );
+        let objects: Vec<_> = store.list(None).try_collect().await.unwrap();
+        assert!(objects.is_empty(), "{objects:?}");
     }
 
     #[tokio::test]

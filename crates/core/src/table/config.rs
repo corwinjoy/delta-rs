@@ -558,16 +558,16 @@ fn invalid_encryption_config(msg: String) -> DeltaTableError {
     DeltaTableError::Generic(format!("Invalid table encryption configuration: {msg}"))
 }
 
-/// The fields along the dot-separated `path`, each matched by `matches(field, name)` within
-/// the previous one's struct, or `None` if any part is missing.
-fn fields_along_path<'a>(
+/// The fields along `path`, each matched by `matches(field, name)` within the previous
+/// one's struct, or `None` if any part is missing.
+fn fields_along_path<'a, 'p>(
     schema: &'a StructType,
-    path: &str,
+    path: impl IntoIterator<Item = &'p str>,
     matches: impl Fn(&StructField, &str) -> bool,
 ) -> Option<Vec<&'a StructField>> {
     let mut fields = Some(schema);
     let mut found = Vec::new();
-    for part in path.split('.') {
+    for part in path {
         let field = fields?.fields().find(|f| matches(f, part))?;
         fields = match field.data_type() {
             DataType::Struct(inner) => Some(inner.as_ref()),
@@ -578,13 +578,14 @@ fn fields_along_path<'a>(
     Some(found)
 }
 
-/// The physical path of the display-name path `column`, or `None` if it is not in `schema`.
-fn physical_path(
+/// The physical, dot-joined path of the display-name `path`, or `None` if it is not in
+/// `schema`.
+fn physical_path<'p>(
     schema: &StructType,
     column_mapping_mode: ColumnMappingMode,
-    column: &str,
+    path: impl IntoIterator<Item = &'p str>,
 ) -> Option<String> {
-    let fields = fields_along_path(schema, column, |field, name| field.name() == name)?;
+    let fields = fields_along_path(schema, path, |field, name| field.name() == name)?;
     Some(
         fields
             .iter()
@@ -765,7 +766,7 @@ impl EncryptionConfig {
                 let by_physical_name = |field: &StructField, name: &str| {
                     field.physical_name(column_mapping_mode) == name
                 };
-                if fields_along_path(schema, column, by_physical_name).is_none() {
+                if fields_along_path(schema, column.split('.'), by_physical_name).is_none() {
                     return Err(invalid_encryption_config(format!(
                         "key '{key_id}' names column '{column}', which is not in the table"
                     )));
@@ -804,8 +805,9 @@ impl EncryptionConfig {
         let stats_columns = ColumnName::parse_column_name_list(value)
             .map_err(|e| invalid_encryption_config(format!("'{stats_prop}' is malformed: {e}")))?;
         for stats_column in stats_columns {
-            let display = stats_column.path().join(".");
-            let Some(physical) = physical_path(schema, column_mapping_mode, &display) else {
+            let display = &stats_column;
+            let parts = stats_column.path().iter().map(String::as_str);
+            let Some(physical) = physical_path(schema, column_mapping_mode, parts) else {
                 continue;
             };
             if self.column_keys.is_empty() {
@@ -861,11 +863,12 @@ impl EncryptionConfig {
         }
         for (key_id, columns) in self.column_keys.iter_mut() {
             for column in columns.iter_mut() {
-                *column = physical_path(schema, column_mapping_mode, column).ok_or_else(|| {
-                    invalid_encryption_config(format!(
-                        "key '{key_id}' names column '{column}', which is not in the table"
-                    ))
-                })?;
+                *column = physical_path(schema, column_mapping_mode, column.split('.'))
+                    .ok_or_else(|| {
+                        invalid_encryption_config(format!(
+                            "key '{key_id}' names column '{column}', which is not in the table"
+                        ))
+                    })?;
             }
         }
         Ok(self)
@@ -1217,6 +1220,14 @@ mod encryption_tests {
         }
         let err = config_with_column_keys("")
             .validate_stats_columns(&stats("id"), &schema(), mode)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("every column"), "{err}");
+
+        // A quoted field whose name contains a dot is one component, not a nested path.
+        let dotted = StructType::try_new([StructField::nullable("a.b", DataType::STRING)]).unwrap();
+        let err = config_with_column_keys("")
+            .validate_stats_columns(&stats("`a.b`"), &dotted, mode)
             .unwrap_err()
             .to_string();
         assert!(err.contains("every column"), "{err}");
