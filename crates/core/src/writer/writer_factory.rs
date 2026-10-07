@@ -31,17 +31,6 @@ pub trait WriterPropertiesFactory: Send + Sync + Debug + 'static {
     /// Writers read them before any file's own properties are created.
     fn base_properties(&self) -> &WriterProperties;
 
-    /// The row-group row limit of the base properties, if any; the writer slices batches
-    /// at row-group boundaries before any properties are created.
-    fn max_row_group_row_count(&self) -> Option<usize> {
-        None
-    }
-
-    /// The row-group byte limit of the base properties, if any.
-    fn max_row_group_bytes(&self) -> Option<usize> {
-        None
-    }
-
     /// The [`WriterProperties`] for a new file, called once just before it is opened.
     async fn create_writer_properties(
         &self,
@@ -85,14 +74,6 @@ pub fn with_base_properties(
 impl WriterPropertiesFactory for WriterProperties {
     fn base_properties(&self) -> &WriterProperties {
         self
-    }
-
-    fn max_row_group_row_count(&self) -> Option<usize> {
-        WriterProperties::max_row_group_row_count(self)
-    }
-
-    fn max_row_group_bytes(&self) -> Option<usize> {
-        WriterProperties::max_row_group_bytes(self)
     }
 
     async fn create_writer_properties(
@@ -148,16 +129,8 @@ struct PrefixedWriterPropertiesFactory {
 
 #[async_trait]
 impl WriterPropertiesFactory for PrefixedWriterPropertiesFactory {
-    fn compression(&self, column_path: &ColumnPath) -> Compression {
-        self.inner.compression(column_path)
-    }
-
-    fn max_row_group_row_count(&self) -> Option<usize> {
-        self.inner.max_row_group_row_count()
-    }
-
-    fn max_row_group_bytes(&self) -> Option<usize> {
-        self.inner.max_row_group_bytes()
+    fn base_properties(&self) -> &WriterProperties {
+        self.inner.base_properties()
     }
 
     async fn create_writer_properties(
@@ -193,13 +166,14 @@ mod tests {
     /// Records the paths it is asked to create properties for.
     #[derive(Debug, Default)]
     struct RecordingFactory {
+        base: WriterProperties,
         paths: Arc<Mutex<Vec<Path>>>,
     }
 
     #[async_trait]
     impl WriterPropertiesFactory for RecordingFactory {
-        fn compression(&self, _column_path: &ColumnPath) -> Compression {
-            Compression::SNAPPY
+        fn base_properties(&self) -> &WriterProperties {
+            &self.base
         }
 
         async fn create_writer_properties(

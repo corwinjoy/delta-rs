@@ -145,7 +145,9 @@ mod test_utils {
         schema: &ArrowSchemaRef,
     ) {
         assert_eq!(
-            factory.compression(&ColumnPath::from("id")),
+            factory
+                .base_properties()
+                .compression(&ColumnPath::from("id")),
             Compression::SNAPPY
         );
         let writer_properties = factory

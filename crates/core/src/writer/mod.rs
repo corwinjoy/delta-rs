@@ -55,33 +55,30 @@ pub(crate) fn ensure_legacy_writer_supports_table(
 /// [`register_encryption_factory`](crate::operations::write::encryption::register_encryption_factory)
 /// when the `datafusion` and `encryption` features are enabled). Returns `Ok(None)`
 /// for unencrypted tables; errors on an invalid configuration, an unregistered
-/// factory, or (without both features) any encrypted table — never
-/// silently writing plaintext into an encrypted table.
+/// factory, or (without both features) any encrypted table, never silently writing
+/// plaintext into an encrypted table.
 pub(crate) fn resolve_legacy_writer_encryption(
     configuration: &std::collections::HashMap<String, String>,
 ) -> Result<Option<writer_factory::WriterPropertiesFactoryRef>, DeltaTableError> {
-    #[cfg(all(feature = "datafusion", feature = "encryption"))]
-    {
-        Ok(
-            crate::operations::write::encryption::WriterEncryptionConfig::from_configuration(
-                configuration,
-                None,
-                None,
-            )?
-            .factory,
-        )
+    if !crate::table::config::EncryptionConfig::is_configured(configuration) {
+        return Ok(None);
     }
-    #[cfg(not(all(feature = "datafusion", feature = "encryption")))]
+    #[cfg(feature = "datafusion")]
     {
-        if crate::table::config::EncryptionConfig::try_from_configuration(configuration)?.is_some()
-        {
-            return Err(DeltaTableError::Generic(
-                "This table's delta.encryption.* properties require the 'datafusion' and \
-                 'encryption' features; the legacy writers cannot encrypt without them"
-                    .to_string(),
-            ));
-        }
-        Ok(None)
+        crate::operations::write::encryption::writer_factory_from_configuration(
+            configuration,
+            None,
+            None,
+        )
+        .map(Some)
+    }
+    #[cfg(not(feature = "datafusion"))]
+    {
+        Err(DeltaTableError::Generic(
+            "This table's delta.encryption.* properties require the 'datafusion' and \
+             'encryption' features; the legacy writers cannot encrypt without them"
+                .to_string(),
+        ))
     }
 }
 

@@ -21,8 +21,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use super::encryption::{
-    WriterEncryptionConfig, WriterPropertiesFactoryRef, default_writer_properties_factory,
-    factory_from_writer_properties,
+    WriterPropertiesFactoryRef, default_writer_properties_factory, writer_factory,
 };
 use crate::DeltaTableError;
 use crate::datafile::writer::{
@@ -454,25 +453,9 @@ async fn write_plan(
         plan = drop_internal_column(plan, insert_marker_column)?;
     }
 
-    // Resolve the writer factory. Table encryption always takes precedence to prevent
-    // accidental plaintext writes: even when the caller supplies WriterProperties, the
-    // encrypted factory is used (with the caller's properties as its non-crypto base)
-    // so files are always encrypted for encrypted tables. An unencrypted caller
-    // override is honoured only for truly unencrypted tables.
-    let writer_factory = match WriterEncryptionConfig::from_config(
-        table_config,
-        session,
-        exec_options.writer_properties.clone(),
-    )?
-    .factory
-    {
-        Some(factory) => Some(factory),
-        None => exec_options
-            .writer_properties
-            .map(factory_from_writer_properties),
-    };
+    let writer_factory = writer_factory(table_config, session, exec_options.writer_properties)?;
     let writer_factory = match file_path_prefix {
-        Some(prefix) => writer_factory.map(|factory| with_path_prefix(factory, prefix)),
+        Some(prefix) => with_path_prefix(writer_factory, prefix),
         None => writer_factory,
     };
 
@@ -481,7 +464,7 @@ async fn write_plan(
         object_store,
         target_file_size: exec_options.target_file_size,
         write_batch_size: exec_options.write_batch_size,
-        writer_properties_factory: writer_factory,
+        writer_properties_factory: Some(writer_factory),
         writer_stats_config: WriterStatsConfig::from_config(table_config),
         column_mapping: ColumnMappingState::from_table_config(table_config),
         arrow_options: exec_options.arrow_options,
@@ -537,12 +520,7 @@ pub(crate) async fn write_exec_plan(
             .into_writer_properties_builder()?
             .build(),
     };
-    // Table encryption always takes precedence to prevent accidental plaintext
-    // writes; the base properties still supply compression/row-group settings.
-    let writer_factory =
-        WriterEncryptionConfig::from_config(table_config, session, Some(base_properties.clone()))?
-            .factory
-            .unwrap_or_else(|| factory_from_writer_properties(base_properties));
+    let writer_factory = writer_factory(table_config, session, Some(base_properties))?;
     let object_store = log_store.object_store();
     let sink_config = WriteSinkConfig {
         partition_columns: table_config.metadata().partition_columns().to_vec(),

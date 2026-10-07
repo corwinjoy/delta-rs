@@ -62,7 +62,7 @@ fn register_fresh_factory() -> String {
 }
 
 fn table_url(uri: &str) -> Url {
-    Url::parse(&format!("file://{}", uri)).unwrap()
+    Url::from_directory_path(uri).unwrap()
 }
 
 async fn create_encrypted_table(uri: &str, kms_id: &str) -> DeltaResult<()> {
@@ -130,17 +130,6 @@ async fn assert_all_parquets_encrypted(dir: &std::path::Path) {
 // Tests available at the enc-write-path stage
 // (no DataFusion read-back required)
 // ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_missing_factory_returns_error() {
-    use deltalake_core::operations::write::encryption::get_encryption_factory;
-
-    let impossible_kms = format!("never-registered-{}", Uuid::new_v4());
-    assert!(
-        get_encryption_factory(&impossible_kms).is_none(),
-        "Factory should not be registered"
-    );
-}
 
 /// Critical correctness test: verify files are physically encrypted on disk.
 /// Opens each parquet file with the raw reader (no decryption) and asserts
@@ -372,7 +361,7 @@ async fn test_record_batch_writer_refuses_plaintext_for_table_created_encrypted(
 /// applies the new settings.
 #[tokio::test]
 async fn test_base_properties_keep_encryption() -> DeltaResult<()> {
-    use deltalake_core::operations::write::encryption::WriterEncryptionConfig;
+    use deltalake_core::operations::write::encryption::writer_factory_from_configuration;
     use parquet::basic::{Compression, ZstdLevel};
     use parquet::file::properties::WriterProperties;
     use parquet::schema::types::ColumnPath;
@@ -385,15 +374,18 @@ async fn test_base_properties_keep_encryption() -> DeltaResult<()> {
             "test-footer-key".to_string(),
         ),
     ]);
-    let factory = WriterEncryptionConfig::from_configuration(&configuration, None, None)?
-        .factory
-        .expect("table is encrypted");
+    let factory = writer_factory_from_configuration(&configuration, None, None)?;
 
     let zstd = Compression::ZSTD(ZstdLevel::try_new(3).unwrap());
     let factory = factory
         .with_base_properties(WriterProperties::builder().set_compression(zstd).build())
         .expect("the KMS factory takes base properties");
-    assert_eq!(factory.compression(&ColumnPath::from("int")), zstd);
+    assert_eq!(
+        factory
+            .base_properties()
+            .compression(&ColumnPath::from("int")),
+        zstd
+    );
     let file_properties = factory
         .create_writer_properties(
             &object_store::path::Path::from("part-0.parquet"),

@@ -11,7 +11,7 @@ use arrow_array::{ArrayRef, RecordBatch, new_null_array};
 use arrow_schema::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef};
 use delta_kernel::engine::arrow_conversion::{TryIntoArrow, TryIntoKernel};
 use delta_kernel::expressions::Scalar;
-use delta_kernel::table_properties::DataSkippingNumIndexedCols;
+use delta_kernel::table_properties::{DataSkippingNumIndexedCols, TableProperties};
 use indexmap::IndexMap;
 use object_store::ObjectStore;
 use parquet::file::properties::WriterProperties;
@@ -29,7 +29,7 @@ use crate::kernel::{Action, Add};
 use crate::kernel::{MetadataExt as _, Version};
 use crate::parquet_utils::default_writer_properties;
 use crate::table::builder::DeltaTableBuilder;
-use crate::table::config::{DEFAULT_NUM_INDEX_COLS, EncryptionConfig};
+use crate::table::config::{EncryptionConfig, TablePropertiesExt as _};
 use crate::writer::utils::{arrow_schema_without_partitions, record_batch_without_partitions};
 
 /// Writes messages to a delta lake table.
@@ -78,20 +78,12 @@ impl TableConfigState {
 fn stats_config(
     configuration: &HashMap<String, String>,
 ) -> (DataSkippingNumIndexedCols, Option<Vec<String>>) {
-    let num_indexed_cols = configuration
-        .get("delta.dataSkippingNumIndexedCols")
-        .and_then(|v| {
-            v.parse::<u64>()
-                .ok()
-                .map(DataSkippingNumIndexedCols::NumColumns)
-        })
-        .unwrap_or(DataSkippingNumIndexedCols::NumColumns(
-            DEFAULT_NUM_INDEX_COLS,
-        ));
-    let stats_columns = configuration
-        .get("delta.dataSkippingStatsColumns")
-        .map(|v| v.split(',').map(|s| s.to_string()).collect());
-    (num_indexed_cols, stats_columns)
+    let properties = TableProperties::from(configuration.iter());
+    let stats_columns = properties
+        .data_skipping_stats_columns
+        .as_ref()
+        .map(|columns| columns.iter().map(ToString::to_string).collect());
+    (properties.num_indexed_cols(), stats_columns)
 }
 
 impl std::fmt::Debug for RecordBatchWriter {

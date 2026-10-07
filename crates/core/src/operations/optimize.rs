@@ -58,7 +58,7 @@ use crate::kernel::{Action, Add, DataType, PartitionsExt, Remove, StructType, Ve
 use crate::kernel::{EagerSnapshot, resolve_snapshot};
 use crate::logstore::with_operation;
 use crate::logstore::{LogStore, LogStoreRef, ObjectStoreRef};
-use crate::operations::write::encryption::factory_from_writer_properties;
+use crate::operations::write::encryption::writer_factory;
 use crate::parquet_utils::default_writer_properties;
 use crate::protocol::DeltaOperation;
 use crate::table::config::TablePropertiesExt as _;
@@ -439,16 +439,12 @@ impl<'a> std::future::IntoFuture for OptimizeBuilder<'a> {
             // outlives the scope, and a scoped store refuses every call once the scope is closed.
             update_datafusion_session(&session, &this.log_store)?;
             // Table encryption always wins, so optimize can never rewrite an
-            // encrypted table's files as plaintext; the base properties still
-            // supply compression/row-group settings.
-            use crate::operations::write::encryption::WriterEncryptionConfig;
-            let writer_properties_factory = WriterEncryptionConfig::from_config(
+            // encrypted table's files as plaintext.
+            let writer_properties_factory = writer_factory(
                 snapshot.table_configuration(),
                 &session,
-                Some(base_properties.clone()),
-            )?
-            .factory
-            .unwrap_or_else(|| factory_from_writer_properties(base_properties));
+                Some(base_properties),
+            )?;
             let plan = create_merge_plan(
                 &this.log_store,
                 this.optimize_type,

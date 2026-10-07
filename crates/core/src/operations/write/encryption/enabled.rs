@@ -10,13 +10,12 @@ use datafusion::config::EncryptionFactoryOptions;
 use datafusion::execution::parquet_encryption::EncryptionFactory;
 use datafusion::execution::runtime_env::RuntimeEnv;
 use object_store::path::Path;
-use parquet::basic::Compression;
 use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
-use parquet::schema::types::ColumnPath;
 
-use super::{WriterPropertiesFactory, WriterPropertiesFactoryRef, snappy_writer_properties};
+use super::{WriterPropertiesFactory, WriterPropertiesFactoryRef};
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::table::config::EncryptionConfig;
+use crate::writer::writer_factory::snappy_writer_properties;
 
 /// Build the writer factory for an encrypted table, with the [`EncryptionFactory`] named by
 /// its `kms_id` (see [`resolve_encryption_factory`]).
@@ -53,16 +52,8 @@ struct KmsWriterPropertiesFactory {
 
 #[async_trait]
 impl WriterPropertiesFactory for KmsWriterPropertiesFactory {
-    fn compression(&self, column_path: &ColumnPath) -> Compression {
-        self.base_properties.compression(column_path)
-    }
-
-    fn max_row_group_row_count(&self) -> Option<usize> {
-        self.base_properties.max_row_group_row_count()
-    }
-
-    fn max_row_group_bytes(&self) -> Option<usize> {
-        self.base_properties.max_row_group_bytes()
+    fn base_properties(&self) -> &WriterProperties {
+        &self.base_properties
     }
 
     fn with_base_properties(
@@ -149,9 +140,7 @@ pub fn register_encryption_factory(id: impl Into<String>, factory: Arc<dyn Encry
 }
 
 /// Look up a previously registered [`EncryptionFactory`] by id.
-///
-/// Returns `None` if no factory with that id has been registered.
-pub fn get_encryption_factory(id: &str) -> Option<Arc<dyn EncryptionFactory>> {
+fn get_encryption_factory(id: &str) -> Option<Arc<dyn EncryptionFactory>> {
     GLOBAL_FACTORY_REGISTRY
         .get(id)
         .map(|e| Arc::clone(e.value()))

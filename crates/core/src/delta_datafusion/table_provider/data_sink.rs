@@ -179,19 +179,18 @@ impl DeltaDataSink {
         // properties (task RuntimeEnv first, then the global registry).
         let runtime_env = context.runtime_env();
         let writer_factory =
-            crate::operations::write::encryption::WriterEncryptionConfig::from_configuration(
+            crate::operations::write::encryption::writer_factory_from_configuration(
                 self.snapshot
                     .table_configuration()
                     .metadata()
                     .configuration(),
                 Some(runtime_env.as_ref()),
                 None,
-            )?
-            .factory;
+            )?;
         let config = WriterConfig::new(
             table_schema,
             physical_partition_columns,
-            writer_factory,
+            Some(writer_factory),
             None,
             Some(table_props.target_file_size()),
             None,

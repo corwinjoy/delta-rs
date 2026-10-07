@@ -134,6 +134,7 @@ impl PartitionWriterConfig {
     /// extension.
     fn compression(&self) -> Compression {
         self.writer_properties_factory
+            .base_properties()
             .compression(&parquet::schema::types::ColumnPath::new(Vec::new()))
     }
 
@@ -271,11 +272,11 @@ impl PartitionWriter {
         if !self.config.roll_on_row_group_boundary {
             return None;
         }
-        let factory = &self.config.writer_properties_factory;
-        if factory.max_row_group_bytes().is_some() {
+        let properties = self.config.writer_properties_factory.base_properties();
+        if properties.max_row_group_bytes().is_some() {
             return None;
         }
-        let max_rows = factory.max_row_group_row_count()?;
+        let max_rows = properties.max_row_group_row_count()?;
         Some(max_rows - (self.writer.in_progress_rows() % max_rows))
     }
 
@@ -307,6 +308,7 @@ impl PartitionWriter {
             let step = self
                 .config
                 .writer_properties_factory
+                .base_properties()
                 .max_row_group_row_count()
                 .unwrap_or(self.config.write_batch_size)
                 .max(1);
@@ -529,7 +531,7 @@ mod tests {
         let batch = RecordBatch::try_new(schema, vec![values(), values()]).unwrap();
 
         let props = WriterProperties::builder()
-            .set_compression(parquet::basic::Compression::UNCOMPRESSED)
+            .set_compression(Compression::UNCOMPRESSED)
             .set_dictionary_enabled(false)
             .build();
         let config = PartitionWriterConfig::try_new(

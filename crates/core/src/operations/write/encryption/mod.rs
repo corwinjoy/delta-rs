@@ -8,8 +8,8 @@
 //!
 //! # Write-time key flow
 //!
-//! 1. [`WriterEncryptionConfig::from_config`] reads `delta.encryption.*` from the raw
-//!    metadata configuration of the table's [`TableConfiguration`].
+//! 1. [`writer_factory`] reads `delta.encryption.*` from the raw metadata configuration
+//!    of the table's [`TableConfiguration`].
 //! 2. It looks up the user-registered `EncryptionFactory` from DataFusion's
 //!    `RuntimeEnv` using the `delta.encryption.kms_id` property value.
 //! 3. It wraps the factory in a `KmsWriterPropertiesFactory`, which implements
@@ -24,6 +24,7 @@
 //! writing plaintext. This module holds what both builds share.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use datafusion::catalog::Session;
 use datafusion::execution::runtime_env::RuntimeEnv;
@@ -41,71 +42,50 @@ mod backend;
 pub mod kms;
 
 #[cfg(feature = "encryption")]
-pub use backend::{
-    get_encryption_factory, register_encryption_factory, resolve_encryption_factory,
-};
+pub use backend::{register_encryption_factory, resolve_encryption_factory};
 #[cfg(feature = "encryption")]
 pub use kms::{KmsClient, KmsEncryptionFactory};
 // Re-export the factory types that are defined in the non-datafusion `writer_factory` module
 // so callers can keep importing them from this module.
 pub use crate::writer::writer_factory::{
     WriterPropertiesFactory, WriterPropertiesFactoryRef, default_writer_properties_factory,
-    factory_from_writer_properties, snappy_writer_properties,
+    factory_from_writer_properties,
 };
 
-// ---------------------------------------------------------------------------
-// WriterEncryptionConfig — resolved from TableConfiguration + Session
-// ---------------------------------------------------------------------------
-
-/// Encryption configuration for the write path, resolved from Delta table properties.
+/// The [`WriterPropertiesFactory`] a table's files are written with.
 ///
-/// Create via [`WriterEncryptionConfig::from_config`]; then pass
-/// [`WriterEncryptionConfig::factory`] to [`WriterConfig::new`].
-#[derive(Debug, Default)]
-pub struct WriterEncryptionConfig {
-    /// `None` when the table has no encryption properties.
-    pub factory: Option<WriterPropertiesFactoryRef>,
+/// Table encryption always takes precedence: for a table with `delta.encryption.*`
+/// properties the factory encrypts every file, with `base_properties` (the caller's
+/// `WriterProperties`, or the delta-rs SNAPPY defaults) supplying the non-crypto settings
+/// such as compression and row-group sizing. For any other table the factory hands out
+/// `base_properties` unchanged. Errors on an invalid encryption configuration or an
+/// unregistered KMS factory rather than writing plaintext into an encrypted table.
+pub fn writer_factory(
+    config: &TableConfiguration,
+    session: &dyn Session,
+    base_properties: Option<WriterProperties>,
+) -> DeltaResult<WriterPropertiesFactoryRef> {
+    let env = session.runtime_env();
+    writer_factory_from_configuration(
+        config.metadata().configuration(),
+        Some(env.as_ref()),
+        base_properties,
+    )
 }
 
-impl WriterEncryptionConfig {
-    /// Resolve from a [`TableConfiguration`] (used in `write_exec_plan` which receives
-    /// `table_config: &TableConfiguration` directly).
-    ///
-    /// `base_properties` supplies the non-crypto writer settings (compression,
-    /// row-group sizing, statistics, …) the encrypted factory encodes files
-    /// with — pass the caller's `WriterProperties` so an encrypted table honors
-    /// them; `None` uses the delta-rs SNAPPY defaults. Encryption itself always
-    /// comes from the table properties and cannot be overridden by the caller.
-    pub fn from_config(
-        config: &TableConfiguration,
-        session: &dyn Session,
-        base_properties: Option<WriterProperties>,
-    ) -> DeltaResult<Self> {
-        let env = session.runtime_env();
-        Self::from_configuration(
-            config.metadata().configuration(),
-            Some(env.as_ref()),
-            base_properties,
-        )
-    }
-
-    /// Resolve from a table's raw metadata `configuration` with an optional `RuntimeEnv`.
-    ///
-    /// The env (a session's or a `TaskContext`'s) is checked first; without one
-    /// (e.g. the legacy writers, which have no DataFusion context), the factory
-    /// is looked up in the global registry only.
-    pub fn from_configuration(
-        configuration: &HashMap<String, String>,
-        runtime_env: Option<&RuntimeEnv>,
-        base_properties: Option<WriterProperties>,
-    ) -> DeltaResult<Self> {
-        // try_from_configuration errors when the encryption configuration is
-        // invalid, preventing silent plaintext writes on misconfigured tables.
-        let Some(enc) = EncryptionConfig::try_from_configuration(configuration)? else {
-            return Ok(Self { factory: None });
-        };
-        Ok(Self {
-            factory: Some(backend::resolve(enc, runtime_env, base_properties)?),
-        })
+/// [`writer_factory`] for a table's raw metadata `configuration` and an optional
+/// `RuntimeEnv`. The env (a session's or a `TaskContext`'s) is checked for the KMS factory
+/// first; without one (e.g. the legacy writers, which have no DataFusion context), only the
+/// global registry is.
+pub fn writer_factory_from_configuration(
+    configuration: &HashMap<String, String>,
+    runtime_env: Option<&RuntimeEnv>,
+    base_properties: Option<WriterProperties>,
+) -> DeltaResult<WriterPropertiesFactoryRef> {
+    match EncryptionConfig::try_from_configuration(configuration)? {
+        Some(enc) => backend::resolve(enc, runtime_env, base_properties),
+        None => Ok(Arc::new(base_properties.unwrap_or_else(
+            crate::writer::writer_factory::snappy_writer_properties,
+        ))),
     }
 }
