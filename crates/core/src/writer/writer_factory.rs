@@ -11,7 +11,6 @@ use async_trait::async_trait;
 use object_store::path::Path;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
-use parquet::schema::types::ColumnPath;
 
 use crate::errors::DeltaResult;
 use crate::parquet_utils::default_writer_properties;
@@ -23,9 +22,9 @@ use crate::parquet_utils::default_writer_properties;
 /// properties for every file.
 #[async_trait]
 pub trait WriterPropertiesFactory: Send + Sync + Debug + 'static {
-    /// The compression for `column_path`; the writer uses it to pick the file extension
-    /// before any properties are created.
-    fn compression(&self, column_path: &ColumnPath) -> Compression;
+    /// The base settings every file is written with (compression, row-group limits).
+    /// Writers read them before any file's own properties are created.
+    fn base_properties(&self) -> &WriterProperties;
 
     /// The [`WriterProperties`] for a new file, called once just before it is opened.
     /// Implementations using AAD must derive keys from `file_path`.
@@ -42,9 +41,8 @@ pub type WriterPropertiesFactoryRef = Arc<dyn WriterPropertiesFactory>;
 /// Fixed properties for every file: the factory for unencrypted tables.
 #[async_trait]
 impl WriterPropertiesFactory for WriterProperties {
-    fn compression(&self, column_path: &ColumnPath) -> Compression {
-        // The inherent `WriterProperties::compression`, not this trait method.
-        WriterProperties::compression(self, column_path)
+    fn base_properties(&self) -> &WriterProperties {
+        self
     }
 
     async fn create_writer_properties(
