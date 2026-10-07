@@ -425,22 +425,6 @@ impl WriteBuilder {
                     PROTOCOL.check_append_only(snapshot)?;
                 }
 
-                // `configuration` only applies when the write creates the table. Dropping
-                // encryption keys silently would leave the user believing the table is
-                // encrypted, so refuse them.
-                if let Some(key) = self
-                    .configuration
-                    .keys()
-                    .find(|key| key.starts_with(ENCRYPTION_PROP_PREFIX))
-                {
-                    return Err(DeltaTableError::Generic(format!(
-                        "'{key}' was given in the write configuration, but the table already \
-                         exists and its configuration is not changed by a write; to encrypt \
-                         an existing table, recreate it with create-or-replace, or write to \
-                         a new table"
-                    )));
-                }
-
                 PROTOCOL.can_write_to(snapshot)?;
 
                 if self.schema_mode.is_none() {
@@ -453,7 +437,32 @@ impl WriteBuilder {
                     SaveMode::ErrorIfExists => {
                         Err(WriteError::AlreadyExists(self.log_store.root_url().clone()).into())
                     }
-                    _ => Ok((vec![], snapshot.table_configuration().clone())),
+                    _ => {
+                        // `configuration` only applies when the write creates the table.
+                        // Keys that match the table are fine, so a pipeline can pass the
+                        // same configuration on every run; encryption keys that differ
+                        // would be dropped silently and leave the user believing the
+                        // table is encrypted, so refuse those.
+                        let current = snapshot.metadata().configuration();
+                        fn value(v: Option<&String>) -> Option<&str> {
+                            v.map(|v| v.trim()).filter(|v| !v.is_empty())
+                        }
+                        if let Some((key, _)) = self
+                            .configuration
+                            .iter()
+                            .filter(|(key, _)| key.starts_with(ENCRYPTION_PROP_PREFIX))
+                            .find(|(key, given)| value(given.as_ref()) != value(current.get(*key)))
+                        {
+                            return Err(DeltaTableError::Generic(format!(
+                                "'{key}' was given in the write configuration with a value \
+                                 that differs from the table's, but a write does not change \
+                                 the configuration of an existing table; to change its \
+                                 encryption, recreate it with create-or-replace, or write to \
+                                 a new table"
+                            )));
+                        }
+                        Ok((vec![], snapshot.table_configuration().clone()))
+                    }
                 }
             }
             None => {
@@ -807,9 +816,10 @@ mod tests {
     }
 
     /// Encryption properties in the configuration of a write to an existing table are
-    /// refused rather than silently dropped.
+    /// refused when they differ from the table's, rather than silently dropped; matching
+    /// ones pass, so a pipeline can send the same configuration on every run.
     #[tokio::test]
-    async fn test_write_refuses_encryption_configuration_on_existing_table() {
+    async fn test_write_refuses_changed_encryption_configuration_on_existing_table() {
         let table = setup_table_with_configuration(TableProperty::AppendOnly, Some("false")).await;
         let batch = get_record_batch(None, false);
         for mode in [SaveMode::Append, SaveMode::Overwrite] {
@@ -824,6 +834,25 @@ mod tests {
             assert!(err.contains("delta.encryption.footer_key"), "{err}");
             assert!(err.contains("create-or-replace"), "{err}");
         }
+        // Unset on both sides is not a change.
+        table
+            .clone()
+            .write(vec![batch.clone()])
+            .with_configuration([("delta.encryption.footer_key", None::<&str>)])
+            .await
+            .unwrap();
+        // An existing table is reported before any configuration check.
+        let err = table
+            .clone()
+            .write(vec![batch.clone()])
+            .with_save_mode(SaveMode::ErrorIfExists)
+            .with_configuration([("delta.encryption.footer_key", Some("fk"))])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(expect_write_error(&err), WriteError::AlreadyExists(_)),
+            "{err}"
+        );
     }
 
     #[tokio::test]
