@@ -19,10 +19,9 @@ use tracing::log::*;
 /// The table feature for Parquet modular encryption of data files.
 const PARQUET_ENCRYPTION_FEATURE: &str = "parquetEncryption";
 
-/// Whether this build can read and write tables with `delta.encryption.*` properties. Until
-/// the encryption read and write paths exist they are refused, so readers never get
-/// ciphertext and writers never add plaintext files.
-const READS_ENCRYPTED_TABLES: bool = false;
+/// Whether this build can read and write tables with `delta.encryption.*` properties.
+/// Until the read and write paths land, both are refused.
+pub(crate) const READS_ENCRYPTED_TABLES: bool = false;
 const WRITES_ENCRYPTED_TABLES: bool = false;
 
 static READER_V2: LazyLock<HashSet<TableFeature>> =
@@ -211,19 +210,10 @@ impl ProtocolChecker {
         self.check_encryption(snapshot.metadata().configuration(), READS_ENCRYPTED_TABLES)
     }
 
-    /// Check that this build can read a table with this metadata `configuration`.
-    ///
-    /// delta-kernel cannot open tables with the RFC's `parquetEncryption` feature yet, so
-    /// encrypted tables are recognised by their `delta.encryption.*` properties and refused
-    /// with the error the feature would produce.
-    pub fn can_read_encryption(
-        &self,
-        configuration: &HashMap<String, String>,
-    ) -> Result<(), TransactionError> {
-        self.check_encryption(configuration, READS_ENCRYPTED_TABLES)
-    }
-
-    fn check_encryption(
+    /// Refuse a table with `delta.encryption.*` properties unless `supported`
+    /// ([`READS_ENCRYPTED_TABLES`] or [`WRITES_ENCRYPTED_TABLES`]), with the error the
+    /// RFC's `parquetEncryption` feature would produce once kernel can carry it.
+    pub(crate) fn check_encryption(
         &self,
         configuration: &HashMap<String, String>,
         supported: bool,
@@ -393,20 +383,18 @@ pub static INSTANCE: LazyLock<ProtocolChecker> = LazyLock::new(|| {
 
 /// Check the encryption configuration a commit installs on an existing table.
 ///
-/// Encryption is configured when a table is created, including create-or-replace, which
-/// removes every existing data file in the same commit, and is fixed from then on. Turning
-/// it on later, turning it off, and changing `kms_id`, `footer_key`, `plaintext_footer` or
-/// `column_keys` are refused until delta-rs has an operation that rewrites every data file
-/// under the new configuration in one commit. Without that, a later rewrite (optimize,
-/// update, delete, merge) would silently re-emit old rows under the new, possibly weaker,
-/// configuration, and old plaintext files and log statistics would stay behind. Mixed files
-/// are valid at the format level and the RFC says writers "should allow" these changes, so
-/// this is implementation behaviour that can be relaxed once the tooling exists.
+/// Encryption is set when a table is created, including create-or-replace, which removes
+/// every data file in the same commit, and is frozen after that: turning it on or off and
+/// changing `kms_id`, `footer_key`, `plaintext_footer` or `column_keys` are refused until
+/// an operation exists that rewrites every data file under the new configuration in one
+/// commit. Without it, a later rewrite (optimize, update, delete, merge) would re-emit old
+/// rows under a possibly weaker configuration, and old plaintext files and log statistics
+/// would stay behind. Mixed files are valid Parquet and the RFC says writers "should
+/// allow" these changes, so this is implementation behaviour, to be relaxed later.
 ///
-/// Restore gets no exemption: restoring to a version before a replace would re-add that
-/// version's plaintext files. `kms_configuration` only tells the KMS client how to reach
-/// the keys, so it may change at any time. Configurations are compared as parsed values,
-/// so reordering `column_keys` is not a change. A new configuration must also be valid.
+/// Restore is not exempt: restoring past a replace would re-add plaintext files.
+/// `kms_configuration` is not frozen. Configurations are compared as parsed values. A new
+/// configuration must also be valid.
 fn check_encryption_change(
     snapshot: &dyn TableReference,
     metadata: &Metadata,
@@ -1096,8 +1084,8 @@ mod tests {
         check_encryption_change(snapshot, &reconfigured, &set_properties()).unwrap();
     }
 
-    /// Restore gets no exemption: restoring to a version before a replace would re-add that
-    /// version's plaintext files, which is removing encryption by another name.
+    /// Restore past a replace would re-add plaintext files, so it is refused like any other
+    /// change.
     #[tokio::test]
     async fn restore_cannot_change_encryption() {
         use crate::kernel::MetadataExt as _;
@@ -1137,8 +1125,7 @@ mod tests {
         check_encryption_change(snapshot, snapshot.metadata(), &restore).unwrap();
     }
 
-    /// Configurations are compared as parsed values: reordering `column_keys` or spelling
-    /// the `plaintext_footer` default explicitly is not a change.
+    /// Reordering `column_keys` or spelling the `plaintext_footer` default is not a change.
     #[tokio::test]
     async fn reordered_encryption_properties_are_not_a_change() {
         use crate::kernel::MetadataExt as _;

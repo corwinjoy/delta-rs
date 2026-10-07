@@ -425,9 +425,9 @@ impl WriteBuilder {
                     PROTOCOL.check_append_only(snapshot)?;
                 }
 
-                // `configuration` only applies when this write creates the table. Silently
-                // dropping encryption properties would leave a user believing the table
-                // is encrypted, so refuse them here rather than ignore them.
+                // `configuration` only applies when the write creates the table. Dropping
+                // encryption keys silently would leave the user believing the table is
+                // encrypted, so refuse them.
                 if let Some(key) = self
                     .configuration
                     .keys()
@@ -806,8 +806,8 @@ mod tests {
         assert!(write_metrics.num_added_files > 0);
     }
 
-    /// `configuration` only applies when a write creates the table. Encryption properties
-    /// in it for a table that already exists are refused rather than silently dropped.
+    /// Encryption properties in the configuration of a write to an existing table are
+    /// refused rather than silently dropped.
     #[tokio::test]
     async fn test_write_refuses_encryption_configuration_on_existing_table() {
         let table = setup_table_with_configuration(TableProperty::AppendOnly, Some("false")).await;

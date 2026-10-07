@@ -18,9 +18,9 @@ use crate::parquet_utils::default_writer_properties;
 
 /// Creates the [`WriterProperties`] for each Parquet file.
 ///
-/// It is async so implementations can fetch per-file keys from a KMS, using the file path
-/// as additional authenticated data (AAD). Plain [`WriterProperties`] implement it by
-/// handing out the same properties for every file.
+/// Async so implementations can fetch per-file keys from a KMS, using the file path as
+/// additional authenticated data (AAD). Plain [`WriterProperties`] hand out the same
+/// properties for every file.
 #[async_trait]
 pub trait WriterPropertiesFactory: Send + Sync + Debug + 'static {
     /// The compression for `column_path`; the writer uses it to pick the file extension
