@@ -1,4 +1,4 @@
-//! Mock KMS implementation for testing encryption via delta table properties.
+//! An in-memory KMS for testing encryption via `delta.encryption.*` table properties.
 //!
 //! This module is **not part of the stable public API**. It lives in `test_utils`, which is
 //! compiled for this crate's tests and, with the `integration_test` feature, for downstream
@@ -6,7 +6,7 @@
 //!
 //! # Usage
 //!
-//! 1. Create a [`MockKmsFactory`] and register it in the process-wide registry with
+//! 1. Register [`mock_kms_factory`] in the process-wide registry with
 //!    [`register_encryption_factory`](crate::operations::write::encryption::register_encryption_factory).
 //!    Operations that create their own DataFusion sessions, such as `table.write()`, only
 //!    find factories registered there.
@@ -15,8 +15,7 @@
 //!
 //! ```rust,ignore
 //! // Register factory at startup
-//! let factory = Arc::new(MockKmsFactory::new());
-//! register_encryption_factory("test-kms", factory.clone());
+//! register_encryption_factory("test-kms", mock_kms_factory());
 //!
 //! // Create encrypted table
 //! table.create()
@@ -26,181 +25,64 @@
 //! ```
 
 use std::collections::HashMap;
-use std::fmt::Debug;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use arrow_schema::Schema as ArrowSchema;
-use async_trait::async_trait;
-use datafusion::config::EncryptionFactoryOptions;
 use datafusion::execution::parquet_encryption::EncryptionFactory;
-use object_store::path::Path;
-use parquet::encryption::decrypt::FileDecryptionProperties;
-use parquet::encryption::encrypt::FileEncryptionProperties;
 
-use crate::table::config::{
-    FACTORY_OPT_COLUMN_KEYS, FACTORY_OPT_FOOTER_KEY, FACTORY_OPT_PLAINTEXT_FOOTER,
-};
+use crate::errors::{DeltaResult, DeltaTableError};
+use crate::operations::write::encryption::{KmsClient, KmsEncryptionFactory};
 
-/// Mock encryption factory for use in tests.
+/// A [`KmsClient`] that keeps every wrapped key in memory, like a vault that stores keys
+/// and hands out tokens.
 ///
-/// Generates a unique key per (file, key-id) and stores it for later decryption.
-/// Supports footer-only encryption, column-level encryption, and plaintext-footer mode
-/// by reading the options forwarded from `delta.encryption.*` table properties.
-///
-/// Keys are stored by (file name, key id), and each file's AAD prefix is its file name; see
-/// [`file_name`] for why.
+/// `wrap_key` stores the data key under a random token and returns the token;
+/// `unwrap_key` looks the token up and checks it was wrapped under the same master key.
+/// Nothing is encrypted, so a wrapped key is only usable in the process that wrapped it,
+/// which is what tests need: a file written by one factory cannot be read through another.
 #[derive(Debug, Default)]
-pub struct MockKmsFactory {
-    /// The encryption key for each (file name, key id) pair.
-    key_store: Mutex<HashMap<(Path, String), Vec<u8>>>,
-    counter: AtomicU64,
+pub struct InMemoryKmsClient {
+    vault: Mutex<Vault>,
 }
 
-impl MockKmsFactory {
-    /// Create a new mock KMS with an empty key store.
-    pub fn new() -> Self {
-        Self {
-            key_store: Mutex::new(HashMap::new()),
-            counter: AtomicU64::new(0),
-        }
-    }
+/// token → (master key ID, data key)
+type Vault = HashMap<Vec<u8>, (String, Vec<u8>)>;
 
-    /// Return the key for `(file_name, key_id)`, creating a new one if it doesn't exist yet.
-    fn get_or_create_key(&self, file_name: &Path, key_id: &str) -> Vec<u8> {
-        let mut store = self.key_store.lock().unwrap();
-        store
-            .entry((file_name.clone(), key_id.to_string()))
-            .or_insert_with(|| {
-                let idx = self.counter.fetch_add(1, Ordering::Relaxed);
-                let mut key = [0u8; 16];
-                key[..8].copy_from_slice(&idx.to_le_bytes());
-                key.to_vec()
-            })
-            .clone()
-    }
-
-    /// Look up the key for `(file_name, key_id)`. Returns `None` if not found.
-    fn lookup_key(&self, file_name: &Path, key_id: &str) -> Option<Vec<u8>> {
-        let store = self.key_store.lock().unwrap();
-        store.get(&(file_name.clone(), key_id.to_string())).cloned()
-    }
-
-    /// Parse `"keyId:col1,col2;keyId2:col3"` into `Vec<(key_id, Vec<col_name>)>`.
-    fn parse_column_keys(value: &str) -> Vec<(String, Vec<String>)> {
-        value
-            .split(';')
-            .filter_map(|seg| {
-                let seg = seg.trim();
-                let (key_id, cols) = seg.split_once(':')?;
-                let cols: Vec<String> = cols
-                    .split(',')
-                    .map(|c| c.trim().to_string())
-                    .filter(|c| !c.is_empty())
-                    .collect();
-                if cols.is_empty() {
-                    None
-                } else {
-                    Some((key_id.trim().to_string(), cols))
-                }
-            })
-            .collect()
+impl InMemoryKmsClient {
+    /// The number of keys wrapped so far.
+    pub fn wrapped_keys(&self) -> usize {
+        self.vault.lock().unwrap().len()
     }
 }
 
-/// The file name of `file_path`, used for key lookup and as the file's AAD prefix.
-///
-/// Parquet modular encryption uses an AAD prefix to bind a file's ciphertext to that file,
-/// so encrypted modules cannot be swapped between files
-/// (<https://parquet.apache.org/docs/file-format/data-pages/encryption/>). The file name is
-/// enough for this: delta-rs file names are unique within a table. Unlike the full path it
-/// stays the same when the table is moved, so the files remain readable. The prefix is not
-/// stored in the file; the reader supplies it again from the file name.
-fn file_name(file_path: &Path) -> Path {
-    Path::from(file_path.filename().unwrap_or(file_path.as_ref()))
-}
-
-#[async_trait]
-impl EncryptionFactory for MockKmsFactory {
-    async fn get_file_encryption_properties(
-        &self,
-        config: &EncryptionFactoryOptions,
-        _schema: &Arc<ArrowSchema>,
-        file_path: &Path,
-    ) -> datafusion::error::Result<Option<Arc<FileEncryptionProperties>>> {
-        let footer_key_id = config
-            .options
-            .get(FACTORY_OPT_FOOTER_KEY)
-            .map(|s| s.as_str())
-            .unwrap_or("footer-key");
-        let plaintext_footer = config
-            .options
-            .get(FACTORY_OPT_PLAINTEXT_FOOTER)
-            .and_then(|v| v.parse::<bool>().ok())
-            .unwrap_or(false);
-        let column_keys_str = config
-            .options
-            .get(FACTORY_OPT_COLUMN_KEYS)
-            .cloned()
-            .unwrap_or_default();
-
-        let file_name = file_name(file_path);
-        let footer_key = self.get_or_create_key(&file_name, footer_key_id);
-
-        let mut builder = FileEncryptionProperties::builder(footer_key)
-            .with_plaintext_footer(plaintext_footer)
-            .with_aad_prefix(file_name.as_ref().as_bytes().to_vec())
-            .with_aad_prefix_storage(false);
-
-        for (key_id, cols) in Self::parse_column_keys(&column_keys_str) {
-            let col_key = self.get_or_create_key(&file_name, &key_id);
-            for col in &cols {
-                builder = builder.with_column_key(col, col_key.clone());
-            }
-        }
-
-        let props = builder.build()?;
-        Ok(Some(props))
+impl KmsClient for InMemoryKmsClient {
+    fn wrap_key(&self, key: &[u8], master_key_id: &str) -> DeltaResult<Vec<u8>> {
+        let token = uuid::Uuid::new_v4().as_bytes().to_vec();
+        self.vault
+            .lock()
+            .unwrap()
+            .insert(token.clone(), (master_key_id.to_string(), key.to_vec()));
+        Ok(token)
     }
 
-    async fn get_file_decryption_properties(
-        &self,
-        config: &EncryptionFactoryOptions,
-        file_path: &Path,
-    ) -> datafusion::error::Result<Option<Arc<FileDecryptionProperties>>> {
-        let footer_key_id = config
-            .options
-            .get(FACTORY_OPT_FOOTER_KEY)
-            .map(|s| s.as_str())
-            .unwrap_or("footer-key");
-        let column_keys_str = config
-            .options
-            .get(FACTORY_OPT_COLUMN_KEYS)
-            .cloned()
-            .unwrap_or_default();
-
-        let file_name = file_name(file_path);
-        let footer_key = self.lookup_key(&file_name, footer_key_id).ok_or_else(|| {
-            datafusion::error::DataFusionError::Execution(format!(
-                "No encryption key found for file {file_path:?}"
+    fn unwrap_key(&self, wrapped_key: &[u8], master_key_id: &str) -> DeltaResult<Vec<u8>> {
+        let vault = self.vault.lock().unwrap();
+        let (wrapped_under, key) = vault.get(wrapped_key).ok_or_else(|| {
+            DeltaTableError::Generic(format!(
+                "in-memory KMS: unknown wrapped key for master key '{master_key_id}'"
             ))
         })?;
-
-        let mut builder = FileDecryptionProperties::builder(footer_key)
-            .with_aad_prefix(file_name.as_ref().as_bytes().to_vec());
-
-        for (key_id, cols) in Self::parse_column_keys(&column_keys_str) {
-            let col_key = self.lookup_key(&file_name, &key_id).ok_or_else(|| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "No encryption key '{key_id}' found for file {file_path:?}"
-                ))
-            })?;
-            for col in &cols {
-                builder = builder.with_column_key(col, col_key.clone());
-            }
+        if wrapped_under != master_key_id {
+            return Err(DeltaTableError::Generic(format!(
+                "in-memory KMS: key was wrapped under '{wrapped_under}', not '{master_key_id}'"
+            )));
         }
-
-        let props = builder.build()?;
-        Ok(Some(props))
+        Ok(key.clone())
     }
+}
+
+/// The reference [`KmsEncryptionFactory`] over a fresh [`InMemoryKmsClient`].
+pub fn mock_kms_factory() -> Arc<dyn EncryptionFactory> {
+    Arc::new(KmsEncryptionFactory::new(Arc::new(
+        InMemoryKmsClient::default(),
+    )))
 }

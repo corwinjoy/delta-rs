@@ -96,6 +96,7 @@ percent-encoding = "2"
 pin-project-lite = "^0.2.7"
 tracing = { workspace = true }
 rand = "0.10"
+base64 = { version = "0.22", optional = true }
 sqlparser = "0.62"
 humantime = { version = "2.1.0", optional = true }
 validator = { version = "0.19", features = ["derive"] }
@@ -127,7 +128,7 @@ datafusion = [
 ]
 datafusion-ext = ["datafusion"]
 # Parquet Modular Encryption for tables configured with `delta.encryption.*` properties
-encryption = ["parquet/encryption", "datafusion?/parquet_encryption"]
+encryption = ["parquet/encryption", "datafusion?/parquet_encryption", "dep:base64"]
 json = ["parquet/json"]
 python = ["arrow/pyarrow"]
 native-tls = ["delta_kernel_default_engine/native-tls"]

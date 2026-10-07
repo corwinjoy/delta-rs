@@ -363,6 +363,10 @@ pub(super) fn prepare_write(input: WritePreparationInput<'_>) -> DeltaResult<Pre
         }
     }
 
+    if let (Some(snapshot), Some(new_schema)) = (snapshot, new_schema.as_ref()) {
+        warn_about_plaintext_new_columns(snapshot, new_schema);
+    }
+
     if let Some(new_schema) = new_schema.as_ref() {
         let mut schema_evolution_projection = Vec::with_capacity(new_schema.fields().len());
         for field in new_schema.fields() {
@@ -825,6 +829,35 @@ fn schema_delta_for_prepared_source(
         metadata: Some(metadata),
         protocol: (current_protocol != &new_protocol).then_some(new_protocol),
     })
+}
+
+/// Adding columns to a table with `delta.encryption.column_keys` leaves them unencrypted,
+/// as the RFC specifies: only the listed columns are encrypted. Say so, naming the columns,
+/// since a user may not expect new data in an encrypted table to be plaintext.
+fn warn_about_plaintext_new_columns(snapshot: &EagerSnapshot, new_schema: &arrow_schema::Schema) {
+    let table_schema = snapshot.input_schema();
+    let added: Vec<&str> = new_schema
+        .fields()
+        .iter()
+        .filter(|field| table_schema.field_with_name(field.name()).is_err())
+        .map(|field| field.name().as_str())
+        .collect();
+    if added.is_empty() {
+        return;
+    }
+    let column_keyed = crate::table::config::EncryptionConfig::try_from_configuration(
+        snapshot.metadata().configuration(),
+    )
+    .ok()
+    .flatten()
+    .is_some_and(|encryption| !encryption.column_keys.is_empty());
+    if column_keyed {
+        tracing::warn!(
+            "schema evolution adds columns {added:?} to a table encrypted with \
+             delta.encryption.column_keys; the new columns are written in plaintext, since \
+             only the listed columns are encrypted"
+        );
+    }
 }
 
 #[cfg(test)]

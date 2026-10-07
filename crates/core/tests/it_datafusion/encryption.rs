@@ -12,7 +12,7 @@ use arrow::{
 use deltalake_core::DeltaResult;
 use deltalake_core::kernel::{DataType, PrimitiveType, StructField};
 use deltalake_core::operations::write::encryption::register_encryption_factory;
-use deltalake_core::test_utils::kms_encryption::MockKmsFactory;
+use deltalake_core::test_utils::kms_encryption::mock_kms_factory;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -57,7 +57,7 @@ fn get_table_batches() -> RecordBatch {
 /// Register a fresh factory with a unique ID to prevent test interference.
 fn register_fresh_factory() -> String {
     let kms_id = format!("test-kms-{}", Uuid::new_v4());
-    register_encryption_factory(&kms_id, Arc::new(MockKmsFactory::new()));
+    register_encryption_factory(&kms_id, mock_kms_factory());
     kms_id
 }
 
@@ -437,5 +437,104 @@ async fn test_misspelled_property_is_rejected_alongside_encryption() -> DeltaRes
         ])
         .await;
     assert!(result.is_err(), "a misspelled property must be rejected");
+    Ok(())
+}
+
+/// Statistics for encrypted columns never reach the Delta log (RFC), whatever the stats
+/// configuration asks for: the file's own column chunk metadata decides. With column keys
+/// the plaintext columns keep their statistics; under uniform encryption no column has any.
+#[tokio::test]
+async fn test_no_log_statistics_for_encrypted_columns() -> DeltaResult<()> {
+    let kms_id = register_fresh_factory();
+    for (column_keys, expect_int, expect_string) in
+        [("test-key:int", false, true), ("", false, false)]
+    {
+        let tmp = TempDir::new().unwrap();
+        let table =
+            deltalake_core::DeltaTableBuilder::from_url(table_url(tmp.path().to_str().unwrap()))?
+                .build()?;
+        let mut create = table
+            .create()
+            .with_columns(get_table_columns())
+            .with_property("delta.encryption.kms_id", &kms_id)
+            .with_property("delta.encryption.footer_key", "test-footer-key");
+        if !column_keys.is_empty() {
+            create = create.with_property("delta.encryption.column_keys", column_keys);
+        }
+        let table = create.await?;
+        table.write(vec![get_table_batches()]).await?;
+
+        let log = std::fs::read_to_string(tmp.path().join("_delta_log/00000000000000000001.json"))
+            .unwrap();
+        let adds: Vec<serde_json::Value> = log
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter_map(|action| action.get("add").cloned())
+            .collect();
+        assert!(!adds.is_empty(), "{column_keys:?}: no add actions");
+        for add in adds {
+            let stats: serde_json::Value =
+                serde_json::from_str(add["stats"].as_str().expect("add has stats")).unwrap();
+            assert_eq!(stats["numRecords"], 11, "{column_keys:?}: {stats}");
+            for section in ["minValues", "maxValues", "nullCount"] {
+                let values = &stats[section];
+                assert_eq!(
+                    values.get("int").is_some(),
+                    expect_int,
+                    "{column_keys:?}: {section} {stats}"
+                );
+                assert_eq!(
+                    values.get("string").is_some(),
+                    expect_string,
+                    "{column_keys:?}: {section} {stats}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Adding a column to a table with `column_keys` is allowed; the new column is plaintext
+/// (and so keeps its statistics) while the keyed column stays encrypted.
+#[tokio::test]
+async fn test_schema_evolution_adds_plaintext_columns_to_column_keyed_table() -> DeltaResult<()> {
+    use deltalake_core::operations::write::SchemaMode;
+
+    let kms_id = register_fresh_factory();
+    let tmp = TempDir::new().unwrap();
+    let table =
+        deltalake_core::DeltaTableBuilder::from_url(table_url(tmp.path().to_str().unwrap()))?
+            .build()?
+            .create()
+            .with_columns(get_table_columns())
+            .with_property("delta.encryption.kms_id", &kms_id)
+            .with_property("delta.encryption.footer_key", "test-footer-key")
+            .with_property("delta.encryption.column_keys", "test-key:int")
+            .await?;
+
+    let batch = get_table_batches();
+    let mut fields = batch.schema().fields().to_vec();
+    fields.push(Arc::new(Field::new("extra", ArrowDataType::Int32, true)));
+    let mut columns = batch.columns().to_vec();
+    columns.push(Arc::new(Int32Array::from(vec![Some(1); batch.num_rows()])));
+    let widened = RecordBatch::try_new(Arc::new(ArrowSchema::new(fields)), columns).unwrap();
+
+    let table = table
+        .write(vec![widened])
+        .with_schema_mode(SchemaMode::Merge)
+        .await?;
+    assert!(table.snapshot()?.schema().field("extra").is_some());
+
+    let log =
+        std::fs::read_to_string(tmp.path().join("_delta_log/00000000000000000001.json")).unwrap();
+    let add = log
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find_map(|action| action.get("add").cloned())
+        .expect("an add action");
+    let stats: serde_json::Value = serde_json::from_str(add["stats"].as_str().unwrap()).unwrap();
+    assert!(stats["minValues"].get("extra").is_some(), "{stats}");
+    assert!(stats["minValues"].get("int").is_none(), "{stats}");
+    assert_all_parquets_encrypted(tmp.path()).await;
     Ok(())
 }

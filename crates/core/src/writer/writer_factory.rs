@@ -24,7 +24,7 @@ use crate::parquet_utils::default_writer_properties;
 /// File paths are relative to the table root, as in the Delta log, and readers pass
 /// decryption factories the same paths. A factory should use only the file name as the AAD
 /// prefix (additional authenticated data), which binds encrypted modules to their file:
-/// file names are unique within a table and, unlike full paths, survive moving it.
+/// file names are unique within a table and, unlike full paths, survive moving it. The reference `KmsEncryptionFactory` does this.
 #[async_trait]
 pub trait WriterPropertiesFactory: Send + Sync + Debug + 'static {
     /// The base settings every file is written with (compression, row-group limits).

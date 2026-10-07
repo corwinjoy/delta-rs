@@ -29,7 +29,7 @@ pub(super) fn resolve(
     Ok(Arc::new(KmsWriterPropertiesFactory {
         base_properties: base_properties.unwrap_or_else(snappy_writer_properties),
         encryption_factory,
-        factory_options: enc.factory_options(),
+        factory_options: enc.writer_factory_options(),
     }))
 }
 
@@ -41,7 +41,8 @@ pub(super) fn resolve(
 /// delegating to the DataFusion [`EncryptionFactory`] registered in `RuntimeEnv`.
 ///
 /// Key material (footer key, column keys, plaintext-footer flag) is encoded in
-/// `factory_options` and forwarded to the factory — see [`EncryptionConfig::factory_options`].
+/// `factory_options` and forwarded to the factory — see
+/// [`EncryptionConfig::writer_factory_options`].
 /// The factory itself is responsible for deriving the actual per-file key material.
 #[derive(Debug)]
 struct KmsWriterPropertiesFactory {

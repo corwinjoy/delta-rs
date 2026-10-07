@@ -38,9 +38,14 @@ use crate::table::config::EncryptionConfig;
 mod backend;
 
 #[cfg(feature = "encryption")]
+pub mod kms;
+
+#[cfg(feature = "encryption")]
 pub use backend::{
     get_encryption_factory, register_encryption_factory, resolve_encryption_factory,
 };
+#[cfg(feature = "encryption")]
+pub use kms::{KmsClient, KmsEncryptionFactory};
 // Re-export the factory types that are defined in the non-datafusion `writer_factory` module
 // so callers can keep importing them from this module.
 pub use crate::writer::writer_factory::{

@@ -684,7 +684,9 @@ impl EncryptionConfig {
 
     /// Parse `"keyId:col1,col2;keyId2:col3"` into `{keyId: [col1, col2], keyId2: [col3]}`.
     /// A column may appear once, and not alongside an ancestor, which already covers it.
-    fn parse_column_keys(value: Option<&str>) -> DeltaResult<HashMap<String, Vec<String>>> {
+    pub(crate) fn parse_column_keys(
+        value: Option<&str>,
+    ) -> DeltaResult<HashMap<String, Vec<String>>> {
         let mut map: HashMap<String, Vec<String>> = HashMap::new();
         let mut seen: Vec<(String, String)> = Vec::new();
         let Some(value) = value else { return Ok(map) };
@@ -880,24 +882,41 @@ impl EncryptionConfig {
     }
 
     /// [`TableParquetOptions`] telling a DataFusion Parquet scan to decrypt with the
-    /// factory registered as [`kms_id`](EncryptionConfig::kms_id).
+    /// factory registered as [`kms_id`](EncryptionConfig::kms_id), carrying the
+    /// [reader options](Self::reader_factory_options) only.
     #[cfg(all(feature = "datafusion", feature = "encryption"))]
     pub fn to_table_parquet_options(&self) -> TableParquetOptions {
         let mut opts = TableParquetOptions::default();
         opts.crypto.factory_id = Some(self.kms_id.clone());
-        opts.crypto.factory_options = self.factory_options();
+        opts.crypto.factory_options = self.reader_factory_options();
         opts
     }
 
-    /// The options passed to the registered encryption factory, keyed by the
-    /// `delta.encryption.*` property names.
+    /// The options a registered encryption factory gets when decrypting a file: `kms_id`
+    /// and `kms_configuration` only.
+    ///
+    /// The RFC requires readers to derive decryption keys from the key metadata stored
+    /// with each file, never from the table's current `footer_key` or `column_keys`,
+    /// since those may have changed after the file was written. Keeping them out of the
+    /// reader options makes that impossible to get wrong.
     #[cfg(all(feature = "datafusion", feature = "encryption"))]
-    pub fn factory_options(&self) -> EncryptionFactoryOptions {
+    pub fn reader_factory_options(&self) -> EncryptionFactoryOptions {
         let mut opts = EncryptionFactoryOptions::default();
+        opts.options
+            .insert(ENCRYPTION_KMS_ID_PROP.to_string(), self.kms_id.clone());
         if let Some(cfg) = &self.kms_configuration {
             opts.options
                 .insert(ENCRYPTION_KMS_CONFIGURATION_PROP.to_string(), cfg.clone());
         }
+        opts
+    }
+
+    /// The options a registered encryption factory gets when encrypting a file: the
+    /// [reader options](Self::reader_factory_options) plus `footer_key`,
+    /// `plaintext_footer` and, when set, `column_keys`.
+    #[cfg(all(feature = "datafusion", feature = "encryption"))]
+    pub fn writer_factory_options(&self) -> EncryptionFactoryOptions {
+        let mut opts = self.reader_factory_options();
         opts.options.insert(
             ENCRYPTION_FOOTER_KEY_PROP.to_string(),
             self.footer_key.clone(),
