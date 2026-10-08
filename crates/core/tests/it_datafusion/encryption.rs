@@ -538,9 +538,11 @@ async fn test_write_with_matching_encryption_configuration_is_idempotent() -> De
     let kms_id = register_fresh_factory();
     let tmp = TempDir::new().unwrap();
     let url = table_url(tmp.path().to_str().unwrap());
+    // Stored as the sorted `k1:int;k2:string`; the write compares parsed values.
     let configuration = [
         ("delta.encryption.kms_id", Some(kms_id.as_str())),
         ("delta.encryption.footer_key", Some("test-footer-key")),
+        ("delta.encryption.column_keys", Some("k2:string;k1:int")),
     ];
     // First run creates the table.
     deltalake_core::DeltaTableBuilder::from_url(url.clone())?
@@ -548,12 +550,17 @@ async fn test_write_with_matching_encryption_configuration_is_idempotent() -> De
         .write(vec![get_table_batches()])
         .with_configuration(configuration)
         .await?;
-    // A later run loads it and sends the same configuration again.
+    // A later run loads it and sends the same configuration again, plus a new
+    // `kms_configuration`, which is not frozen.
     let table = deltalake_core::DeltaTableBuilder::from_url(url)?
         .load()
         .await?
         .write(vec![get_table_batches()])
-        .with_configuration(configuration)
+        .with_configuration(
+            configuration
+                .into_iter()
+                .chain([("delta.encryption.kms_configuration", Some("{}"))]),
+        )
         .await?;
     let err = table
         .write(vec![get_table_batches()])
