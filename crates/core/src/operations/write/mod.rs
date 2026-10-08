@@ -46,7 +46,7 @@ use serde::{Deserialize, Serialize};
 use tracing::Instrument;
 
 use crate::kernel::transaction::WRITES_ENCRYPTED_TABLES;
-use crate::table::config::ENCRYPTION_PROP_PREFIX;
+use crate::table::config::{ENCRYPTION_PROP_PREFIX, EncryptionConfig};
 use url::Url;
 
 pub use self::configs::WriterStatsConfig;
@@ -440,26 +440,53 @@ impl WriteBuilder {
                     }
                     _ => {
                         // `configuration` only applies when the write creates the table.
-                        // Matching keys pass, so a pipeline can send the same configuration
-                        // every run; differing encryption keys would be dropped silently and
-                        // leave the user believing the table is encrypted, so refuse them.
-                        let current = snapshot.metadata().configuration();
-                        fn value(v: Option<&String>) -> Option<&str> {
-                            v.map(|v| v.trim()).filter(|v| !v.is_empty())
-                        }
-                        if let Some((key, _)) = self
+                        // Encryption keys are compared as parsed values, so a pipeline can
+                        // send the same configuration every run, in any order and with
+                        // display names; differing keys would be dropped silently and leave
+                        // the user believing the table is encrypted, so refuse them.
+                        let given: Vec<_> = self
                             .configuration
                             .iter()
                             .filter(|(key, _)| key.starts_with(ENCRYPTION_PROP_PREFIX))
-                            .find(|(key, given)| value(given.as_ref()) != value(current.get(*key)))
-                        {
-                            return Err(DeltaTableError::Generic(format!(
-                                "'{key}' was given in the write configuration with a value \
+                            .collect();
+                        if !given.is_empty() {
+                            let current = snapshot.metadata().configuration();
+                            let mut merged = current.clone();
+                            for (key, value) in &given {
+                                match value.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+                                    Some(value) => merged.insert((*key).clone(), value.to_string()),
+                                    None => merged.remove(*key),
+                                };
+                            }
+                            let changed = match EncryptionConfig::try_from_configuration(current)? {
+                                // Any key set on an unencrypted table is a change.
+                                None => given
+                                    .iter()
+                                    .find(|(key, _)| merged.contains_key(*key))
+                                    .map(|(key, _)| key.as_str()),
+                                Some(old) => {
+                                    let new = EncryptionConfig::try_from_configuration(&merged)?
+                                        .map(|new| {
+                                            new.with_physical_column_names(
+                                                &snapshot.schema(),
+                                                snapshot
+                                                    .table_configuration()
+                                                    .column_mapping_mode(),
+                                            )
+                                        })
+                                        .transpose()?;
+                                    EncryptionConfig::frozen_change(Some(&old), new.as_ref())
+                                }
+                            };
+                            if let Some(key) = changed {
+                                return Err(DeltaTableError::Generic(format!(
+                                    "'{key}' was given in the write configuration with a value \
                                  that differs from the table's, but a write does not change \
                                  the configuration of an existing table; to change its \
                                  encryption, recreate it with create-or-replace, or write to \
                                  a new table"
-                            )));
+                                )));
+                            }
                         }
                         Ok((vec![], snapshot.table_configuration().clone()))
                     }

@@ -569,17 +569,6 @@ fn fields_along_path<'a, 'p>(
     Some(found)
 }
 
-/// Option keys passed to the [`EncryptionFactoryOptions`]: the property names without the
-/// `delta.encryption.` prefix.
-#[cfg(all(feature = "datafusion", feature = "encryption"))]
-pub(crate) const FACTORY_OPT_KMS_CONFIGURATION: &str = "kms_configuration";
-#[cfg(all(feature = "datafusion", feature = "encryption"))]
-pub(crate) const FACTORY_OPT_FOOTER_KEY: &str = "footer_key";
-#[cfg(all(feature = "datafusion", feature = "encryption"))]
-pub(crate) const FACTORY_OPT_PLAINTEXT_FOOTER: &str = "plaintext_footer";
-#[cfg(all(feature = "datafusion", feature = "encryption"))]
-pub(crate) const FACTORY_OPT_COLUMN_KEYS: &str = "column_keys";
-
 /// Parquet Modular Encryption settings from a table's `delta.encryption.*` properties, with
 /// the names and semantics of the [protocol RFC](https://github.com/delta-io/delta/issues/6195).
 ///
@@ -826,6 +815,17 @@ impl EncryptionConfig {
         }
     }
 
+    /// [`changed_frozen_property`](Self::changed_frozen_property) for configurations that
+    /// may be absent: turning encryption on or off counts as changing `footer_key`, the
+    /// property that turns it on.
+    pub fn frozen_change(old: Option<&Self>, new: Option<&Self>) -> Option<&'static str> {
+        match (old, new) {
+            (None, None) => None,
+            (Some(old), Some(new)) => old.changed_frozen_property(new),
+            _ => Some(ENCRYPTION_FOOTER_KEY_PROP),
+        }
+    }
+
     /// Rewrite [`column_keys`](Self::column_keys) from display names to the physical names
     /// the RFC stores, so renaming a column does not invalidate the configuration.
     pub fn with_physical_column_names(
@@ -878,24 +878,27 @@ impl EncryptionConfig {
         opts
     }
 
-    /// The options passed to the registered encryption factory.
+    /// The options passed to the registered encryption factory, keyed by the
+    /// `delta.encryption.*` property names.
     #[cfg(all(feature = "datafusion", feature = "encryption"))]
     pub fn factory_options(&self) -> EncryptionFactoryOptions {
         let mut opts = EncryptionFactoryOptions::default();
         if let Some(cfg) = &self.kms_configuration {
             opts.options
-                .insert(FACTORY_OPT_KMS_CONFIGURATION.to_string(), cfg.clone());
+                .insert(ENCRYPTION_KMS_CONFIGURATION_PROP.to_string(), cfg.clone());
         }
-        opts.options
-            .insert(FACTORY_OPT_FOOTER_KEY.to_string(), self.footer_key.clone());
         opts.options.insert(
-            FACTORY_OPT_PLAINTEXT_FOOTER.to_string(),
+            ENCRYPTION_FOOTER_KEY_PROP.to_string(),
+            self.footer_key.clone(),
+        );
+        opts.options.insert(
+            ENCRYPTION_PLAINTEXT_FOOTER_PROP.to_string(),
             self.plaintext_footer.to_string(),
         );
         if !self.column_keys.is_empty() {
             // Sorted, so factories can use the string as a cache key.
             opts.options.insert(
-                FACTORY_OPT_COLUMN_KEYS.to_string(),
+                ENCRYPTION_COLUMN_KEYS_PROP.to_string(),
                 self.column_keys_property(),
             );
         }

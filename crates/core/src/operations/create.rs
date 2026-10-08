@@ -430,14 +430,8 @@ impl std::future::IntoFuture for CreateBuilder {
                                 .ok()
                                 .flatten();
                             let new = EncryptionConfig::try_from_configuration(new_configuration)?;
-                            let changed = match (&old, &new) {
-                                (None, None) => false,
-                                (Some(old), Some(new)) => {
-                                    old.changed_frozen_property(new).is_some()
-                                }
-                                _ => true,
-                            };
-                            if changed {
+                            if EncryptionConfig::frozen_change(old.as_ref(), new.as_ref()).is_some()
+                            {
                                 tracing::warn!(
                                     "replacing a table with a different encryption \
                                      configuration: the replaced data files stay in storage \

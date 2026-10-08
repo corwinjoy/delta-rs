@@ -27,7 +27,6 @@ pub trait WriterPropertiesFactory: Send + Sync + Debug + 'static {
     fn base_properties(&self) -> &WriterProperties;
 
     /// The [`WriterProperties`] for a new file, called once just before it is opened.
-    /// Implementations using AAD must derive keys from `file_path`.
     async fn create_writer_properties(
         &self,
         file_path: &Path,
