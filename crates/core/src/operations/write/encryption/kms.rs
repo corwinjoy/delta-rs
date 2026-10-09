@@ -284,7 +284,14 @@ impl KmsKeyRetriever {
         })?;
         self.kms
             .unwrap_key(&wrapped, &material.master_key_id)
-            .map_err(general)
+            .map_err(|err| {
+                ParquetError::General(format!(
+                    "could not unwrap the data key for master key '{}' through the KMS: {err}. \
+                     The KMS is the one registered as delta.encryption.kms_id, configured by \
+                     delta.encryption.kms_configuration; check both if the KMS has moved",
+                    material.master_key_id
+                ))
+            })
     }
 }
 

@@ -19,10 +19,10 @@ use tracing::log::*;
 /// The table feature for Parquet modular encryption of data files.
 const PARQUET_ENCRYPTION_FEATURE: &str = "parquetEncryption";
 
-/// Whether this build can read tables with `delta.encryption.*` properties: not until the
-/// read path lands.
-pub(crate) const READS_ENCRYPTED_TABLES: bool = false;
-/// Whether this build can write them: needs `datafusion` + `encryption`.
+/// Whether this build can read tables with `delta.encryption.*` properties, and whether it
+/// can write them: both need `datafusion` + `encryption`; other builds refuse such tables.
+pub(crate) const READS_ENCRYPTED_TABLES: bool =
+    cfg!(all(feature = "datafusion", feature = "encryption"));
 pub(crate) const WRITES_ENCRYPTED_TABLES: bool =
     cfg!(all(feature = "datafusion", feature = "encryption"));
 

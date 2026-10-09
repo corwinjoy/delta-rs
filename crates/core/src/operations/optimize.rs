@@ -45,6 +45,7 @@ use parquet::file::properties::WriterProperties;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as DeError};
 use tracing::*;
 
+use super::write::encryption::WriterPropertiesFactoryRef;
 use crate::datafile::writer::{
     ArrowWriterOptions, PartitionWriter, PartitionWriterConfig, UploadBudget,
 };
@@ -608,7 +609,7 @@ pub struct MergeTaskParameters {
     /// Schema of written files
     file_schema: SchemaRef,
     /// Creates each file's `WriterProperties`, including any per-file encryption keys.
-    writer_properties_factory: crate::operations::write::encryption::WriterPropertiesFactoryRef,
+    writer_properties_factory: WriterPropertiesFactoryRef,
     /// Options passed to arrow writer
     arrow_options: ArrowWriterOptions,
     /// Input parameters for the optimize operation
@@ -688,7 +689,6 @@ impl MergePlan {
             num_batches: 0,
         };
 
-        // Next, initialize the writer
         let writer_config = PartitionWriterConfig::try_new(
             task_parameters.file_schema.clone(),
             partition_values.clone(),
@@ -1010,7 +1010,7 @@ pub async fn create_merge_plan(
     snapshot: &EagerSnapshot,
     filters: &[FilterLiteral<'_>],
     target_size: Option<NonZeroU64>,
-    writer_properties_factory: crate::operations::write::encryption::WriterPropertiesFactoryRef,
+    writer_properties_factory: WriterPropertiesFactoryRef,
     arrow_options: ArrowWriterOptions,
     session: SessionState,
 ) -> Result<MergePlan, DeltaTableError> {

@@ -11,6 +11,7 @@
 //! let df = ctx.read_table(provider).await?;
 
 use crate::DeltaTableError;
+use crate::delta_datafusion::decryption::Decryption;
 use crate::delta_datafusion::{
     DataFusionMixins, DeltaSessionExt, extract_partition_only_predicate,
 };
@@ -493,6 +494,7 @@ impl CdfLoadBuilder {
         table_partition_cols: &[String],
         action_type: Option<ScalarValue>,
         metrics: &ExecutionPlanMetricsSet,
+        decryption: &Decryption,
     ) -> DeltaResult<ScalarPartitionMap> {
         let mut file_groups: ScalarPartitionMap = HashMap::new();
 
@@ -516,6 +518,7 @@ impl CdfLoadBuilder {
                     self.log_store.table_root_url(),
                     Arc::clone(&self.parquet_metadata_cache),
                     metrics,
+                    decryption,
                 )
                 .await?
                 {
@@ -607,10 +610,19 @@ impl CdfLoadBuilder {
         let remove_table_schema = TableSchema::builder(Arc::clone(&add_remove_file_schema))
             .with_table_partition_cols(add_remove_partition_fields)
             .build();
+
+        // The session's parquet options. `decryption.apply` below adds the crypto settings
+        // of an encrypted table to all three sources: `_change_data` files and the regular
+        // add/remove data files are encrypted alike.
         let parquet_options = TableParquetOptions {
             global: session.config().options().execution.parquet.clone(),
             ..Default::default()
         };
+        let decryption = Decryption::from_table_config(
+            snapshot.table_configuration(),
+            session,
+            &self.log_store.table_root_url(),
+        )?;
 
         let mut cdc_source = ParquetSource::new(cdc_table_schema)
             .with_table_parquet_options(parquet_options.clone())
@@ -627,7 +639,14 @@ impl CdfLoadBuilder {
         let metrics = metrics.unwrap_or_default();
 
         let cdc_file_groups = self
-            .create_file_groups(schema.clone(), cdc, partition_values, None, &metrics)
+            .create_file_groups(
+                schema.clone(),
+                cdc,
+                partition_values,
+                None,
+                &metrics,
+                &decryption,
+            )
             .await?;
 
         let mut add_file_groups = self
@@ -637,6 +656,7 @@ impl CdfLoadBuilder {
                 partition_values,
                 Self::get_add_action_type(),
                 &metrics,
+                &decryption,
             )
             .await?;
 
@@ -647,6 +667,7 @@ impl CdfLoadBuilder {
                 partition_values,
                 Self::get_remove_action_type(),
                 &metrics,
+                &decryption,
             )
             .await?;
 
@@ -660,8 +681,13 @@ impl CdfLoadBuilder {
             self.log_store.table_root_url(),
             Arc::clone(&self.parquet_metadata_cache),
             &metrics,
+            &decryption,
         )
         .await?;
+
+        cdc_source = decryption.apply(cdc_source);
+        add_source = decryption.apply(add_source);
+        remove_source = decryption.apply(remove_source);
 
         if let Some(filters) = filters {
             cdc_source = cdc_source.with_predicate(Arc::clone(filters));
