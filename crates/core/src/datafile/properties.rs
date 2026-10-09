@@ -18,7 +18,7 @@
 
 use std::fmt::Debug;
 use std::num::NonZeroU64;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 use delta_kernel::table_configuration::TableConfiguration;
@@ -26,15 +26,20 @@ use delta_kernel::table_properties::DataSkippingNumIndexedCols;
 use object_store::path::Path;
 use parquet::basic::Compression;
 use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
+use parquet::schema::types::ColumnPath;
 
 use crate::datafile::writer::ArrowWriterOptions;
-use crate::errors::DeltaResult;
+use crate::errors::{DeltaResult, DeltaTableError};
 use crate::kernel::arrow::engine_ext::stats_table_properties;
 use crate::parquet_utils::default_writer_properties;
 use crate::table::config::{DEFAULT_NUM_INDEX_COLS, TablePropertiesExt as _};
 
 /// Rows handed to the parquet writer per slice when no other size is set.
-pub const DEFAULT_WRITE_BATCH_SIZE: usize = 8192;
+pub(crate) const DEFAULT_WRITE_BATCH_SIZE: usize = 8192;
+
+/// The parquet writer properties used when none are set: SNAPPY, delta-rs `created_by`.
+static DEFAULT_PARQUET_PROPERTIES: LazyLock<WriterProperties> =
+    LazyLock::new(|| default_writer_properties(Compression::SNAPPY));
 
 /// Engine-agnostic parquet read configuration for a Delta scan.
 // Future fields (e.g. per-file decryption) attach here.
@@ -121,7 +126,8 @@ pub struct FileContext<'a> {
 /// one returned, so a later layer overrides an earlier one on the settings both
 /// touch. A layer must not change the compression or the row-group bounds: the
 /// file extension and the row-group aligned roll are decided from the base
-/// properties before the file is opened.
+/// properties before the file is opened, and [`DeltaWriterProperties::resolve`]
+/// rejects a layer that does.
 #[async_trait::async_trait]
 pub trait WriterPropertiesLayer: Send + Sync + Debug {
     /// Apply this layer's settings to the properties of `file`.
@@ -141,19 +147,19 @@ pub trait WriterPropertiesLayer: Send + Sync + Debug {
 pub struct DeltaWriterProperties {
     /// Parquet writer properties. `None` means the delta-rs default (SNAPPY,
     /// delta-rs `created_by`), or whatever default the operation chooses.
-    parquet: Option<WriterProperties>,
+    pub(crate) parquet: Option<WriterProperties>,
     /// Options for the arrow writer on top of parquet.
-    arrow: ArrowWriterOptions,
+    pub(crate) arrow: ArrowWriterOptions,
     /// Size above which a data file is closed and a new one started.
     /// `None` means a single file per partition until the writer is closed.
-    target_file_size: Option<NonZeroU64>,
+    pub(crate) target_file_size: Option<NonZeroU64>,
     /// Rows per slice handed to the parquet writer. With the writer's row-group
     /// settings this bounds how precisely file sizes are tracked.
-    write_batch_size: Option<usize>,
+    pub(crate) write_batch_size: Option<usize>,
     /// Which columns to collect Delta data-skipping statistics for.
-    stats: WriterStatsConfig,
+    pub(crate) stats: WriterStatsConfig,
     /// Adjustments to the parquet properties, applied per file in this order.
-    layers: Vec<Arc<dyn WriterPropertiesLayer>>,
+    pub(crate) layers: Vec<Arc<dyn WriterPropertiesLayer>>,
 }
 
 impl DeltaWriterProperties {
@@ -220,17 +226,10 @@ impl DeltaWriterProperties {
         &self.stats
     }
 
-    /// The layers that adjust the parquet properties of every file, in order.
-    pub fn layers(&self) -> &[Arc<dyn WriterPropertiesLayer>] {
-        &self.layers
-    }
-
     /// The parquet writer properties every file starts from: the ones set here,
     /// or the delta-rs default (SNAPPY, delta-rs `created_by`).
-    pub fn base_parquet_properties(&self) -> WriterProperties {
-        self.parquet
-            .clone()
-            .unwrap_or_else(|| default_writer_properties(Compression::SNAPPY))
+    pub fn base_parquet_properties(&self) -> &WriterProperties {
+        self.parquet.as_ref().unwrap_or(&DEFAULT_PARQUET_PROPERTIES)
     }
 
     /// The parquet writer properties for one file: the base properties run
@@ -242,14 +241,25 @@ impl DeltaWriterProperties {
     ) -> DeltaResult<WriterProperties> {
         let base = self.base_parquet_properties();
         if self.layers.is_empty() {
-            return Ok(base);
+            return Ok(base.clone());
         }
         let file = FileContext { path, schema };
-        let mut builder = base.into_builder();
+        let mut builder = base.clone().into_builder();
         for layer in &self.layers {
             builder = layer.apply(builder, file).await?;
         }
-        Ok(builder.build())
+        let resolved = builder.build();
+        // The file's name and row-group aligned roll were decided from the base.
+        let default_column = ColumnPath::new(vec![]);
+        if resolved.compression(&default_column) != base.compression(&default_column)
+            || resolved.max_row_group_row_count() != base.max_row_group_row_count()
+            || resolved.max_row_group_bytes() != base.max_row_group_bytes()
+        {
+            return Err(DeltaTableError::generic(
+                "a writer properties layer must not change the compression or row-group bounds",
+            ));
+        }
+        Ok(resolved)
     }
 }
 
@@ -259,7 +269,6 @@ mod tests {
 
     use arrow_schema::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
     use delta_kernel::schema::{DataType, StructField, StructType};
-    use parquet::schema::types::ColumnPath;
 
     use super::*;
     use crate::test_utils::{build_test_table_configuration, column_mapping_test_field};
@@ -267,6 +276,21 @@ mod tests {
     /// Stamps `created_by` with its tag and, when asked, the file path.
     #[derive(Debug)]
     struct Tag(&'static str, bool);
+
+    /// Changes the compression, which `resolve` must reject.
+    #[derive(Debug)]
+    struct Recompress;
+
+    #[async_trait::async_trait]
+    impl WriterPropertiesLayer for Recompress {
+        async fn apply(
+            &self,
+            builder: WriterPropertiesBuilder,
+            _file: FileContext<'_>,
+        ) -> DeltaResult<WriterPropertiesBuilder> {
+            Ok(builder.set_compression(Compression::UNCOMPRESSED))
+        }
+    }
 
     #[async_trait::async_trait]
     impl WriterPropertiesLayer for Tag {
@@ -310,7 +334,6 @@ mod tests {
         let props = DeltaWriterProperties::default()
             .with_layer(Tag("first", false))
             .with_layer(Tag("second", true));
-        assert_eq!(props.layers().len(), 2);
         let resolved = props
             .resolve(&Path::from("p=1/part-0.parquet"), &file_schema())
             .await
@@ -321,6 +344,16 @@ mod tests {
             resolved.compression(&ColumnPath::from("id")),
             Compression::SNAPPY
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_rejects_a_layer_that_changes_compression() {
+        let props = DeltaWriterProperties::default().with_layer(Recompress);
+        let err = props
+            .resolve(&Path::from("part-0.parquet"), &file_schema())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("compression"), "{err}");
     }
 
     #[test]

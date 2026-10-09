@@ -228,10 +228,8 @@ impl FileArrowWriter {
 }
 
 pub enum LazyArrowWriter {
-    // Both payloads are boxed: the config carries the writer properties and the
-    // parquet writer its encoder state, each far larger than the enum needs to be.
-    Initialized(Path, ObjectStoreRef, Box<PartitionWriterConfig>),
-    Writing(Path, Box<FileArrowWriter>),
+    Initialized(Path, ObjectStoreRef, PartitionWriterConfig),
+    Writing(Path, FileArrowWriter),
 }
 
 impl LazyArrowWriter {
@@ -241,7 +239,7 @@ impl LazyArrowWriter {
         object_store: ObjectStoreRef,
         config: PartitionWriterConfig,
     ) -> Self {
-        LazyArrowWriter::Initialized(path, object_store, Box::new(config))
+        LazyArrowWriter::Initialized(path, object_store, config)
     }
 
     pub(super) async fn write_batch(&mut self, batch: &RecordBatch) -> DeltaResult<()> {
@@ -271,7 +269,7 @@ impl LazyArrowWriter {
                     }
                     return Err(e.into());
                 }
-                *self = LazyArrowWriter::Writing(path.clone(), Box::new(arrow_writer));
+                *self = LazyArrowWriter::Writing(path.clone(), arrow_writer);
             }
             LazyArrowWriter::Writing(_, arrow_writer) => {
                 arrow_writer.write(batch).await?;
@@ -332,7 +330,7 @@ impl LazyArrowWriter {
         match self {
             LazyArrowWriter::Initialized(_, _, _) => None,
             LazyArrowWriter::Writing(path, arrow_writer) => {
-                Some(finish_parquet_file(*arrow_writer, path, permit))
+                Some(finish_parquet_file(arrow_writer, path, permit))
             }
         }
     }

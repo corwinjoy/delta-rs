@@ -45,11 +45,6 @@ impl SinkFactory {
         let config = WriterConfig::new(schema, self.partition_columns.clone(), self.props.clone());
         DatasetSink::new(self.storage.clone(), config)
     }
-
-    /// Rebuild the properties new sinks are opened with.
-    fn update(&mut self, f: impl FnOnce(DeltaWriterProperties) -> DeltaWriterProperties) {
-        self.props = f(std::mem::take(&mut self.props));
-    }
 }
 
 /// The abortable flush-window state; see the module docs for the invariants it
@@ -113,26 +108,23 @@ impl WriteWindow {
     /// The writer properties new sinks are opened with (used by tests asserting
     /// on the default `created_by` metadata).
     #[cfg(test)]
-    pub(crate) fn writer_properties(&self) -> WriterProperties {
+    pub(crate) fn writer_properties(&self) -> &WriterProperties {
         self.factory.props.base_parquet_properties()
     }
 
     /// Set the target file size used for sinks opened from now on.
     pub(crate) fn set_target_file_size(&mut self, target_file_size: Option<NonZeroU64>) {
-        self.factory
-            .update(|props| props.with_target_file_size(target_file_size));
+        self.factory.props.target_file_size = target_file_size;
     }
 
     /// Set the writer properties used for sinks opened from now on.
     pub(crate) fn set_writer_properties(&mut self, writer_properties: WriterProperties) {
-        self.factory
-            .update(|props| props.with_parquet_properties(writer_properties));
+        self.factory.props.parquet = Some(writer_properties);
     }
 
     /// Set the arrow writer options used for sinks opened from now on.
     pub(crate) fn set_arrow_options(&mut self, arrow_options: ArrowWriterOptions) {
-        self.factory
-            .update(|props| props.with_arrow_options(arrow_options));
+        self.factory.props.arrow = arrow_options;
     }
 
     /// Schema widening rotates the whole window's sink, which only makes sense when

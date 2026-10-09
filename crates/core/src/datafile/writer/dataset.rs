@@ -53,11 +53,6 @@ impl WriterConfig {
         }
     }
 
-    /// How the data files are encoded.
-    pub fn props(&self) -> &DeltaWriterProperties {
-        &self.props
-    }
-
     /// Draw on `budget` instead of the fresh one [`WriterConfig::new`] makes, so configs
     /// that are not clones of each other still share one bound.
     pub(crate) fn with_upload_budget(mut self, budget: UploadBudget) -> Self {
@@ -108,15 +103,13 @@ impl DeltaWriter {
 
     /// Apply custom writer_properties to the underlying parquet writer
     pub fn with_writer_properties(mut self, writer_properties: WriterProperties) -> Self {
-        let props = std::mem::take(&mut self.config.props);
-        self.config.props = props.with_parquet_properties(writer_properties);
+        self.config.props.parquet = Some(writer_properties);
         self
     }
 
     /// Apply custom arrow_options to the underlying arrow writer
     pub fn with_arrow_options(mut self, arrow_options: ArrowWriterOptions) -> Self {
-        let props = std::mem::take(&mut self.config.props);
-        self.config.props = props.with_arrow_options(arrow_options);
+        self.config.props.arrow = arrow_options;
         self
     }
 
@@ -395,10 +388,10 @@ mod tests {
             DataType::Int32,
             true,
         )]));
-        let config = WriterConfig::new(schema, vec![], test_props(None, None, None, None));
+        let config = WriterConfig::new(schema, vec![], DeltaWriterProperties::default());
 
         let writer_properties = config.props.base_parquet_properties();
-        assert_default_created_by(&writer_properties);
+        assert_default_created_by(writer_properties);
         assert_eq!(
             writer_properties.compression(&ColumnPath::from("id")),
             Compression::SNAPPY
@@ -462,7 +455,7 @@ mod tests {
             DataType::Int32,
             true,
         )]));
-        let config = WriterConfig::new(schema.clone(), vec![], test_props(None, None, None, None));
+        let config = WriterConfig::new(schema.clone(), vec![], DeltaWriterProperties::default());
         let clone = config.clone();
         // Every writer of one write is built from clones of one config, so the
         // partitioned path shares a single bound.
@@ -470,7 +463,7 @@ mod tests {
             &config.upload_budget.semaphore,
             &clone.upload_budget.semaphore
         ));
-        let other = WriterConfig::new(schema, vec![], test_props(None, None, None, None));
+        let other = WriterConfig::new(schema, vec![], DeltaWriterProperties::default());
         // A separate write gets its own budget.
         assert!(!Arc::ptr_eq(
             &config.upload_budget.semaphore,

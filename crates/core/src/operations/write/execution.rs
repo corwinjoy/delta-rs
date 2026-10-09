@@ -280,6 +280,21 @@ struct WriteSinkConfig {
     column_mapping: Option<ColumnMappingState>,
 }
 
+impl WriteSinkConfig {
+    fn new(
+        table_config: &TableConfiguration,
+        object_store: ObjectStoreRef,
+        props: DeltaWriterProperties,
+    ) -> Self {
+        Self {
+            partition_columns: table_config.metadata().partition_columns().to_vec(),
+            object_store,
+            props: props.with_stats_config(WriterStatsConfig::from_config(table_config)),
+            column_mapping: ColumnMappingState::from_table_config(table_config),
+        }
+    }
+}
+
 /// A plan with its (physical) partition columns and optional random-prefix length.
 type ColumnMappedPlan = (Arc<dyn ExecutionPlan>, Vec<String>, Option<usize>);
 
@@ -398,12 +413,7 @@ pub(crate) async fn write_execution_plan_v2(
         plan = drop_internal_column(plan, insert_marker_column)?;
     }
 
-    let sink_config = WriteSinkConfig {
-        partition_columns: table_config.metadata().partition_columns().to_vec(),
-        object_store,
-        props: props.with_stats_config(WriterStatsConfig::from_config(table_config)),
-        column_mapping: ColumnMappingState::from_table_config(table_config),
-    };
+    let sink_config = WriteSinkConfig::new(table_config, object_store, props);
 
     if !contains_cdc {
         write_data_plan(session, plan, sink_config).await
@@ -453,12 +463,7 @@ pub(crate) async fn write_exec_plan(
                 .build(),
         );
     }
-    let sink_config = WriteSinkConfig {
-        partition_columns: table_config.metadata().partition_columns().to_vec(),
-        object_store: log_store.object_store(),
-        props: props.with_stats_config(WriterStatsConfig::from_config(table_config)),
-        column_mapping: ColumnMappingState::from_table_config(table_config),
-    };
+    let sink_config = WriteSinkConfig::new(table_config, log_store.object_store(), props);
 
     if write_as_cdc {
         write_cdc_plan(session, exec, sink_config).await

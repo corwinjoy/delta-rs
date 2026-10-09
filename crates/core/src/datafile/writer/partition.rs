@@ -6,11 +6,9 @@ use std::sync::OnceLock;
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 use delta_kernel::expressions::Scalar;
-use delta_kernel::table_properties::DataSkippingNumIndexedCols;
 use indexmap::IndexMap;
 use object_store::path::Path;
 use parquet::file::metadata::ParquetMetaData;
-use parquet::file::properties::WriterProperties;
 use tokio::task::JoinSet;
 use tracing::*;
 
@@ -60,9 +58,6 @@ pub struct PartitionWriterConfig {
     partition_values: IndexMap<String, Scalar>,
     /// How the files are encoded
     pub(super) props: DeltaWriterProperties,
-    /// `props.base_parquet_properties()`, resolved once: the file extension and the
-    /// row-group bounds are read from it before each file is opened.
-    pub(super) writer_properties: WriterProperties,
     /// Row chunks passed to parquet writer. This and the internal parquet writer settings
     /// determine how fine granular we can track / control the size of resulting files.
     write_batch_size: usize,
@@ -101,7 +96,6 @@ impl PartitionWriterConfig {
             file_schema,
             prefix,
             partition_values,
-            writer_properties: props.base_parquet_properties(),
             write_batch_size,
             max_concurrency_tasks: max_concurrency_tasks.unwrap_or_else(get_max_concurrency_tasks),
             roll_on_row_group_boundary: roll_on_row_group_boundary_default(),
@@ -147,10 +141,6 @@ pub struct PartitionWriter {
     pub(super) config: PartitionWriterConfig,
     writer: LazyArrowWriter,
     part_counter: usize,
-    /// Num index cols to collect stats for
-    num_indexed_cols: DataSkippingNumIndexedCols,
-    /// Stats columns, specific columns to collect stats from, takes precedence over num_indexed_cols
-    stats_columns: Option<Vec<String>>,
     in_flight_writers: JoinSet<DeltaResult<(Path, usize, ParquetMetaData)>>,
     /// Approximate encoded size of files already rolled to background upload;
     /// keeps `buffered_size` monotonic across rolls.
@@ -163,10 +153,13 @@ impl PartitionWriter {
         object_store: ObjectStoreRef,
         config: PartitionWriterConfig,
     ) -> DeltaResult<Self> {
-        let num_indexed_cols = config.props.stats().num_indexed_cols;
-        let stats_columns = config.props.stats().stats_columns.clone();
         let writer_id = uuid::Uuid::new_v4();
-        let first_path = next_data_path(&config.prefix, 0, &writer_id, &config.writer_properties);
+        let first_path = next_data_path(
+            &config.prefix,
+            0,
+            &writer_id,
+            config.props.base_parquet_properties(),
+        );
         let writer = Self::create_writer(object_store.clone(), first_path.clone(), &config);
 
         Ok(Self {
@@ -175,8 +168,6 @@ impl PartitionWriter {
             config,
             writer,
             part_counter: 0,
-            num_indexed_cols,
-            stats_columns,
             in_flight_writers: JoinSet::new(),
             rolled_bytes: 0,
         })
@@ -204,7 +195,7 @@ impl PartitionWriter {
             &self.config.prefix,
             self.part_counter,
             &self.writer_id,
-            &self.config.writer_properties,
+            self.config.props.base_parquet_properties(),
         )
     }
 
@@ -244,15 +235,11 @@ impl PartitionWriter {
         if !self.config.roll_on_row_group_boundary {
             return None;
         }
-        if self
-            .config
-            .writer_properties
-            .max_row_group_bytes()
-            .is_some()
-        {
+        let writer_properties = self.config.props.base_parquet_properties();
+        if writer_properties.max_row_group_bytes().is_some() {
             return None;
         }
-        let max_rows = self.config.writer_properties.max_row_group_row_count()?;
+        let max_rows = writer_properties.max_row_group_row_count()?;
         Some(max_rows - (self.writer.in_progress_rows() % max_rows))
     }
 
@@ -283,7 +270,8 @@ impl PartitionWriter {
             // row group in memory first.
             let step = self
                 .config
-                .writer_properties
+                .props
+                .base_parquet_properties()
                 .max_row_group_row_count()
                 .unwrap_or(self.config.write_batch_size)
                 .max(1);
@@ -373,8 +361,8 @@ impl PartitionWriter {
                     path.to_string(),
                     file_size as i64,
                     &metadata,
-                    self.num_indexed_cols,
-                    &self.stats_columns,
+                    self.config.props.stats().num_indexed_cols,
+                    &self.config.props.stats().stats_columns,
                 )
                 .map_err(|err| WriteError::CreateAdd {
                     source: Box::new(err),
@@ -425,6 +413,7 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
     use object_store::ObjectStoreExt as _;
     use parquet::basic::Compression;
+    use parquet::file::properties::WriterProperties;
     use parquet::file::reader::{FileReader, SerializedFileReader};
     use parquet::schema::types::ColumnPath;
     use std::num::NonZeroU64;
@@ -530,17 +519,16 @@ mod tests {
         let config = PartitionWriterConfig::try_new(
             schema,
             IndexMap::new(),
-            test_props(None, None, None, None),
+            DeltaWriterProperties::default(),
             None,
             None,
         )
         .unwrap();
 
-        assert_default_created_by(&config.writer_properties);
+        let writer_properties = config.props.base_parquet_properties();
+        assert_default_created_by(writer_properties);
         assert_eq!(
-            config
-                .writer_properties
-                .compression(&ColumnPath::from("id")),
+            writer_properties.compression(&ColumnPath::from("id")),
             Compression::SNAPPY
         );
     }

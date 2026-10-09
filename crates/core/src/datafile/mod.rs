@@ -23,9 +23,9 @@ pub mod writer;
 #[cfg(feature = "datafusion")]
 pub mod datafusion_ext;
 
+pub(crate) use properties::DEFAULT_WRITE_BATCH_SIZE;
 pub use properties::{
-    DEFAULT_WRITE_BATCH_SIZE, DeltaWriterProperties, FileContext, ReaderProperties,
-    WriterPropertiesLayer, WriterStatsConfig,
+    DeltaWriterProperties, FileContext, ReaderProperties, WriterPropertiesLayer, WriterStatsConfig,
 };
 
 /// A fallible stream of [`RecordBatch`]es — the common currency of both tiers.
