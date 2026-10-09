@@ -1,8 +1,10 @@
 //! End-to-end example: Parquet encryption via Delta table properties.
 //!
 //! Encryption is configured by setting `delta.encryption.*` table properties at table
-//! creation time.  A factory is registered once globally (or per-session) and all
-//! subsequent read and write operations on the table automatically apply encryption.
+//! creation time.  A factory is registered once globally (or per-session); writes, DataFusion
+//! scans and the table operations built on them (optimize, update, delete, merge, the change
+//! feed) then encrypt and decrypt automatically. The raw `ParquetTableReader` has no keys
+//! and refuses encrypted tables.
 //!
 //! Run with:
 //! ```shell
