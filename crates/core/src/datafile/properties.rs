@@ -114,7 +114,8 @@ impl WriterStatsConfig {
 /// the path, encodings chosen per schema) key on it.
 #[derive(Clone, Copy, Debug)]
 pub struct FileContext<'a> {
-    /// Path of the file, relative to the writer's object store.
+    /// Path of the file relative to the table root, as the Delta log records it
+    /// (so `_change_data/...` for change data files).
     pub path: &'a Path,
     /// Arrow schema of the file (partition columns removed).
     pub schema: &'a ArrowSchemaRef,
@@ -124,10 +125,11 @@ pub struct FileContext<'a> {
 ///
 /// Layers run in the order they were added, each over the builder the previous
 /// one returned, so a later layer overrides an earlier one on the settings both
-/// touch. A layer must not change the compression or the row-group bounds: the
-/// file extension and the row-group aligned roll are decided from the base
-/// properties before the file is opened, and [`DeltaWriterProperties::resolve`]
-/// rejects a layer that does.
+/// touch. A layer must not change the default compression or the row-group
+/// bounds: the file extension and the row-group aligned roll are decided from
+/// the base properties before the file is opened, and
+/// [`DeltaWriterProperties::resolve`] rejects a layer that does. Per-column
+/// compression is a layer's to set.
 #[async_trait::async_trait]
 pub trait WriterPropertiesLayer: Send + Sync + Debug {
     /// Apply this layer's settings to the properties of `file`.
@@ -160,6 +162,9 @@ pub struct DeltaWriterProperties {
     pub(crate) stats: WriterStatsConfig,
     /// Adjustments to the parquet properties, applied per file in this order.
     pub(crate) layers: Vec<Arc<dyn WriterPropertiesLayer>>,
+    /// Prepended to file paths before layers see them, for writers whose object
+    /// store is rooted below the table (change data under `_change_data`).
+    pub(crate) path_prefix: Option<Path>,
 }
 
 impl DeltaWriterProperties {
@@ -201,6 +206,13 @@ impl DeltaWriterProperties {
         self
     }
 
+    /// Layers see file paths under `prefix`: for a writer whose object store is
+    /// rooted at `prefix` below the table root, so paths stay table-relative.
+    pub(crate) fn with_path_prefix(mut self, prefix: impl Into<Path>) -> Self {
+        self.path_prefix = Some(prefix.into());
+        self
+    }
+
     /// The parquet writer properties set on these, if any.
     pub fn parquet_properties(&self) -> Option<&WriterProperties> {
         self.parquet.as_ref()
@@ -233,7 +245,8 @@ impl DeltaWriterProperties {
     }
 
     /// The parquet writer properties for one file: the base properties run
-    /// through every layer in order.
+    /// through every layer in order. `path` is relative to the writer's object
+    /// store; layers see it below the path prefix, if any.
     pub async fn resolve(
         &self,
         path: &Path,
@@ -243,6 +256,14 @@ impl DeltaWriterProperties {
         if self.layers.is_empty() {
             return Ok(base.clone());
         }
+        let prefixed;
+        let path = match &self.path_prefix {
+            Some(prefix) => {
+                prefixed = prefix.parts().chain(path.parts()).collect::<Path>();
+                &prefixed
+            }
+            None => path,
+        };
         let file = FileContext { path, schema };
         let mut builder = base.clone().into_builder();
         for layer in &self.layers {
@@ -256,7 +277,7 @@ impl DeltaWriterProperties {
             || resolved.max_row_group_bytes() != base.max_row_group_bytes()
         {
             return Err(DeltaTableError::generic(
-                "a writer properties layer must not change the compression or row-group bounds",
+                "a writer properties layer must not change the default compression or the row-group bounds",
             ));
         }
         Ok(resolved)
@@ -344,6 +365,18 @@ mod tests {
             resolved.compression(&ColumnPath::from("id")),
             Compression::SNAPPY
         );
+    }
+
+    #[tokio::test]
+    async fn layers_see_the_table_relative_path_under_a_prefix() {
+        let props = DeltaWriterProperties::default()
+            .with_layer(Tag("cdc", true))
+            .with_path_prefix("_change_data");
+        let resolved = props
+            .resolve(&Path::from("p=1/part-0.parquet"), &file_schema())
+            .await
+            .unwrap();
+        assert_eq!(resolved.created_by(), "cdc _change_data/p=1/part-0.parquet");
     }
 
     #[tokio::test]

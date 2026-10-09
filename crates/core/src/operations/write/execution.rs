@@ -336,6 +336,7 @@ pub(crate) async fn write_execution_plan_cdc(
     props: DeltaWriterProperties,
 ) -> DeltaResult<Vec<Action>> {
     let cdc_store = Arc::new(PrefixStore::new(object_store, "_change_data"));
+    let props = props.with_path_prefix("_change_data");
 
     Ok(
         write_execution_plan(table_config, session, plan, cdc_store, props)
@@ -919,9 +920,13 @@ async fn write_cdc_plan(
     .with_random_prefix_length(random_prefix_length)
     .with_upload_budget(upload_budget.clone());
 
-    let cdf_config = WriterConfig::new(cdf_schema.clone(), partition_columns.clone(), props)
-        .with_random_prefix_length(random_prefix_length)
-        .with_upload_budget(upload_budget);
+    let cdf_config = WriterConfig::new(
+        cdf_schema.clone(),
+        partition_columns.clone(),
+        props.with_path_prefix("_change_data"),
+    )
+    .with_random_prefix_length(random_prefix_length)
+    .with_upload_budget(upload_budget);
 
     // Keep the previous single-writer fan-in path for unpartitioned tables.
     if partition_columns.is_empty() {

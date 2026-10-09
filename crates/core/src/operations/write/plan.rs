@@ -688,8 +688,8 @@ fn align_plan_to_schema(plan: LogicalPlan, target_plan: &LogicalPlan) -> DeltaRe
     Ok(LogicalPlanBuilder::new(plan).project(projection)?.build()?)
 }
 
-/// The table's target file size applies unless the caller chose one, where an
-/// explicit `None` means files never roll.
+/// The builder's target file size wins (an explicit `None` means files never
+/// roll), then one carried by the writer properties, then the table's.
 fn resolve_target_file_size(
     snapshot: Option<&EagerSnapshot>,
     target_file_size: Option<Option<NonZeroU64>>,
@@ -697,8 +697,9 @@ fn resolve_target_file_size(
     configuration: &HashMap<String, Option<String>>,
 ) -> DeltaWriterProperties {
     let config = snapshot.map(|snapshot| snapshot.table_properties());
-    let target_file_size =
-        target_file_size.unwrap_or_else(|| Some(get_target_file_size(config, configuration)));
+    let target_file_size = target_file_size
+        .or_else(|| writer_properties.target_file_size().map(Some))
+        .unwrap_or_else(|| Some(get_target_file_size(config, configuration)));
     writer_properties.with_target_file_size(target_file_size)
 }
 
