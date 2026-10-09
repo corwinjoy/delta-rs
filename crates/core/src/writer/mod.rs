@@ -213,6 +213,11 @@ pub trait DeltaWriter<T> {
 
     /// Flush the internal write buffers to files in the delta table folder structure.
     /// The corresponding delta [`Add`] actions are returned and should be committed via a transaction.
+    ///
+    /// The files are written under the table configuration the writer was created with.
+    /// Commit them against that same snapshot, so a concurrent change to the table, such
+    /// as a replace that turns on encryption, is caught as a commit conflict; or use
+    /// [`flush_and_commit`](Self::flush_and_commit), which checks the table it is given.
     async fn flush(&mut self) -> Result<Vec<Add>, DeltaTableError>;
 
     /// Flush the internal write buffers to files in the delta table folder structure.
