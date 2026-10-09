@@ -258,7 +258,13 @@ impl ProtocolChecker {
         // NOTE: writers must always support all required reader features
         self.can_read_from(snapshot)?;
         self.check_encryption(snapshot.metadata().configuration(), WRITES_ENCRYPTED_TABLES)?;
-        let min_writer_version = snapshot.protocol().min_writer_version();
+        self.can_write_to_protocol(snapshot.protocol())
+    }
+
+    /// The writer-feature half of [`can_write_to`](Self::can_write_to): no reader or
+    /// encryption checks.
+    pub fn can_write_to_protocol(&self, protocol: &Protocol) -> Result<(), TransactionError> {
+        let min_writer_version = protocol.min_writer_version();
 
         let required_features: Option<HashSet<TableFeature>> = match min_writer_version {
             0 | 1 => None,
@@ -267,7 +273,7 @@ impl ProtocolChecker {
             4 => Some(WRITER_V4.clone()),
             5 => Some(WRITER_V5.clone()),
             6 => Some(WRITER_V6.clone()),
-            _ => snapshot.protocol().writer_features_set(),
+            _ => protocol.writer_features_set(),
         };
 
         trace!("my writer features: {:?}", self.writer_features);
@@ -297,7 +303,14 @@ impl ProtocolChecker {
         if let Some(metadata) = new_metadata {
             check_encryption_change(snapshot, metadata, operation)?;
         }
-        self.can_write_to(snapshot)?;
+        if matches!(operation, DeltaOperation::Create { .. }) {
+            // A replace removes every data file without reading one, so the old table's
+            // encryption does not constrain it; only its protocol does.
+            self.can_read_from_protocol(snapshot.protocol())?;
+            self.can_write_to_protocol(snapshot.protocol())?;
+        } else {
+            self.can_write_to(snapshot)?;
+        }
 
         // https://github.com/delta-io/delta/blob/master/PROTOCOL.md#append-only-tables
         let append_only_enabled = if snapshot.protocol().min_writer_version() < 2 {
@@ -1122,6 +1135,44 @@ mod tests {
         }
         // The same configuration restores fine.
         check_encryption_change(snapshot, snapshot.metadata(), &restore).unwrap();
+    }
+
+    /// Create-or-replace removes every data file without reading one, so a build that can
+    /// neither read nor write encrypted tables can still replace one, with new keys or
+    /// with none.
+    #[tokio::test]
+    async fn create_or_replace_can_replace_an_encrypted_table() {
+        use crate::operations::create::CreateBuilder;
+        use crate::protocol::SaveMode;
+        use crate::table::config::ENCRYPTION_FOOTER_KEY_PROP;
+
+        let table = encrypted_table().await;
+        let replace = || {
+            CreateBuilder::new()
+                .with_log_store(table.log_store())
+                .with_columns(TestSchemas::simple().fields().cloned())
+                .with_save_mode(SaveMode::Overwrite)
+        };
+
+        let rekeyed = replace()
+            .with_configuration_property(TableProperty::EncryptionKmsId, Some("test-kms"))
+            .with_configuration_property(TableProperty::EncryptionFooterKey, Some("fk2"))
+            .await
+            .unwrap();
+        let configuration = rekeyed.snapshot().unwrap().metadata().configuration();
+        assert_eq!(
+            configuration
+                .get(ENCRYPTION_FOOTER_KEY_PROP)
+                .map(String::as_str),
+            Some("fk2")
+        );
+
+        let plaintext = replace().await.unwrap();
+        let configuration = plaintext.snapshot().unwrap().metadata().configuration();
+        assert!(
+            !EncryptionConfig::is_configured(configuration),
+            "{configuration:?}"
+        );
     }
 
     /// Reordering `column_keys` or spelling the `plaintext_footer` default is not a change.
