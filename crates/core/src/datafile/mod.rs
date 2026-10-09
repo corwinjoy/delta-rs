@@ -1,8 +1,8 @@
 //! Data-file read/write abstractions, in two tiers:
 //!
 //! * **File tier** ([`DataFileWriter`], [`DataFileReader`]) — the per-file
-//!   seam where parquet `WriterProperties` attach.
-//!   Impl: [`writer::PartitionWriter`].
+//!   seam where the parquet `WriterProperties` of a [`DeltaWriterProperties`]
+//!   attach. Impl: [`writer::PartitionWriter`].
 //! * **Dataset tier** ([`DeltaDataWriter`], [`DeltaDataReader`]) — composes the
 //!   file tier across a table. Impl: [`writer::DeltaWriter`].
 //!
@@ -22,7 +22,9 @@ pub mod writer;
 #[cfg(feature = "datafusion")]
 pub mod datafusion_ext;
 
-pub use properties::ReaderProperties;
+pub use properties::{
+    DEFAULT_WRITE_BATCH_SIZE, DeltaWriterProperties, ReaderProperties, WriterStatsConfig,
+};
 
 /// A fallible stream of [`RecordBatch`]es — the common currency of both tiers.
 /// Producers that parallelize (concurrent file opens, partitioned scans) do so

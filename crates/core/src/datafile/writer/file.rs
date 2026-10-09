@@ -145,7 +145,7 @@ pub(super) enum FileArrowWriter {
 
 impl FileArrowWriter {
     fn try_new(writer: ParquetObjectWriter, config: &PartitionWriterConfig) -> ParquetResult<Self> {
-        let options = &config.arrow_options;
+        let options = config.props.arrow_options();
         if options.enable_parallel_encoding() {
             ParallelArrowWriter::try_new(
                 writer,
@@ -222,8 +222,10 @@ impl FileArrowWriter {
 }
 
 pub enum LazyArrowWriter {
-    Initialized(Path, ObjectStoreRef, PartitionWriterConfig),
-    Writing(Path, FileArrowWriter),
+    // Both payloads are boxed: the config carries the writer properties and the
+    // parquet writer its encoder state, each far larger than the enum needs to be.
+    Initialized(Path, ObjectStoreRef, Box<PartitionWriterConfig>),
+    Writing(Path, Box<FileArrowWriter>),
 }
 
 impl LazyArrowWriter {
@@ -233,7 +235,7 @@ impl LazyArrowWriter {
         object_store: ObjectStoreRef,
         config: PartitionWriterConfig,
     ) -> Self {
-        LazyArrowWriter::Initialized(path, object_store, config)
+        LazyArrowWriter::Initialized(path, object_store, Box::new(config))
     }
 
     pub(super) async fn write_batch(&mut self, batch: &RecordBatch) -> DeltaResult<()> {
@@ -261,7 +263,7 @@ impl LazyArrowWriter {
                     }
                     return Err(e.into());
                 }
-                *self = LazyArrowWriter::Writing(path.clone(), arrow_writer);
+                *self = LazyArrowWriter::Writing(path.clone(), Box::new(arrow_writer));
             }
             LazyArrowWriter::Writing(_, arrow_writer) => {
                 arrow_writer.write(batch).await?;
@@ -322,7 +324,7 @@ impl LazyArrowWriter {
         match self {
             LazyArrowWriter::Initialized(_, _, _) => None,
             LazyArrowWriter::Writing(path, arrow_writer) => {
-                Some(finish_parquet_file(arrow_writer, path, permit))
+                Some(finish_parquet_file(*arrow_writer, path, permit))
             }
         }
     }

@@ -16,11 +16,11 @@ use itertools::Itertools as _;
 
 use crate::{
     cast_record_batch,
-    datafile::writer::WriterConfig,
+    datafile::{DeltaWriterProperties, WriterStatsConfig, writer::WriterConfig},
     delta_datafusion::{ColumnMappingState, DataFusionMixins as _},
     kernel::{Action, EagerSnapshot, transaction::CommitBuilder},
     logstore::{LogStoreRef, with_operation},
-    operations::write::{WriterStatsConfig, execution::write_streams},
+    operations::write::execution::write_streams,
     protocol::{DeltaOperation, SaveMode},
     table::config::TablePropertiesExt as _,
 };
@@ -143,7 +143,11 @@ impl DeltaDataSink {
         };
         let column_mapping =
             ColumnMappingState::from_table_config(self.snapshot.table_configuration());
-        let stats_config = WriterStatsConfig::from_config(self.snapshot.table_configuration());
+        let props = DeltaWriterProperties::default()
+            .with_target_file_size(Some(table_props.target_file_size()))
+            .with_stats_config(WriterStatsConfig::from_config(
+                self.snapshot.table_configuration(),
+            ));
         let (stream, table_schema, physical_partition_columns, random_prefix_length) =
             match &column_mapping {
                 None => (
@@ -173,17 +177,8 @@ impl DeltaDataSink {
                     )
                 }
             };
-        let config = WriterConfig::new(
-            table_schema,
-            physical_partition_columns,
-            None,
-            None,
-            Some(table_props.target_file_size()),
-            None,
-            stats_config.num_indexed_cols,
-            stats_config.stats_columns,
-        )
-        .with_random_prefix_length(random_prefix_length);
+        let config = WriterConfig::new(table_schema, physical_partition_columns, props)
+            .with_random_prefix_length(random_prefix_length);
 
         let (adds, write_metrics) = write_streams(vec![stream], object_store, config).await?;
         let total_rows = write_metrics.rows_written;

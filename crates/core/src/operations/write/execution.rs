@@ -1,4 +1,3 @@
-use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, OnceLock};
 
@@ -17,20 +16,17 @@ use datafusion::physical_plan::{
 use delta_kernel::table_configuration::TableConfiguration;
 use futures::StreamExt as _;
 use object_store::prefix::PrefixStore;
-use parquet::file::properties::WriterProperties;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use crate::DeltaTableError;
-use crate::datafile::writer::{
-    ArrowWriterOptions, DeltaWriter, UploadBudget, WriterConfig, write_batches_timed,
-};
+use crate::datafile::writer::{DeltaWriter, UploadBudget, WriterConfig, write_batches_timed};
+use crate::datafile::{DeltaWriterProperties, WriterStatsConfig};
 use crate::delta_datafusion::{ColumnMappingState, DataValidationExec, validation_predicates};
 use crate::errors::DeltaResult;
 use crate::kernel::{Action, Add, AddCDCFile};
 use crate::logstore::{LogStore, ObjectStoreRef};
 use crate::operations::cdc::CDC_COLUMN_NAME;
-use crate::operations::write::configs::{WriteExecOptions, WriterStatsConfig};
 
 /// Error message used when a worker's `send` fails because the writer task has
 /// already closed the channel (e.g. the writer errored). It is recognised by
@@ -54,10 +50,11 @@ mod tests {
     use datafusion::common::Result as DataFusionResult;
     use datafusion::error::DataFusionError;
     use datafusion::physical_plan::{RecordBatchStream, stream::RecordBatchStreamAdapter};
-    use delta_kernel::table_properties::DataSkippingNumIndexedCols;
     use futures::{Stream, stream};
     use object_store::memory::InMemory;
     use rstest::rstest;
+
+    use crate::datafile::writer::test_utils::test_props;
 
     use super::{
         ObjectStoreRef, SendableRecordBatchStream, WriterConfig, parse_positive_usize,
@@ -90,12 +87,7 @@ mod tests {
         WriterConfig::new(
             schema,
             vec![],
-            None,
-            None,
-            Some(NonZeroU64::new(1024).unwrap()),
-            Some(1024),
-            DataSkippingNumIndexedCols::NumColumns(32),
-            None,
+            test_props(None, None, Some(NonZeroU64::new(1024).unwrap()), Some(1024)),
         )
     }
 
@@ -283,12 +275,9 @@ pub(crate) struct WriteExecutionPlanMetrics {
 struct WriteSinkConfig {
     partition_columns: Vec<String>,
     object_store: ObjectStoreRef,
-    target_file_size: Option<NonZeroU64>,
-    write_batch_size: Option<usize>,
-    writer_properties: Option<WriterProperties>,
-    writer_stats_config: WriterStatsConfig,
+    /// How the files are encoded, with the table's stats configuration applied.
+    props: DeltaWriterProperties,
     column_mapping: Option<ColumnMappingState>,
-    arrow_options: Option<ArrowWriterOptions>,
 }
 
 /// A plan with its (physical) partition columns and optional random-prefix length.
@@ -329,12 +318,12 @@ pub(crate) async fn write_execution_plan_cdc(
     session: &dyn Session,
     plan: Arc<dyn ExecutionPlan>,
     object_store: ObjectStoreRef,
-    exec_options: WriteExecOptions,
+    props: DeltaWriterProperties,
 ) -> DeltaResult<Vec<Action>> {
     let cdc_store = Arc::new(PrefixStore::new(object_store, "_change_data"));
 
     Ok(
-        write_execution_plan(table_config, session, plan, cdc_store, exec_options)
+        write_execution_plan(table_config, session, plan, cdc_store, props)
             .await?
             .into_iter()
             .map(|add| {
@@ -363,14 +352,14 @@ pub(crate) async fn write_execution_plan(
     session: &dyn Session,
     plan: Arc<dyn ExecutionPlan>,
     object_store: ObjectStoreRef,
-    exec_options: WriteExecOptions,
+    props: DeltaWriterProperties,
 ) -> DeltaResult<Vec<Action>> {
     let (actions, _) = write_execution_plan_v2(
         table_config,
         session,
         plan,
         object_store,
-        exec_options,
+        props,
         None,
         false,
         None,
@@ -385,7 +374,7 @@ pub(crate) async fn write_execution_plan_v2(
     session: &dyn Session,
     plan: Arc<dyn ExecutionPlan>,
     object_store: ObjectStoreRef,
-    exec_options: WriteExecOptions,
+    props: DeltaWriterProperties,
     predicate: Option<Expr>,
     contains_cdc: bool,
     insert_marker_column: Option<String>,
@@ -412,12 +401,8 @@ pub(crate) async fn write_execution_plan_v2(
     let sink_config = WriteSinkConfig {
         partition_columns: table_config.metadata().partition_columns().to_vec(),
         object_store,
-        target_file_size: exec_options.target_file_size,
-        write_batch_size: exec_options.write_batch_size,
-        writer_properties: exec_options.writer_properties,
-        writer_stats_config: WriterStatsConfig::from_config(table_config),
+        props: props.with_stats_config(WriterStatsConfig::from_config(table_config)),
         column_mapping: ColumnMappingState::from_table_config(table_config),
-        arrow_options: exec_options.arrow_options,
     };
 
     if !contains_cdc {
@@ -456,28 +441,23 @@ pub(crate) async fn write_exec_plan(
     table_config: &TableConfiguration,
     exec: Arc<dyn ExecutionPlan>,
     write_as_cdc: bool,
-    exec_options: WriteExecOptions,
+    mut props: DeltaWriterProperties,
 ) -> DeltaResult<(Vec<Action>, WriteExecutionPlanMetrics)> {
-    let writer_properties = match exec_options.writer_properties {
-        Some(props) => props,
-        None => session
-            .config_options()
-            .execution
-            .parquet
-            .into_writer_properties_builder()?
-            .build(),
-    };
-    let stats_config = WriterStatsConfig::from_config(table_config);
-    let object_store = log_store.object_store();
+    if props.parquet_properties().is_none() {
+        props = props.with_parquet_properties(
+            session
+                .config_options()
+                .execution
+                .parquet
+                .into_writer_properties_builder()?
+                .build(),
+        );
+    }
     let sink_config = WriteSinkConfig {
         partition_columns: table_config.metadata().partition_columns().to_vec(),
-        object_store,
-        target_file_size: exec_options.target_file_size,
-        write_batch_size: None,
-        writer_properties: Some(writer_properties),
-        writer_stats_config: stats_config,
+        object_store: log_store.object_store(),
+        props: props.with_stats_config(WriterStatsConfig::from_config(table_config)),
         column_mapping: ColumnMappingState::from_table_config(table_config),
-        arrow_options: exec_options.arrow_options,
     };
 
     if write_as_cdc {
@@ -748,26 +728,13 @@ async fn write_data_plan(
     let WriteSinkConfig {
         partition_columns,
         object_store,
-        target_file_size,
-        write_batch_size,
-        writer_properties,
-        writer_stats_config,
+        props,
         column_mapping,
-        arrow_options,
     } = sink_config;
     let (plan, partition_columns, random_prefix_length) =
         apply_column_mapping_to_plan(plan, partition_columns, &column_mapping)?;
-    let config = WriterConfig::new(
-        plan.schema().clone(),
-        partition_columns.clone(),
-        writer_properties.clone(),
-        arrow_options,
-        target_file_size,
-        write_batch_size,
-        writer_stats_config.num_indexed_cols,
-        writer_stats_config.stats_columns.clone(),
-    )
-    .with_random_prefix_length(random_prefix_length);
+    let config = WriterConfig::new(plan.schema().clone(), partition_columns.clone(), props)
+        .with_random_prefix_length(random_prefix_length);
 
     // For unpartitioned writes, centralize writer behavior through write_streams.
     if partition_columns.is_empty() {
@@ -914,12 +881,8 @@ async fn write_cdc_plan(
     let WriteSinkConfig {
         partition_columns,
         object_store,
-        target_file_size,
-        write_batch_size,
-        writer_properties,
-        writer_stats_config,
+        props,
         column_mapping,
-        arrow_options,
     } = sink_config;
     let (plan, partition_columns, random_prefix_length) =
         apply_column_mapping_to_plan(plan, partition_columns, &column_mapping)?;
@@ -942,32 +905,18 @@ async fn write_cdc_plan(
     let cdf_schema = plan.schema().clone();
 
     // One budget for both destinations of a change-data write.
-    let upload_budget = UploadBudget::for_write(target_file_size);
+    let upload_budget = UploadBudget::for_write(props.target_file_size());
     let normal_config = WriterConfig::new(
         write_schema.clone(),
         partition_columns.clone(),
-        writer_properties.clone(),
-        arrow_options.clone(),
-        target_file_size,
-        write_batch_size,
-        writer_stats_config.num_indexed_cols,
-        writer_stats_config.stats_columns.clone(),
+        props.clone(),
     )
     .with_random_prefix_length(random_prefix_length)
     .with_upload_budget(upload_budget.clone());
 
-    let cdf_config = WriterConfig::new(
-        cdf_schema.clone(),
-        partition_columns.clone(),
-        writer_properties.clone(),
-        arrow_options,
-        target_file_size,
-        write_batch_size,
-        writer_stats_config.num_indexed_cols,
-        writer_stats_config.stats_columns.clone(),
-    )
-    .with_random_prefix_length(random_prefix_length)
-    .with_upload_budget(upload_budget);
+    let cdf_config = WriterConfig::new(cdf_schema.clone(), partition_columns.clone(), props)
+        .with_random_prefix_length(random_prefix_length)
+        .with_upload_budget(upload_budget);
 
     // Keep the previous single-writer fan-in path for unpartitioned tables.
     if partition_columns.is_empty() {

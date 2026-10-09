@@ -130,15 +130,39 @@ impl From<WriteError> for DeltaTableError {
 }
 
 #[cfg(test)]
-mod test_utils {
+pub(crate) mod test_utils {
+    use std::num::NonZeroU64;
+
     use parquet::file::properties::WriterProperties;
 
+    use super::ArrowWriterOptions;
     use crate::crate_version;
+    use crate::datafile::DeltaWriterProperties;
 
-    pub(super) fn assert_default_created_by(writer_properties: &WriterProperties) {
+    pub(crate) fn assert_default_created_by(writer_properties: &WriterProperties) {
         assert_eq!(
             writer_properties.created_by(),
             format!("delta-rs version {}", crate_version())
         );
+    }
+
+    /// [`DeltaWriterProperties`] from the optional knobs tests vary.
+    pub(crate) fn test_props(
+        writer_properties: Option<WriterProperties>,
+        arrow_options: Option<ArrowWriterOptions>,
+        target_file_size: Option<NonZeroU64>,
+        write_batch_size: Option<usize>,
+    ) -> DeltaWriterProperties {
+        let mut props = DeltaWriterProperties::default().with_target_file_size(target_file_size);
+        if let Some(writer_properties) = writer_properties {
+            props = props.with_parquet_properties(writer_properties);
+        }
+        if let Some(arrow_options) = arrow_options {
+            props = props.with_arrow_options(arrow_options);
+        }
+        if let Some(write_batch_size) = write_batch_size {
+            props = props.with_write_batch_size(write_batch_size);
+        }
+        props
     }
 }

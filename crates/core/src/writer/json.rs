@@ -15,7 +15,7 @@ use super::utils::record_batch_from_message;
 use super::window::{SinkFactory, WriteWindow};
 use super::{DeltaWriter, DeltaWriterError, WriteMode, ensure_legacy_writer_supports_table};
 use crate::DeltaTable;
-use crate::datafile::writer::ArrowWriterOptions;
+use crate::datafile::{DeltaWriterProperties, WriterStatsConfig};
 use crate::errors::DeltaTableError;
 use crate::kernel::Add;
 use crate::parquet_utils::default_writer_properties;
@@ -83,11 +83,11 @@ impl JsonWriter {
         let factory = SinkFactory {
             storage: table.object_store(),
             partition_columns,
-            writer_properties: default_writer_properties(parquet::basic::Compression::SNAPPY),
-            arrow_options: ArrowWriterOptions::default(),
-            target_file_size: None,
-            num_indexed_cols,
-            stats_columns,
+            props: DeltaWriterProperties::default()
+                .with_parquet_properties(default_writer_properties(
+                    parquet::basic::Compression::SNAPPY,
+                ))
+                .with_stats_config(WriterStatsConfig::new(num_indexed_cols, stats_columns)),
         };
         Ok(Self {
             window: WriteWindow::new(factory, schema),
