@@ -5,19 +5,30 @@
 //! sizes, and the data-skipping statistics to collect. Every write path carries
 //! one value of it end to end instead of its own subset of these knobs.
 //!
+//! Concerns that adjust the parquet properties compose as [`WriterPropertiesLayer`]s:
+//! each file's properties are the base properties run through the layers in order
+//! ([`DeltaWriterProperties::resolve`]), so a table-level setting (such as
+//! content-defined chunking from `format.options`) and a per-file one (such as
+//! encryption keys) can be added independently of each other.
+//!
 //! [`ReaderProperties`] centralizes construction of DataFusion's
 //! [`TableParquetOptions`](datafusion::config::TableParquetOptions) for Delta
 //! scans, so read/parquet-IO config (future: per-file decryption) lives in one
 //! place. Read-side counterpart to [`DeltaWriterProperties`].
 
+use std::fmt::Debug;
 use std::num::NonZeroU64;
+use std::sync::Arc;
 
+use arrow_schema::SchemaRef as ArrowSchemaRef;
 use delta_kernel::table_configuration::TableConfiguration;
 use delta_kernel::table_properties::DataSkippingNumIndexedCols;
+use object_store::path::Path;
 use parquet::basic::Compression;
-use parquet::file::properties::WriterProperties;
+use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
 
 use crate::datafile::writer::ArrowWriterOptions;
+use crate::errors::DeltaResult;
 use crate::kernel::arrow::engine_ext::stats_table_properties;
 use crate::parquet_utils::default_writer_properties;
 use crate::table::config::{DEFAULT_NUM_INDEX_COLS, TablePropertiesExt as _};
@@ -92,6 +103,35 @@ impl WriterStatsConfig {
     }
 }
 
+/// The data file a [`WriterPropertiesLayer`] is producing properties for.
+///
+/// Table-level layers ignore it; per-file layers (encryption keys derived from
+/// the path, encodings chosen per schema) key on it.
+#[derive(Clone, Copy, Debug)]
+pub struct FileContext<'a> {
+    /// Path of the file, relative to the writer's object store.
+    pub path: &'a Path,
+    /// Arrow schema of the file (partition columns removed).
+    pub schema: &'a ArrowSchemaRef,
+}
+
+/// One concern's contribution to the parquet properties of a data file.
+///
+/// Layers run in the order they were added, each over the builder the previous
+/// one returned, so a later layer overrides an earlier one on the settings both
+/// touch. A layer must not change the compression or the row-group bounds: the
+/// file extension and the row-group aligned roll are decided from the base
+/// properties before the file is opened.
+#[async_trait::async_trait]
+pub trait WriterPropertiesLayer: Send + Sync + Debug {
+    /// Apply this layer's settings to the properties of `file`.
+    async fn apply(
+        &self,
+        builder: WriterPropertiesBuilder,
+        file: FileContext<'_>,
+    ) -> DeltaResult<WriterPropertiesBuilder>;
+}
+
 /// Everything delta-rs needs to encode Delta data files.
 ///
 /// Wraps the parquet [`WriterProperties`] together with the delta-rs specific
@@ -112,6 +152,8 @@ pub struct DeltaWriterProperties {
     write_batch_size: Option<usize>,
     /// Which columns to collect Delta data-skipping statistics for.
     stats: WriterStatsConfig,
+    /// Adjustments to the parquet properties, applied per file in this order.
+    layers: Vec<Arc<dyn WriterPropertiesLayer>>,
 }
 
 impl DeltaWriterProperties {
@@ -146,6 +188,13 @@ impl DeltaWriterProperties {
         self
     }
 
+    /// Adjust the parquet properties of every file with `layer`, after the layers
+    /// added before it.
+    pub fn with_layer(mut self, layer: impl WriterPropertiesLayer + 'static) -> Self {
+        self.layers.push(Arc::new(layer));
+        self
+    }
+
     /// The parquet writer properties set on these, if any.
     pub fn parquet_properties(&self) -> Option<&WriterProperties> {
         self.parquet.as_ref()
@@ -171,6 +220,11 @@ impl DeltaWriterProperties {
         &self.stats
     }
 
+    /// The layers that adjust the parquet properties of every file, in order.
+    pub fn layers(&self) -> &[Arc<dyn WriterPropertiesLayer>] {
+        &self.layers
+    }
+
     /// The parquet writer properties every file starts from: the ones set here,
     /// or the delta-rs default (SNAPPY, delta-rs `created_by`).
     pub fn base_parquet_properties(&self) -> WriterProperties {
@@ -178,17 +232,96 @@ impl DeltaWriterProperties {
             .clone()
             .unwrap_or_else(|| default_writer_properties(Compression::SNAPPY))
     }
+
+    /// The parquet writer properties for one file: the base properties run
+    /// through every layer in order.
+    pub async fn resolve(
+        &self,
+        path: &Path,
+        schema: &ArrowSchemaRef,
+    ) -> DeltaResult<WriterProperties> {
+        let base = self.base_parquet_properties();
+        if self.layers.is_empty() {
+            return Ok(base);
+        }
+        let file = FileContext { path, schema };
+        let mut builder = base.into_builder();
+        for layer in &self.layers {
+            builder = layer.apply(builder, file).await?;
+        }
+        Ok(builder.build())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
+    use arrow_schema::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
     use delta_kernel::schema::{DataType, StructField, StructType};
     use parquet::schema::types::ColumnPath;
 
     use super::*;
     use crate::test_utils::{build_test_table_configuration, column_mapping_test_field};
+
+    /// Stamps `created_by` with its tag and, when asked, the file path.
+    #[derive(Debug)]
+    struct Tag(&'static str, bool);
+
+    #[async_trait::async_trait]
+    impl WriterPropertiesLayer for Tag {
+        async fn apply(
+            &self,
+            builder: WriterPropertiesBuilder,
+            file: FileContext<'_>,
+        ) -> DeltaResult<WriterPropertiesBuilder> {
+            let created_by = if self.1 {
+                format!("{} {}", self.0, file.path)
+            } else {
+                self.0.to_string()
+            };
+            Ok(builder.set_created_by(created_by))
+        }
+    }
+
+    fn file_schema() -> ArrowSchemaRef {
+        Arc::new(ArrowSchema::new(vec![Field::new(
+            "id",
+            ArrowDataType::Int32,
+            true,
+        )]))
+    }
+
+    #[tokio::test]
+    async fn resolve_without_layers_is_the_base() {
+        let props = DeltaWriterProperties::default();
+        let resolved = props
+            .resolve(&Path::from("part-0.parquet"), &file_schema())
+            .await
+            .unwrap();
+        assert_eq!(
+            resolved.created_by(),
+            props.base_parquet_properties().created_by()
+        );
+    }
+
+    #[tokio::test]
+    async fn layers_apply_in_order_and_see_the_file() {
+        let props = DeltaWriterProperties::default()
+            .with_layer(Tag("first", false))
+            .with_layer(Tag("second", true));
+        assert_eq!(props.layers().len(), 2);
+        let resolved = props
+            .resolve(&Path::from("p=1/part-0.parquet"), &file_schema())
+            .await
+            .unwrap();
+        assert_eq!(resolved.created_by(), "second p=1/part-0.parquet");
+        // The base settings a layer does not touch survive.
+        assert_eq!(
+            resolved.compression(&ColumnPath::from("id")),
+            Compression::SNAPPY
+        );
+    }
 
     #[test]
     fn defaults_fall_back_to_delta_rs_parquet_properties() {

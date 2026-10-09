@@ -12,6 +12,7 @@ use parquet::arrow::AsyncArrowWriter;
 use parquet::arrow::async_writer::AsyncFileWriter;
 use parquet::errors::{ParquetError, Result as ParquetResult};
 use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
+use parquet::file::properties::WriterProperties;
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::OwnedSemaphorePermit;
 use tracing::*;
@@ -144,13 +145,18 @@ pub(super) enum FileArrowWriter {
 }
 
 impl FileArrowWriter {
-    fn try_new(writer: ParquetObjectWriter, config: &PartitionWriterConfig) -> ParquetResult<Self> {
+    /// `writer_properties` are this file's own, resolved through the config's layers.
+    fn try_new(
+        writer: ParquetObjectWriter,
+        config: &PartitionWriterConfig,
+        writer_properties: WriterProperties,
+    ) -> ParquetResult<Self> {
         let options = config.props.arrow_options();
         if options.enable_parallel_encoding() {
             ParallelArrowWriter::try_new(
                 writer,
                 config.file_schema.clone(),
-                config.writer_properties.clone(),
+                writer_properties,
                 Some(options.clone()),
             )
             .map(Self::Parallel)
@@ -158,7 +164,7 @@ impl FileArrowWriter {
             AsyncArrowWriter::try_new_with_options(
                 writer,
                 config.file_schema.clone(),
-                options.to_parquet_options(config.writer_properties.clone()),
+                options.to_parquet_options(writer_properties),
             )
             .map(Self::Serial)
         }
@@ -241,6 +247,8 @@ impl LazyArrowWriter {
     pub(super) async fn write_batch(&mut self, batch: &RecordBatch) -> DeltaResult<()> {
         match self {
             LazyArrowWriter::Initialized(path, object_store, config) => {
+                // Per-file properties: a layer may key on the path or the schema.
+                let writer_properties = config.props.resolve(path, &config.file_schema).await?;
                 let writer = ParquetObjectWriter(
                     BufWriter::with_capacity(
                         Arc::clone(object_store),
@@ -249,7 +257,7 @@ impl LazyArrowWriter {
                     )
                     .with_max_concurrency(config.max_concurrency_tasks),
                 );
-                let mut arrow_writer = FileArrowWriter::try_new(writer, config)?;
+                let mut arrow_writer = FileArrowWriter::try_new(writer, config, writer_properties)?;
                 // A large first batch can complete row groups and start a multipart
                 // upload before this call returns. On failure, `self` is still
                 // `Initialized` — unreachable by the outer abort paths — so the
