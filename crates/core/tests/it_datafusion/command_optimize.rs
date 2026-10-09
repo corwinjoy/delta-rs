@@ -855,7 +855,9 @@ async fn test_optimize_execute_reads_and_writes_through_given_log_store()
         tracked_table.snapshot()?.snapshot(),
         &[],
         Some(NonZeroU64::new(1_000_000).unwrap()),
-        WriterProperties::builder().build(),
+        deltalake_core::operations::write::encryption::factory_from_writer_properties(
+            WriterProperties::builder().build(),
+        ),
         ArrowWriterOptions::default(),
         df_context.state(),
     )
@@ -1001,7 +1003,9 @@ async fn test_conflict_for_remove_actions() -> Result<(), Box<dyn Error>> {
         dt.snapshot()?.snapshot(),
         &filter,
         None,
-        WriterProperties::builder().build(),
+        deltalake_core::operations::write::encryption::factory_from_writer_properties(
+            WriterProperties::builder().build(),
+        ),
         ArrowWriterOptions::default(),
         df_context.state(),
     )
@@ -1067,7 +1071,9 @@ async fn test_no_conflict_for_append_actions() -> Result<(), Box<dyn Error>> {
         dt.snapshot()?.snapshot(),
         &filter,
         None,
-        WriterProperties::builder().build(),
+        deltalake_core::operations::write::encryption::factory_from_writer_properties(
+            WriterProperties::builder().build(),
+        ),
         ArrowWriterOptions::default(),
         df_context.state(),
     )
@@ -1130,7 +1136,9 @@ async fn test_commit_interval() -> Result<(), Box<dyn Error>> {
         dt.snapshot()?.snapshot(),
         &[],
         None,
-        WriterProperties::builder().build(),
+        deltalake_core::operations::write::encryption::factory_from_writer_properties(
+            WriterProperties::builder().build(),
+        ),
         ArrowWriterOptions::default(),
         context.state(),
     )

@@ -17,10 +17,12 @@ use datafusion::physical_plan::{
 use delta_kernel::table_configuration::TableConfiguration;
 use futures::StreamExt as _;
 use object_store::prefix::PrefixStore;
-use parquet::file::properties::WriterProperties;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
+use super::encryption::{
+    WriterPropertiesFactoryRef, default_writer_properties_factory, writer_factory,
+};
 use crate::DeltaTableError;
 use crate::datafile::writer::{
     ArrowWriterOptions, DeltaWriter, UploadBudget, WriterConfig, write_batches_timed,
@@ -31,12 +33,16 @@ use crate::kernel::{Action, Add, AddCDCFile};
 use crate::logstore::{LogStore, ObjectStoreRef};
 use crate::operations::cdc::CDC_COLUMN_NAME;
 use crate::operations::write::configs::{WriteExecOptions, WriterStatsConfig};
+use crate::writer::writer_factory::with_path_prefix;
 
 /// Error message used when a worker's `send` fails because the writer task has
 /// already closed the channel (e.g. the writer errored). It is recognised by
 /// [`is_writer_task_closed_error`] so the real (writer) error is surfaced
 /// instead of this downstream symptom.
 const WRITER_TASK_CLOSED_UNEXPECTEDLY_MSG: &str = "Writer task closed unexpectedly";
+
+/// Directory, below the table root, that change data files are written to.
+const CHANGE_DATA_DIR: &str = "_change_data";
 
 #[cfg(test)]
 mod tests {
@@ -285,7 +291,8 @@ struct WriteSinkConfig {
     object_store: ObjectStoreRef,
     target_file_size: Option<NonZeroU64>,
     write_batch_size: Option<usize>,
-    writer_properties: Option<WriterProperties>,
+    /// Creates each file's `WriterProperties`, including any per-file encryption keys.
+    writer_properties_factory: Option<WriterPropertiesFactoryRef>,
     writer_stats_config: WriterStatsConfig,
     column_mapping: Option<ColumnMappingState>,
     arrow_options: Option<ArrowWriterOptions>,
@@ -331,31 +338,40 @@ pub(crate) async fn write_execution_plan_cdc(
     object_store: ObjectStoreRef,
     exec_options: WriteExecOptions,
 ) -> DeltaResult<Vec<Action>> {
-    let cdc_store = Arc::new(PrefixStore::new(object_store, "_change_data"));
-
-    Ok(
-        write_execution_plan(table_config, session, plan, cdc_store, exec_options)
-            .await?
-            .into_iter()
-            .map(|add| {
-                // Modify add actions into CDC actions
-                match add {
-                    Action::Add(add) => {
-                        Action::Cdc(AddCDCFile {
-                            // This is a gnarly hack, but the action needs the nested path, not the
-                            // path inside the prefixed store
-                            path: format!("_change_data/{}", add.path),
-                            size: add.size,
-                            partition_values: add.partition_values,
-                            data_change: false,
-                            tags: add.tags,
-                        })
-                    }
-                    _ => panic!("Expected Add action"),
-                }
-            })
-            .collect::<Vec<_>>(),
+    let cdc_store = Arc::new(PrefixStore::new(object_store, CHANGE_DATA_DIR));
+    let (actions, _) = write_plan(
+        table_config,
+        session,
+        plan,
+        cdc_store,
+        exec_options,
+        None,
+        false,
+        None,
+        Some(CHANGE_DATA_DIR),
     )
+    .await?;
+
+    Ok(actions
+        .into_iter()
+        .map(|add| {
+            // Modify add actions into CDC actions
+            match add {
+                Action::Add(add) => {
+                    Action::Cdc(AddCDCFile {
+                        // This is a gnarly hack, but the action needs the nested path, not the
+                        // path inside the prefixed store
+                        path: format!("{CHANGE_DATA_DIR}/{}", add.path),
+                        size: add.size,
+                        partition_values: add.partition_values,
+                        data_change: false,
+                        tags: add.tags,
+                    })
+                }
+                _ => panic!("Expected Add action"),
+            }
+        })
+        .collect::<Vec<_>>())
 }
 
 pub(crate) async fn write_execution_plan(
@@ -390,6 +406,34 @@ pub(crate) async fn write_execution_plan_v2(
     contains_cdc: bool,
     insert_marker_column: Option<String>,
 ) -> DeltaResult<(Vec<Action>, WriteExecutionPlanMetrics)> {
+    write_plan(
+        table_config,
+        session,
+        plan,
+        object_store,
+        exec_options,
+        predicate,
+        contains_cdc,
+        insert_marker_column,
+        None,
+    )
+    .await
+}
+
+/// [`write_execution_plan_v2`] into `object_store`, which is rooted at `file_path_prefix`
+/// below the table root when set; the writer factory still sees table-relative paths.
+#[allow(clippy::too_many_arguments)]
+async fn write_plan(
+    table_config: &TableConfiguration,
+    session: &dyn Session,
+    plan: Arc<dyn ExecutionPlan>,
+    object_store: ObjectStoreRef,
+    exec_options: WriteExecOptions,
+    predicate: Option<Expr>,
+    contains_cdc: bool,
+    insert_marker_column: Option<String>,
+    file_path_prefix: Option<&str>,
+) -> DeltaResult<(Vec<Action>, WriteExecutionPlanMetrics)> {
     let mut validations =
         validation_predicates(session, &plan.schema().to_dfschema()?, table_config)?;
 
@@ -409,12 +453,18 @@ pub(crate) async fn write_execution_plan_v2(
         plan = drop_internal_column(plan, insert_marker_column)?;
     }
 
+    let writer_factory = writer_factory(table_config, session, exec_options.writer_properties)?;
+    let writer_factory = match file_path_prefix {
+        Some(prefix) => with_path_prefix(writer_factory, prefix),
+        None => writer_factory,
+    };
+
     let sink_config = WriteSinkConfig {
         partition_columns: table_config.metadata().partition_columns().to_vec(),
         object_store,
         target_file_size: exec_options.target_file_size,
         write_batch_size: exec_options.write_batch_size,
-        writer_properties: exec_options.writer_properties,
+        writer_properties_factory: Some(writer_factory),
         writer_stats_config: WriterStatsConfig::from_config(table_config),
         column_mapping: ColumnMappingState::from_table_config(table_config),
         arrow_options: exec_options.arrow_options,
@@ -458,7 +508,10 @@ pub(crate) async fn write_exec_plan(
     write_as_cdc: bool,
     exec_options: WriteExecOptions,
 ) -> DeltaResult<(Vec<Action>, WriteExecutionPlanMetrics)> {
-    let writer_properties = match exec_options.writer_properties {
+    let stats_config = WriterStatsConfig::from_config(table_config);
+    // Resolve the base (non-crypto) writer settings: the caller's properties, or
+    // the session's parquet options.
+    let base_properties = match exec_options.writer_properties {
         Some(props) => props,
         None => session
             .config_options()
@@ -467,14 +520,14 @@ pub(crate) async fn write_exec_plan(
             .into_writer_properties_builder()?
             .build(),
     };
-    let stats_config = WriterStatsConfig::from_config(table_config);
+    let writer_factory = writer_factory(table_config, session, Some(base_properties))?;
     let object_store = log_store.object_store();
     let sink_config = WriteSinkConfig {
         partition_columns: table_config.metadata().partition_columns().to_vec(),
         object_store,
         target_file_size: exec_options.target_file_size,
         write_batch_size: None,
-        writer_properties: Some(writer_properties),
+        writer_properties_factory: Some(writer_factory),
         writer_stats_config: stats_config,
         column_mapping: ColumnMappingState::from_table_config(table_config),
         arrow_options: exec_options.arrow_options,
@@ -750,7 +803,7 @@ async fn write_data_plan(
         object_store,
         target_file_size,
         write_batch_size,
-        writer_properties,
+        writer_properties_factory,
         writer_stats_config,
         column_mapping,
         arrow_options,
@@ -760,7 +813,7 @@ async fn write_data_plan(
     let config = WriterConfig::new(
         plan.schema().clone(),
         partition_columns.clone(),
-        writer_properties.clone(),
+        writer_properties_factory,
         arrow_options,
         target_file_size,
         write_batch_size,
@@ -916,14 +969,16 @@ async fn write_cdc_plan(
         object_store,
         target_file_size,
         write_batch_size,
-        writer_properties,
+        writer_properties_factory,
         writer_stats_config,
         column_mapping,
         arrow_options,
     } = sink_config;
     let (plan, partition_columns, random_prefix_length) =
         apply_column_mapping_to_plan(plan, partition_columns, &column_mapping)?;
-    let cdf_store = Arc::new(PrefixStore::new(object_store.clone(), "_change_data"));
+    let writer_factory =
+        writer_properties_factory.unwrap_or_else(default_writer_properties_factory);
+    let cdf_store = Arc::new(PrefixStore::new(object_store.clone(), CHANGE_DATA_DIR));
 
     let write_schema = Arc::new(Schema::new(
         plan.schema()
@@ -946,7 +1001,7 @@ async fn write_cdc_plan(
     let normal_config = WriterConfig::new(
         write_schema.clone(),
         partition_columns.clone(),
-        writer_properties.clone(),
+        Some(writer_factory.clone()),
         arrow_options.clone(),
         target_file_size,
         write_batch_size,
@@ -959,7 +1014,7 @@ async fn write_cdc_plan(
     let cdf_config = WriterConfig::new(
         cdf_schema.clone(),
         partition_columns.clone(),
-        writer_properties.clone(),
+        Some(with_path_prefix(writer_factory.clone(), CHANGE_DATA_DIR)),
         arrow_options,
         target_file_size,
         write_batch_size,
@@ -1071,7 +1126,7 @@ async fn write_cdc_plan(
             .into_iter()
             .map(|add| {
                 Action::Cdc(AddCDCFile {
-                    path: format!("_change_data/{}", add.path),
+                    path: format!("{CHANGE_DATA_DIR}/{}", add.path),
                     size: add.size,
                     partition_values: add.partition_values,
                     data_change: false,
@@ -1136,7 +1191,7 @@ async fn write_cdc_plan(
                 all_actions.extend(normal_adds.into_iter().map(Action::Add));
                 all_actions.extend(cdf_adds.into_iter().map(|add| {
                     Action::Cdc(AddCDCFile {
-                        path: format!("_change_data/{}", add.path),
+                        path: format!("{CHANGE_DATA_DIR}/{}", add.path),
                         size: add.size,
                         partition_values: add.partition_values,
                         data_change: false,

@@ -211,6 +211,17 @@ fn stats_from_metadata(
             continue;
         }
 
+        // The Delta log is plaintext, so the RFC forbids per-file statistics for encrypted
+        // columns. The file's own column chunk metadata says which columns those are, under
+        // uniform or column-key encryption, whatever the stats configuration asks for.
+        #[cfg(feature = "encryption")]
+        if row_group_metadata
+            .iter()
+            .any(|row_group| row_group.column(idx).crypto_metadata().is_some())
+        {
+            continue;
+        }
+
         let maybe_stats: Option<AggregatedStats> = row_group_metadata
             .iter()
             .flat_map(|g| {

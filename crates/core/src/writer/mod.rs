@@ -44,8 +44,37 @@ pub(crate) fn ensure_legacy_writer_supports_table(
             operation,
         ));
     }
-
     Ok(())
+}
+
+/// The encryption factory for a legacy writer, from the table's configuration: `None` for
+/// an unencrypted table. The legacy writers have no DataFusion session, so the factory
+/// comes from the process-wide registry only. An invalid configuration, an unregistered
+/// factory, or an encrypted table in a build without `datafusion` + `encryption` is an
+/// error, never a plaintext write.
+pub(crate) fn resolve_legacy_writer_encryption(
+    configuration: &std::collections::HashMap<String, String>,
+) -> Result<Option<writer_factory::WriterPropertiesFactoryRef>, DeltaTableError> {
+    if !crate::table::config::EncryptionConfig::is_configured(configuration) {
+        return Ok(None);
+    }
+    #[cfg(feature = "datafusion")]
+    {
+        crate::operations::write::encryption::writer_factory_from_configuration(
+            configuration,
+            None,
+            None,
+        )
+        .map(Some)
+    }
+    #[cfg(not(feature = "datafusion"))]
+    {
+        Err(DeltaTableError::Generic(
+            "This table's delta.encryption.* properties require the 'datafusion' and \
+             'encryption' features; the legacy writers cannot encrypt without them"
+                .to_string(),
+        ))
+    }
 }
 
 /// Enum representing an error when calling [`DeltaWriter`].
@@ -184,6 +213,11 @@ pub trait DeltaWriter<T> {
 
     /// Flush the internal write buffers to files in the delta table folder structure.
     /// The corresponding delta [`Add`] actions are returned and should be committed via a transaction.
+    ///
+    /// The files are written under the table configuration the writer was created with.
+    /// Commit them against that same snapshot, so a concurrent change to the table, such
+    /// as a replace that turns on encryption, is caught as a commit conflict; or use
+    /// [`flush_and_commit`](Self::flush_and_commit), which checks the table it is given.
     async fn flush(&mut self) -> Result<Vec<Add>, DeltaTableError>;
 
     /// Flush the internal write buffers to files in the delta table folder structure.

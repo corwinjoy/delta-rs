@@ -607,10 +607,6 @@ impl DeltaScan {
     fn validate_supported_reader_features(
         snapshot: &SnapshotWrapper,
     ) -> std::result::Result<(), TransactionError> {
-        PROTOCOL.check_encryption(
-            snapshot.snapshot().metadata().configuration(),
-            crate::kernel::transaction::READS_ENCRYPTED_TABLES,
-        )?;
         match PROTOCOL.can_read_from_protocol(snapshot.snapshot().protocol()) {
             Ok(()) => Ok(()),
             Err(TransactionError::UnsupportedTableFeatures(features))
@@ -629,6 +625,14 @@ impl DeltaScan {
         // DataFusion codec deserialization bypasses DeltaScan::new.
         // Keep protocol checks on read entry points.
         Self::validate_supported_reader_features(&self.snapshot)
+            .map_err(crate::DeltaTableError::from)?;
+        // Checked here rather than in `DeltaScan::new`, so a provider can still be built
+        // for writes (e.g. INSERT INTO) to a table this build cannot read.
+        PROTOCOL
+            .check_encryption(
+                self.snapshot.snapshot().metadata().configuration(),
+                crate::kernel::transaction::READS_ENCRYPTED_TABLES,
+            )
             .map_err(crate::DeltaTableError::from)?;
         if let Some(log_store) = &self.log_store {
             super::update_datafusion_session(session, log_store.as_ref())?;
