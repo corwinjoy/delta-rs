@@ -25,6 +25,7 @@ use crate::logstore::parquet_reader::ParquetObjectReader;
 
 use crate::DeltaTable;
 use crate::errors::{DeltaResult, DeltaTableError};
+use crate::table::config::EncryptionConfig;
 
 use super::{BatchStream, DataFileReader, DeltaDataReader, ReadOptions, results_to_stream};
 
@@ -105,9 +106,15 @@ impl ParquetTableReader {
     /// Build a reader over the table's current data files.
     ///
     /// Errors if the table uses a feature this raw reader cannot honor
-    /// (deletion vectors, column mapping, or partition columns).
+    /// (deletion vectors, column mapping, partition columns, or encryption).
     pub async fn try_new(table: &DeltaTable) -> DeltaResult<Self> {
         let snapshot = table.snapshot()?;
+
+        // This reader has no decryption keys: it would fail inside the parquet decoder, or
+        // read the plaintext columns of a plaintext-footer file without an error.
+        if EncryptionConfig::is_configured(snapshot.metadata().configuration()) {
+            return Err(not_supported("encryption"));
+        }
 
         // Guard: column mapping would mean physical (not logical) column names.
         // Use the resolved mode (the property is only honored when the protocol
@@ -258,6 +265,27 @@ mod tests {
         assert!(!batches.is_empty(), "expected at least one batch");
         let total: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total, expected_rows);
+    }
+
+    #[tokio::test]
+    async fn test_parquet_table_reader_rejects_encrypted_table() {
+        use crate::table::config::TableProperty;
+
+        let schema = get_delta_schema();
+        let tmp = tempfile::tempdir().unwrap();
+        let table = CreateBuilder::new()
+            .with_location(tmp.path().to_str().unwrap())
+            .with_columns(schema.fields().cloned())
+            .with_configuration_property(TableProperty::EncryptionKmsId, Some("kms"))
+            .with_configuration_property(TableProperty::EncryptionFooterKey, Some("fk"))
+            .await
+            .unwrap();
+
+        let err = ParquetTableReader::try_new(&table)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("encryption"), "{err}");
     }
 
     #[tokio::test]

@@ -107,6 +107,8 @@ use crate::{DeltaResult, crate_version};
 
 pub use self::conflict_checker::CommitConflictError;
 pub use self::protocol::INSTANCE as PROTOCOL;
+#[cfg(feature = "datafusion")]
+pub(crate) use self::protocol::{READS_ENCRYPTED_TABLES, WRITES_ENCRYPTED_TABLES};
 
 #[cfg(test)]
 pub(crate) mod application;
@@ -201,6 +203,10 @@ pub enum TransactionError {
         "The transaction includes Remove action with data change but Delta table is append-only"
     )]
     DeltaTableAppendOnly,
+
+    /// The commit would install an invalid or disallowed `delta.encryption.*` configuration.
+    #[error("{0}")]
+    InvalidEncryptionConfig(String),
 
     /// Error returned when unsupported table features are required
     #[error("Unsupported table features required: {0:?}")]

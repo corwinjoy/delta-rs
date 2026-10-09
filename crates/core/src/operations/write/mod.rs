@@ -44,6 +44,9 @@ use futures::future::BoxFuture;
 use parquet::file::properties::WriterProperties;
 use serde::{Deserialize, Serialize};
 use tracing::Instrument;
+
+use crate::kernel::transaction::WRITES_ENCRYPTED_TABLES;
+use crate::table::config::{ENCRYPTION_PROP_PREFIX, EncryptionConfig};
 use url::Url;
 
 pub use self::configs::WriterStatsConfig;
@@ -435,7 +438,58 @@ impl WriteBuilder {
                     SaveMode::ErrorIfExists => {
                         Err(WriteError::AlreadyExists(self.log_store.root_url().clone()).into())
                     }
-                    _ => Ok((vec![], snapshot.table_configuration().clone())),
+                    _ => {
+                        // `configuration` only applies when the write creates the table.
+                        // Encryption keys are compared as parsed values, so a pipeline can
+                        // send the same configuration every run, in any order and with
+                        // display names; differing keys would be dropped silently and leave
+                        // the user believing the table is encrypted, so refuse them.
+                        let given: Vec<_> = self
+                            .configuration
+                            .iter()
+                            .filter(|(key, _)| key.starts_with(ENCRYPTION_PROP_PREFIX))
+                            .collect();
+                        if !given.is_empty() {
+                            let current = snapshot.metadata().configuration();
+                            let mut merged = current.clone();
+                            for (key, value) in &given {
+                                match value.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+                                    Some(value) => merged.insert((*key).clone(), value.to_string()),
+                                    None => merged.remove(*key),
+                                };
+                            }
+                            let changed = match EncryptionConfig::try_from_configuration(current)? {
+                                // Any key set on an unencrypted table is a change.
+                                None => given
+                                    .iter()
+                                    .find(|(key, _)| merged.contains_key(*key))
+                                    .map(|(key, _)| key.as_str()),
+                                Some(old) => {
+                                    let new = EncryptionConfig::try_from_configuration(&merged)?
+                                        .map(|new| {
+                                            new.with_physical_column_names(
+                                                &snapshot.schema(),
+                                                snapshot
+                                                    .table_configuration()
+                                                    .column_mapping_mode(),
+                                            )
+                                        })
+                                        .transpose()?;
+                                    EncryptionConfig::frozen_change(Some(&old), new.as_ref())
+                                }
+                            };
+                            if let Some(key) = changed {
+                                return Err(DeltaTableError::Generic(format!(
+                                    "'{key}' was given in the write configuration with a value \
+                                 that differs from the table's, but a write does not change \
+                                 the configuration of an existing table; to change its \
+                                 encryption, recreate it with create-or-replace, or write to \
+                                 a new table"
+                                )));
+                            }
+                        }
+                        Ok((vec![], snapshot.table_configuration().clone()))
+                    }
                 }
             }
             None => {
@@ -465,6 +519,10 @@ impl WriteBuilder {
                 else {
                     unreachable!("CreateBuilder always yields a Create operation")
                 };
+                // A first write creates the table and commits without a snapshot, so
+                // `can_commit` never checks it: refuse encryption here while this build
+                // cannot encrypt, or the new table would hold plaintext files.
+                PROTOCOL.check_encryption(metadata.configuration(), WRITES_ENCRYPTED_TABLES)?;
                 Ok((
                     actions,
                     TableConfiguration::try_new(metadata, protocol, location, 0)?,
@@ -786,6 +844,81 @@ mod tests {
     fn assert_common_write_metrics(write_metrics: WriteMetrics) {
         // assert!(write_metrics.execution_time_ms > 0);
         assert!(write_metrics.num_added_files > 0);
+    }
+
+    /// Encryption properties in the configuration of a write to an existing table are
+    /// refused when they differ from the table's, rather than silently dropped; matching
+    /// ones pass, so a pipeline can send the same configuration on every run.
+    #[tokio::test]
+    async fn test_write_refuses_changed_encryption_configuration_on_existing_table() {
+        let table = setup_table_with_configuration(TableProperty::AppendOnly, Some("false")).await;
+        let batch = get_record_batch(None, false);
+        for mode in [SaveMode::Append, SaveMode::Overwrite] {
+            let err = table
+                .clone()
+                .write(vec![batch.clone()])
+                .with_save_mode(mode)
+                .with_configuration([("delta.encryption.footer_key", Some("fk"))])
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("delta.encryption.footer_key"), "{err}");
+            assert!(err.contains("create-or-replace"), "{err}");
+        }
+        // Unset on both sides is not a change.
+        table
+            .clone()
+            .write(vec![batch.clone()])
+            .with_configuration([("delta.encryption.footer_key", None::<&str>)])
+            .await
+            .unwrap();
+        // An existing table is reported before any configuration check.
+        let err = table
+            .clone()
+            .write(vec![batch.clone()])
+            .with_save_mode(SaveMode::ErrorIfExists)
+            .with_configuration([("delta.encryption.footer_key", Some("fk"))])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(expect_write_error(&err), WriteError::AlreadyExists(_)),
+            "{err}"
+        );
+    }
+
+    /// A first write creates the table and commits without a snapshot, bypassing
+    /// `can_commit`, so the encryption write check runs in the write itself: until this
+    /// build can encrypt, the table is not created and no file is uploaded.
+    #[tokio::test]
+    async fn test_first_write_with_encryption_needs_write_support() {
+        use futures::TryStreamExt as _;
+
+        use crate::kernel::transaction::{TransactionError, WRITES_ENCRYPTED_TABLES};
+
+        if WRITES_ENCRYPTED_TABLES {
+            return;
+        }
+        let table = DeltaTable::new_in_memory();
+        let store = table.object_store();
+        let err = table
+            .write(vec![get_record_batch(None, false)])
+            .with_configuration([
+                ("delta.encryption.kms_id", Some("kms")),
+                ("delta.encryption.footer_key", Some("fk")),
+            ])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DeltaTableError::Transaction {
+                    source: TransactionError::UnsupportedTableFeatures(_)
+                }
+            ),
+            "{err:?}"
+        );
+        let objects: Vec<_> = store.list(None).try_collect().await.unwrap();
+        assert!(objects.is_empty(), "{objects:?}");
     }
 
     #[tokio::test]

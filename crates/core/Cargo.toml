@@ -126,6 +126,8 @@ datafusion = [
     "datafusion-proto",
 ]
 datafusion-ext = ["datafusion"]
+# Parquet Modular Encryption for tables configured with `delta.encryption.*` properties
+encryption = ["parquet/encryption", "datafusion?/parquet_encryption"]
 json = ["parquet/json"]
 python = ["arrow/pyarrow"]
 native-tls = ["delta_kernel_default_engine/native-tls"]

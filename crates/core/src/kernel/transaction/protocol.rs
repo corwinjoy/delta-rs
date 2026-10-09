@@ -1,19 +1,28 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
-use delta_kernel::table_features::TableFeature;
+use delta_kernel::table_features::{ColumnMappingMode, TableFeature};
+use delta_kernel::table_properties::TableProperties;
 
 use super::{TableReference, TransactionError};
 #[cfg(feature = "nanosecond-timestamps")]
 use crate::kernel::contains_timestamp_nanos;
 use crate::kernel::{
-    Action, EagerSnapshot, Protocol, ProtocolExt as _, Schema, contains_timestampntz,
+    Action, EagerSnapshot, Metadata, Protocol, ProtocolExt as _, Schema, contains_timestampntz,
     contains_variant,
 };
 use crate::protocol::DeltaOperation;
-use crate::table::config::TablePropertiesExt as _;
+use crate::table::config::{EncryptionConfig, TablePropertiesExt as _};
 
 use tracing::log::*;
+
+/// The table feature for Parquet modular encryption of data files.
+const PARQUET_ENCRYPTION_FEATURE: &str = "parquetEncryption";
+
+/// Whether this build can read and write tables with `delta.encryption.*` properties.
+/// Until the read and write paths land, both are refused.
+pub(crate) const READS_ENCRYPTED_TABLES: bool = false;
+pub(crate) const WRITES_ENCRYPTED_TABLES: bool = false;
 
 static READER_V2: LazyLock<HashSet<TableFeature>> =
     LazyLock::new(|| HashSet::from_iter([TableFeature::ColumnMapping]));
@@ -197,7 +206,24 @@ impl ProtocolChecker {
 
     /// Check if delta-rs can read form the given delta table.
     pub fn can_read_from(&self, snapshot: &dyn TableReference) -> Result<(), TransactionError> {
-        self.can_read_from_protocol(snapshot.protocol())
+        self.can_read_from_protocol(snapshot.protocol())?;
+        self.check_encryption(snapshot.metadata().configuration(), READS_ENCRYPTED_TABLES)
+    }
+
+    /// Refuse a table with `delta.encryption.*` properties unless `supported`
+    /// ([`READS_ENCRYPTED_TABLES`] or [`WRITES_ENCRYPTED_TABLES`]), with the error the
+    /// RFC's `parquetEncryption` feature would produce once kernel can carry it.
+    pub(crate) fn check_encryption(
+        &self,
+        configuration: &HashMap<String, String>,
+        supported: bool,
+    ) -> Result<(), TransactionError> {
+        if !supported && EncryptionConfig::is_configured(configuration) {
+            return Err(TransactionError::UnsupportedTableFeatures(vec![
+                TableFeature::Unknown(PARQUET_ENCRYPTION_FEATURE.to_string()),
+            ]));
+        }
+        Ok(())
     }
 
     pub fn can_read_from_protocol(&self, protocol: &Protocol) -> Result<(), TransactionError> {
@@ -231,7 +257,14 @@ impl ProtocolChecker {
     pub fn can_write_to(&self, snapshot: &dyn TableReference) -> Result<(), TransactionError> {
         // NOTE: writers must always support all required reader features
         self.can_read_from(snapshot)?;
-        let min_writer_version = snapshot.protocol().min_writer_version();
+        self.check_encryption(snapshot.metadata().configuration(), WRITES_ENCRYPTED_TABLES)?;
+        self.can_write_to_protocol(snapshot.protocol())
+    }
+
+    /// The writer-feature half of [`can_write_to`](Self::can_write_to): no reader or
+    /// encryption checks.
+    pub fn can_write_to_protocol(&self, protocol: &Protocol) -> Result<(), TransactionError> {
+        let min_writer_version = protocol.min_writer_version();
 
         let required_features: Option<HashSet<TableFeature>> = match min_writer_version {
             0 | 1 => None,
@@ -240,7 +273,7 @@ impl ProtocolChecker {
             4 => Some(WRITER_V4.clone()),
             5 => Some(WRITER_V5.clone()),
             6 => Some(WRITER_V6.clone()),
-            _ => snapshot.protocol().writer_features_set(),
+            _ => protocol.writer_features_set(),
         };
 
         trace!("my writer features: {:?}", self.writer_features);
@@ -263,7 +296,21 @@ impl ProtocolChecker {
         actions: &[Action],
         operation: &DeltaOperation,
     ) -> Result<(), TransactionError> {
-        self.can_write_to(snapshot)?;
+        let new_metadata = actions.iter().find_map(|action| match action {
+            Action::Metadata(metadata) => Some(metadata),
+            _ => None,
+        });
+        if let Some(metadata) = new_metadata {
+            check_encryption_change(snapshot, metadata, operation)?;
+        }
+        if matches!(operation, DeltaOperation::Create { .. }) {
+            // A replace removes every data file without reading one, so the old table's
+            // encryption does not constrain it; only its protocol does.
+            self.can_read_from_protocol(snapshot.protocol())?;
+            self.can_write_to_protocol(snapshot.protocol())?;
+        } else {
+            self.can_write_to(snapshot)?;
+        }
 
         // https://github.com/delta-io/delta/blob/master/PROTOCOL.md#append-only-tables
         let append_only_enabled = if snapshot.protocol().min_writer_version() < 2 {
@@ -346,6 +393,92 @@ pub static INSTANCE: LazyLock<ProtocolChecker> = LazyLock::new(|| {
 
     ProtocolChecker::new(reader_features, writer_features)
 });
+
+/// Check the encryption configuration a commit installs on an existing table.
+///
+/// Encryption is set when a table is created, including create-or-replace, which removes
+/// every data file in the same commit, and is frozen after that: turning it on or off and
+/// changing `kms_id`, `footer_key`, `plaintext_footer` or `column_keys` are refused until
+/// an operation exists that rewrites every data file under the new configuration in one
+/// commit. Until then a later rewrite would re-emit old rows under a possibly weaker
+/// configuration, and old plaintext files and log statistics would stay behind. The RFC
+/// allows these changes, so this is implementation behaviour, to be relaxed later.
+///
+/// Restore is not exempt: restoring past a replace would re-add plaintext files.
+/// `kms_configuration` is not frozen. Configurations are compared as parsed values, and a
+/// new configuration must be valid.
+fn check_encryption_change(
+    snapshot: &dyn TableReference,
+    metadata: &Metadata,
+    operation: &DeltaOperation,
+) -> Result<(), TransactionError> {
+    let invalid =
+        |err: crate::DeltaTableError| TransactionError::InvalidEncryptionConfig(err.to_string());
+    let refuse = |msg: String| Err(TransactionError::InvalidEncryptionConfig(msg));
+    let new_configuration = metadata.configuration();
+    let creates_table = matches!(operation, DeltaOperation::Create { .. });
+
+    let old = if creates_table {
+        None
+    } else {
+        EncryptionConfig::try_from_configuration(snapshot.metadata().configuration()).map_err(
+            |err| {
+                TransactionError::InvalidEncryptionConfig(format!(
+                    "the table's existing encryption configuration is invalid; recreate the \
+                     table to replace it: {err}"
+                ))
+            },
+        )?
+    };
+    let new = EncryptionConfig::try_from_configuration(new_configuration).map_err(invalid)?;
+
+    let remedy = match operation {
+        DeltaOperation::Restore { .. } => {
+            "Restore cannot change a table's encryption configuration, because the restored \
+             data files were written under the old one; to recover that data, read the table \
+             at that version and write it into a new table"
+        }
+        _ => {
+            "copy the data into a new table with the configuration you want, or recreate \
+              this table with create-or-replace, which rewrites every data file"
+        }
+    };
+    match (&old, &new) {
+        (Some(_), None) => {
+            return refuse(format!(
+                "Encryption cannot be removed from a table; its data files would stay \
+                 encrypted while new ones are written in plaintext. {remedy}"
+            ));
+        }
+        (None, Some(_)) if !creates_table => {
+            return refuse(format!(
+                "Encryption can only be configured when a table is created; the data files \
+                 already in this table would stay unencrypted. {remedy}"
+            ));
+        }
+        (Some(old), Some(new)) => {
+            if let Some(changed) = old.changed_frozen_property(new) {
+                return refuse(format!(
+                    "'{changed}' cannot be changed on an encrypted table; its data files \
+                     would stay encrypted under the old configuration. {remedy}"
+                ));
+            }
+        }
+        _ => {}
+    }
+
+    let Some(new) = new else {
+        return Ok(());
+    };
+    let schema = metadata.parse_schema().map_err(|err| invalid(err.into()))?;
+    let column_mapping_mode = TableProperties::from(new_configuration.iter())
+        .column_mapping_mode
+        .unwrap_or(ColumnMappingMode::None);
+    new.validate_columns(&schema, metadata.partition_columns(), column_mapping_mode)
+        .map_err(invalid)?;
+    new.validate_stats_columns(new_configuration, &schema, column_mapping_mode)
+        .map_err(invalid)
+}
 
 #[cfg(test)]
 mod tests {
@@ -894,5 +1027,176 @@ mod tests {
                 .check_can_write_variant(preview_feature.snapshot(), &schema)
                 .is_ok()
         );
+    }
+
+    /// An encrypted table whose snapshot `check_encryption_change` can be run against.
+    async fn encrypted_table() -> crate::DeltaTable {
+        use crate::operations::create::CreateBuilder;
+
+        CreateBuilder::new()
+            .with_location("memory:///")
+            .with_columns(TestSchemas::simple().fields().cloned())
+            .with_configuration_property(TableProperty::EncryptionKmsId, Some("test-kms"))
+            .with_configuration_property(TableProperty::EncryptionFooterKey, Some("fk"))
+            .with_configuration_property(
+                TableProperty::EncryptionColumnKeys,
+                Some("pii:value,modified"),
+            )
+            .with_configuration_property(
+                TableProperty::EncryptionKmsConfiguration,
+                Some(r#"{"endpoint":"a"}"#),
+            )
+            .await
+            .unwrap()
+    }
+
+    fn set_properties() -> DeltaOperation {
+        DeltaOperation::SetTableProperties {
+            properties: HashMap::new(),
+        }
+    }
+
+    /// Changing the keys of an encrypted table would leave its existing files encrypted
+    /// under the old ones, so only the KMS client configuration may change.
+    #[tokio::test]
+    async fn encryption_keys_cannot_change_on_an_encrypted_table() {
+        use crate::kernel::MetadataExt as _;
+
+        let table = encrypted_table().await;
+        let snapshot = table.snapshot().unwrap().snapshot();
+        let metadata = snapshot.metadata().clone();
+
+        for (key, value) in [
+            (TableProperty::EncryptionKmsId, "other-kms"),
+            (TableProperty::EncryptionFooterKey, "fk2"),
+            (TableProperty::EncryptionPlaintextFooter, "true"),
+            (TableProperty::EncryptionColumnKeys, "pii:id"),
+        ] {
+            let changed = metadata
+                .clone()
+                .add_config_key(key.as_ref().to_string(), value.to_string())
+                .unwrap();
+            let err = check_encryption_change(snapshot, &changed, &set_properties())
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("cannot be changed"), "{}: {err}", key.as_ref());
+            assert!(err.contains(key.as_ref()), "{err}");
+        }
+
+        // The same configuration, and a different KMS endpoint, are fine.
+        check_encryption_change(snapshot, &metadata, &set_properties()).unwrap();
+        let reconfigured = metadata
+            .add_config_key(
+                TableProperty::EncryptionKmsConfiguration
+                    .as_ref()
+                    .to_string(),
+                r#"{"endpoint":"b"}"#.to_string(),
+            )
+            .unwrap();
+        check_encryption_change(snapshot, &reconfigured, &set_properties()).unwrap();
+    }
+
+    /// Restore past a replace would re-add plaintext files, so it is refused like any other
+    /// change.
+    #[tokio::test]
+    async fn restore_cannot_change_encryption() {
+        use crate::kernel::MetadataExt as _;
+
+        let table = encrypted_table().await;
+        let snapshot = table.snapshot().unwrap().snapshot();
+        let mut plaintext = snapshot.metadata().clone();
+        for key in [
+            TableProperty::EncryptionKmsId,
+            TableProperty::EncryptionFooterKey,
+            TableProperty::EncryptionColumnKeys,
+            TableProperty::EncryptionKmsConfiguration,
+        ] {
+            plaintext = plaintext.remove_config_key(key.as_ref()).unwrap();
+        }
+        let rekeyed = snapshot
+            .metadata()
+            .clone()
+            .add_config_key(
+                TableProperty::EncryptionFooterKey.as_ref().to_string(),
+                "fk-old".to_string(),
+            )
+            .unwrap();
+        let restore = DeltaOperation::Restore {
+            version: Some(0),
+            datetime: None,
+        };
+
+        for changed in [&plaintext, &rekeyed] {
+            let err = check_encryption_change(snapshot, changed, &restore)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("Restore cannot change"), "{err}");
+            assert!(err.contains("write it into a new table"), "{err}");
+        }
+        // The same configuration restores fine.
+        check_encryption_change(snapshot, snapshot.metadata(), &restore).unwrap();
+    }
+
+    /// Create-or-replace removes every data file without reading one, so a build that can
+    /// neither read nor write encrypted tables can still replace one, with new keys or
+    /// with none.
+    #[tokio::test]
+    async fn create_or_replace_can_replace_an_encrypted_table() {
+        use crate::operations::create::CreateBuilder;
+        use crate::protocol::SaveMode;
+        use crate::table::config::ENCRYPTION_FOOTER_KEY_PROP;
+
+        let table = encrypted_table().await;
+        let replace = || {
+            CreateBuilder::new()
+                .with_log_store(table.log_store())
+                .with_columns(TestSchemas::simple().fields().cloned())
+                .with_save_mode(SaveMode::Overwrite)
+        };
+
+        let rekeyed = replace()
+            .with_configuration_property(TableProperty::EncryptionKmsId, Some("test-kms"))
+            .with_configuration_property(TableProperty::EncryptionFooterKey, Some("fk2"))
+            .await
+            .unwrap();
+        let configuration = rekeyed.snapshot().unwrap().metadata().configuration();
+        assert_eq!(
+            configuration
+                .get(ENCRYPTION_FOOTER_KEY_PROP)
+                .map(String::as_str),
+            Some("fk2")
+        );
+
+        let plaintext = replace().await.unwrap();
+        let configuration = plaintext.snapshot().unwrap().metadata().configuration();
+        assert!(
+            !EncryptionConfig::is_configured(configuration),
+            "{configuration:?}"
+        );
+    }
+
+    /// Reordering `column_keys` or spelling the `plaintext_footer` default is not a change.
+    #[tokio::test]
+    async fn reordered_encryption_properties_are_not_a_change() {
+        use crate::kernel::MetadataExt as _;
+
+        let table = encrypted_table().await;
+        let snapshot = table.snapshot().unwrap().snapshot();
+        let reordered = snapshot
+            .metadata()
+            .clone()
+            .add_config_key(
+                TableProperty::EncryptionColumnKeys.as_ref().to_string(),
+                " pii : modified , value ".to_string(),
+            )
+            .unwrap()
+            .add_config_key(
+                TableProperty::EncryptionPlaintextFooter
+                    .as_ref()
+                    .to_string(),
+                "false".to_string(),
+            )
+            .unwrap();
+        check_encryption_change(snapshot, &reordered, &set_properties()).unwrap();
     }
 }
