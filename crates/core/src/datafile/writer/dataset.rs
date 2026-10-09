@@ -408,7 +408,7 @@ mod tests {
         )]));
         let config = WriterConfig::new(schema, vec![], DeltaWriterProperties::default());
 
-        let writer_properties = config.props.base_parquet_properties();
+        let writer_properties = config.props.parquet_properties_or_default();
         assert_default_created_by(writer_properties);
         assert_eq!(
             writer_properties.compression(&ColumnPath::from("id")),

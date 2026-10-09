@@ -109,7 +109,7 @@ impl WriteWindow {
     /// on the default `created_by` metadata).
     #[cfg(test)]
     pub(crate) fn writer_properties(&self) -> &WriterProperties {
-        self.factory.props.base_parquet_properties()
+        self.factory.props.parquet_properties_or_default()
     }
 
     /// Set the target file size used for sinks opened from now on.

@@ -158,7 +158,7 @@ impl PartitionWriter {
             &config.prefix,
             0,
             &writer_id,
-            config.props.base_parquet_properties(),
+            config.props.parquet_properties_or_default(),
         );
         let writer = Self::create_writer(object_store.clone(), first_path.clone(), &config);
 
@@ -195,7 +195,7 @@ impl PartitionWriter {
             &self.config.prefix,
             self.part_counter,
             &self.writer_id,
-            self.config.props.base_parquet_properties(),
+            self.config.props.parquet_properties_or_default(),
         )
     }
 
@@ -235,7 +235,7 @@ impl PartitionWriter {
         if !self.config.roll_on_row_group_boundary {
             return None;
         }
-        let writer_properties = self.config.props.base_parquet_properties();
+        let writer_properties = self.config.props.parquet_properties_or_default();
         if writer_properties.max_row_group_bytes().is_some() {
             return None;
         }
@@ -271,7 +271,7 @@ impl PartitionWriter {
             let step = self
                 .config
                 .props
-                .base_parquet_properties()
+                .parquet_properties_or_default()
                 .max_row_group_row_count()
                 .unwrap_or(self.config.write_batch_size)
                 .max(1);
@@ -525,7 +525,7 @@ mod tests {
         )
         .unwrap();
 
-        let writer_properties = config.props.base_parquet_properties();
+        let writer_properties = config.props.parquet_properties_or_default();
         assert_default_created_by(writer_properties);
         assert_eq!(
             writer_properties.compression(&ColumnPath::from("id")),

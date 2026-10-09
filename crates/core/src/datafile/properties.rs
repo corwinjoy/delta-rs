@@ -6,7 +6,7 @@
 //! one value of it end to end instead of its own subset of these knobs.
 //!
 //! Concerns that adjust the parquet properties compose as [`WriterPropertiesLayer`]s:
-//! each file's properties are the base properties run through the layers in order
+//! each file's properties are the configured ones run through the layers in order
 //! ([`DeltaWriterProperties::resolve`]), so a table-level setting (such as
 //! content-defined chunking from `format.options`) and a per-file one (such as
 //! encryption keys) can be added independently of each other.
@@ -130,9 +130,10 @@ pub struct FileContext<'a> {
 /// one returned, so a later layer overrides an earlier one on the settings both
 /// touch. A layer must not change the default compression or the row-group
 /// bounds: the file extension and the row-group aligned roll are decided from
-/// the base properties before the file is opened, and
-/// [`DeltaWriterProperties::resolve`] rejects a layer that does. Per-column
-/// compression is a layer's to set; the file extension names the default only.
+/// the configured properties ([`DeltaWriterProperties::parquet_properties_or_default`])
+/// before the file is opened, and [`DeltaWriterProperties::resolve`] rejects a
+/// layer that does. Per-column compression is a layer's to set; the file
+/// extension names the default only.
 #[async_trait::async_trait]
 pub trait WriterPropertiesLayer: Send + Sync + Debug {
     /// Apply this layer's settings to the properties of `file`.
@@ -253,34 +254,35 @@ impl DeltaWriterProperties {
         self.stats.as_ref().unwrap_or(&DEFAULT_STATS)
     }
 
-    /// The parquet writer properties every file starts from: the ones set here,
-    /// or the delta-rs default (SNAPPY, delta-rs `created_by`).
-    pub fn base_parquet_properties(&self) -> &WriterProperties {
+    /// The parquet writer properties set here, or the delta-rs default (SNAPPY,
+    /// delta-rs `created_by`) when none were. Every file starts from these; the
+    /// layers, if any, adjust them per file in [`Self::resolve`].
+    pub fn parquet_properties_or_default(&self) -> &WriterProperties {
         self.parquet.as_ref().unwrap_or(&DEFAULT_PARQUET_PROPERTIES)
     }
 
-    /// The parquet writer properties for one file: the base properties run
-    /// through every layer in order. `path` is relative to the table root.
+    /// The parquet writer properties for one file: the configured properties
+    /// run through every layer in order. `path` is relative to the table root.
     pub async fn resolve(
         &self,
         path: &Path,
         schema: &ArrowSchemaRef,
     ) -> DeltaResult<WriterProperties> {
-        let base = self.base_parquet_properties();
+        let configured = self.parquet_properties_or_default();
         if self.layers.is_empty() {
-            return Ok(base.clone());
+            return Ok(configured.clone());
         }
         let file = FileContext { path, schema };
-        let mut builder = base.clone().into_builder();
+        let mut builder = configured.clone().into_builder();
         for layer in &self.layers {
             builder = layer.apply(builder, file).await?;
         }
         let resolved = builder.build();
-        // The file's name and row-group aligned roll were decided from the base.
+        // The file's name and row-group aligned roll were decided from the configured properties.
         let default_column = ColumnPath::new(vec![]);
-        if resolved.compression(&default_column) != base.compression(&default_column)
-            || resolved.max_row_group_row_count() != base.max_row_group_row_count()
-            || resolved.max_row_group_bytes() != base.max_row_group_bytes()
+        if resolved.compression(&default_column) != configured.compression(&default_column)
+            || resolved.max_row_group_row_count() != configured.max_row_group_row_count()
+            || resolved.max_row_group_bytes() != configured.max_row_group_bytes()
         {
             return Err(DeltaTableError::generic(
                 "a writer properties layer must not change the default compression or the row-group bounds",
@@ -344,7 +346,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_without_layers_is_the_base() {
+    async fn resolve_without_layers_is_the_configured_properties() {
         let props = DeltaWriterProperties::default();
         let resolved = props
             .resolve(&Path::from("part-0.parquet"), &file_schema())
@@ -352,7 +354,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             resolved.created_by(),
-            props.base_parquet_properties().created_by()
+            props.parquet_properties_or_default().created_by()
         );
     }
 
@@ -366,7 +368,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resolved.created_by(), "second p=1/part-0.parquet");
-        // The base settings a layer does not touch survive.
+        // The configured settings a layer does not touch survive.
         assert_eq!(
             resolved.compression(&ColumnPath::from("id")),
             Compression::SNAPPY
@@ -425,13 +427,13 @@ mod tests {
     fn defaults_fall_back_to_delta_rs_parquet_properties() {
         let props = DeltaWriterProperties::default();
         assert!(props.parquet_properties().is_none());
-        let base = props.base_parquet_properties();
+        let default = props.parquet_properties_or_default();
         assert_eq!(
-            base.created_by(),
+            default.created_by(),
             format!("delta-rs version {}", crate::crate_version())
         );
         assert_eq!(
-            base.compression(&ColumnPath::from("id")),
+            default.compression(&ColumnPath::from("id")),
             Compression::SNAPPY
         );
         assert!(props.target_file_size().is_none());
@@ -458,7 +460,7 @@ mod tests {
             ));
         assert_eq!(
             props
-                .base_parquet_properties()
+                .parquet_properties_or_default()
                 .compression(&ColumnPath::from("id")),
             Compression::UNCOMPRESSED
         );
