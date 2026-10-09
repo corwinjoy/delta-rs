@@ -104,7 +104,6 @@ use crate::operations::write::generated_columns::{
     add_generated_columns, add_missing_generated_columns, gc_is_enabled,
 };
 use crate::protocol::{DeltaOperation, MergePredicate};
-use crate::table::config::TablePropertiesExt as _;
 use crate::table::state::DeltaTableState;
 use crate::{DeltaResult, DeltaTable, DeltaTableError};
 use delta_kernel::table_features::ColumnMappingMode;
@@ -453,7 +452,8 @@ impl MergeBuilder {
     }
 
     /// Everything about how the rewritten data files are encoded, replacing any
-    /// parquet writer properties and arrow writer options set so far.
+    /// parquet writer properties and arrow writer options set so far. A target
+    /// file size or stats config left unset falls back to the table's.
     pub fn with_delta_writer_properties(
         mut self,
         writer_properties: DeltaWriterProperties,
@@ -1660,8 +1660,7 @@ async fn execute(
         &state,
         write,
         log_store.object_store(),
-        writer_properties
-            .with_target_file_size(Some(snapshot.table_properties().target_file_size())),
+        writer_properties.with_table_defaults(snapshot.table_configuration()),
         None,
         should_cdc, // if true, write execution plan splits batches in [normal, cdc] data before writing
         None,

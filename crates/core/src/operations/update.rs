@@ -67,7 +67,6 @@ use crate::{
         Action, ActiveAddOptions, AddStatsPolicy, EagerSnapshot,
         transaction::{CommitBuilder, CommitProperties, PROTOCOL},
     },
-    table::config::TablePropertiesExt,
 };
 
 /// Custom column name used for marking internal [RecordBatch] rows as updated
@@ -195,7 +194,8 @@ impl UpdateBuilder {
     }
 
     /// Everything about how the rewritten data files are encoded, replacing any
-    /// parquet writer properties and arrow writer options set so far.
+    /// parquet writer properties and arrow writer options set so far. A target
+    /// file size or stats config left unset falls back to the table's.
     pub fn with_delta_writer_properties(
         mut self,
         writer_properties: DeltaWriterProperties,
@@ -379,7 +379,7 @@ async fn execute(
         log_store.object_store(),
         writer_properties
             .clone()
-            .with_target_file_size(Some(snapshot.table_properties().target_file_size())),
+            .with_table_defaults(snapshot.table_configuration()),
     )
     .await?;
 
@@ -431,9 +431,7 @@ async fn execute(
                     session,
                     cdc_exec,
                     log_store.object_store(),
-                    writer_properties.with_target_file_size(Some(
-                        snapshot.table_properties().target_file_size(),
-                    )),
+                    writer_properties.with_table_defaults(snapshot.table_configuration()),
                 )
                 .await?;
                 actions.extend(cdc_actions);

@@ -84,7 +84,6 @@ use crate::logstore::{LogStore, LogStoreRef};
 use crate::operations::cdc::CDC_COLUMN_NAME;
 use crate::operations::write::execution::write_exec_plan;
 use crate::protocol::DeltaOperation;
-use crate::table::config::TablePropertiesExt as _;
 use crate::table::state::DeltaTableState;
 
 const SOURCE_COUNT_ID: &str = "delete_source_count";
@@ -277,7 +276,8 @@ impl DeleteBuilder {
     }
 
     /// Everything about how the rewritten data files are encoded, replacing any
-    /// parquet writer properties and arrow writer options set so far.
+    /// parquet writer properties and arrow writer options set so far. A target
+    /// file size or stats config left unset falls back to the table's.
     pub fn with_delta_writer_properties(
         mut self,
         writer_properties: DeltaWriterProperties,
@@ -617,8 +617,7 @@ async fn execute(
         snapshot.table_configuration(),
         exec.clone(),
         write_cdc,
-        writer_properties
-            .with_target_file_size(Some(snapshot.table_properties().target_file_size())),
+        writer_properties.with_table_defaults(snapshot.table_configuration()),
     )
     .await?;
 

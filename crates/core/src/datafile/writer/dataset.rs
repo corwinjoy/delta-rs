@@ -32,6 +32,9 @@ pub struct WriterConfig {
     /// When set, write data files under a random prefix directory of this length instead of
     /// Hive-style partition dirs — keeps physical (UUID) column names out of paths under CM.
     random_prefix_length: Option<usize>,
+    /// Directory under the table root that every data file goes below (`_change_data`
+    /// for change data); `None` writes at the table root.
+    path_prefix: Option<Path>,
     /// [`UploadBudget`] for closed files still uploading. Every writer built from this
     /// config, or from a clone of it, shares it.
     upload_budget: UploadBudget,
@@ -48,9 +51,17 @@ impl WriterConfig {
             table_schema,
             partition_columns,
             random_prefix_length: None,
+            path_prefix: None,
             upload_budget: UploadBudget::for_write(props.target_file_size()),
             props,
         }
+    }
+
+    /// Write every data file below `prefix` under the table root (`_change_data` for
+    /// change data), so the paths in the returned [`Add`]s are table-relative.
+    pub fn with_path_prefix(mut self, prefix: Option<Path>) -> Self {
+        self.path_prefix = prefix;
+        self
     }
 
     /// Draw on `budget` instead of the fresh one [`WriterConfig::new`] makes, so configs
@@ -130,16 +141,23 @@ impl DeltaWriter {
         &self,
         partition_values: IndexMap<String, Scalar>,
     ) -> DeltaResult<PartitionWriter> {
-        let prefix_override = match self.config.random_prefix_length {
-            Some(length) => Some(Path::parse(random_prefix(length))?),
-            None => None,
+        let partition_prefix = match self.config.random_prefix_length {
+            Some(length) => Path::parse(random_prefix(length))?,
+            None => Path::parse(partition_values.hive_partition_path())?,
+        };
+        let prefix = match &self.config.path_prefix {
+            Some(path_prefix) => path_prefix
+                .parts()
+                .chain(partition_prefix.parts())
+                .collect(),
+            None => partition_prefix,
         };
         let config = PartitionWriterConfig::try_new(
             self.file_schema.clone(),
             partition_values,
             self.config.props.clone(),
             None,
-            prefix_override,
+            Some(prefix),
         )?
         .with_upload_budget(self.config.upload_budget.clone());
         PartitionWriter::try_with_config(self.object_store.clone(), config)
@@ -446,6 +464,29 @@ mod tests {
                 }
             }
         };
+    }
+
+    #[tokio::test]
+    async fn path_prefix_puts_files_below_it() {
+        let object_store: ObjectStoreRef = Arc::new(object_store::memory::InMemory::new());
+        let batch = get_record_batch(None, false);
+        let config = WriterConfig::new(
+            batch.schema(),
+            vec!["modified".to_string()],
+            DeltaWriterProperties::default(),
+        )
+        .with_path_prefix(Some(Path::from("_change_data")));
+        let mut writer = DeltaWriter::new(object_store, config);
+        writer.write(&batch).await.unwrap();
+        let adds = writer.close().await.unwrap();
+        assert!(!adds.is_empty());
+        for add in adds {
+            assert!(
+                add.path.starts_with("_change_data/modified="),
+                "{}",
+                add.path
+            );
+        }
     }
 
     #[test]

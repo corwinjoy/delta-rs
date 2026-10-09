@@ -16,13 +16,12 @@ use itertools::Itertools as _;
 
 use crate::{
     cast_record_batch,
-    datafile::{DeltaWriterProperties, WriterStatsConfig, writer::WriterConfig},
+    datafile::{DeltaWriterProperties, writer::WriterConfig},
     delta_datafusion::{ColumnMappingState, DataFusionMixins as _},
     kernel::{Action, EagerSnapshot, transaction::CommitBuilder},
     logstore::{LogStoreRef, with_operation},
     operations::write::execution::write_streams,
     protocol::{DeltaOperation, SaveMode},
-    table::config::TablePropertiesExt as _,
 };
 
 /// DataSink implementation for delta lake
@@ -123,7 +122,6 @@ impl DeltaDataSink {
         data: SendableRecordBatchStream,
     ) -> crate::DeltaResult<u64> {
         let target_schema = self.snapshot.input_schema();
-        let table_props = self.snapshot.table_configuration().table_properties();
 
         let stream = self.create_converted_stream(data, target_schema.clone());
         let logical_partition_columns = self.snapshot.metadata().partition_columns();
@@ -144,10 +142,7 @@ impl DeltaDataSink {
         let column_mapping =
             ColumnMappingState::from_table_config(self.snapshot.table_configuration());
         let props = DeltaWriterProperties::default()
-            .with_target_file_size(Some(table_props.target_file_size()))
-            .with_stats_config(WriterStatsConfig::from_config(
-                self.snapshot.table_configuration(),
-            ));
+            .with_table_defaults(self.snapshot.table_configuration());
         let (stream, table_schema, physical_partition_columns, random_prefix_length) =
             match &column_mapping {
                 None => (

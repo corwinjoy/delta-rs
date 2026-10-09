@@ -79,6 +79,12 @@ pub(crate) mod schema_evolution;
 #[deprecated(note = "moved to deltalake_core::datafile::writer")]
 pub use crate::datafile::writer;
 
+/// Back-compat re-export: [`WriterStatsConfig`] moved to [`crate::datafile`].
+#[deprecated(note = "moved to deltalake_core::datafile::WriterStatsConfig")]
+pub mod configs {
+    pub use crate::datafile::WriterStatsConfig;
+}
+
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum WriteError {
     #[error("No data source supplied to write command.")]
@@ -309,7 +315,8 @@ impl WriteBuilder {
     /// Everything about how the data files are encoded, replacing any parquet writer
     /// properties, arrow writer options and write batch size set so far. A target
     /// file size set on it is used unless [`with_target_file_size`] was called;
-    /// unset, the table's applies. Only [`with_target_file_size`] can disable rolling.
+    /// unset, the table's applies, as does an unset stats config. Only
+    /// [`with_target_file_size`] can disable rolling.
     ///
     /// [`with_target_file_size`]: Self::with_target_file_size
     pub fn with_delta_writer_properties(

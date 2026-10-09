@@ -44,10 +44,10 @@ use parquet::file::properties::WriterProperties;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as DeError};
 use tracing::*;
 
+use crate::datafile::DeltaWriterProperties;
 use crate::datafile::writer::{
     ArrowWriterOptions, PartitionWriter, PartitionWriterConfig, UploadBudget,
 };
-use crate::datafile::{DeltaWriterProperties, WriterStatsConfig};
 use crate::delta_datafusion::{
     DeltaScanConfig, DeltaScanNext, SessionFallbackPolicy, SessionResolveContext,
     create_session_state_with_spill_config, resolve_session_state, update_datafusion_session,
@@ -354,7 +354,8 @@ impl<'a> OptimizeBuilder<'a> {
     }
 
     /// Everything about how the rewritten data files are encoded, replacing any
-    /// parquet writer properties and arrow writer options set so far.
+    /// parquet writer properties and arrow writer options set so far. A target
+    /// file size or stats config left unset falls back to the table's.
     pub fn with_delta_writer_properties(
         mut self,
         writer_properties: DeltaWriterProperties,
@@ -1005,7 +1006,9 @@ pub async fn create_merge_plan(
     writer_properties: DeltaWriterProperties,
     session: SessionState,
 ) -> Result<MergePlan, DeltaTableError> {
-    let target_size = target_size.unwrap_or_else(|| snapshot.table_properties().target_file_size());
+    let target_size = target_size
+        .or(writer_properties.target_file_size())
+        .unwrap_or_else(|| snapshot.table_properties().target_file_size());
     let _ = optimize_target_size_to_i64(target_size)?;
     let partitions_keys = snapshot.metadata().partition_columns();
 
@@ -1054,9 +1057,7 @@ pub async fn create_merge_plan(
         planner_stats,
         task_parameters: Arc::new(MergeTaskParameters {
             file_schema,
-            writer_properties: writer_properties.with_stats_config(WriterStatsConfig::from_config(
-                snapshot.table_configuration(),
-            )),
+            writer_properties: writer_properties.with_table_stats(snapshot.table_configuration()),
             input_parameters,
             upload_budget,
         }),

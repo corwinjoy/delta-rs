@@ -70,12 +70,15 @@ pub struct WriterStatsConfig {
     pub stats_columns: Option<Vec<String>>,
 }
 
+/// The stats config used when none is set and no table provides one.
+static DEFAULT_STATS: WriterStatsConfig = WriterStatsConfig {
+    num_indexed_cols: DataSkippingNumIndexedCols::NumColumns(DEFAULT_NUM_INDEX_COLS),
+    stats_columns: None,
+};
+
 impl Default for WriterStatsConfig {
     fn default() -> Self {
-        Self {
-            num_indexed_cols: DataSkippingNumIndexedCols::NumColumns(DEFAULT_NUM_INDEX_COLS),
-            stats_columns: None,
-        }
+        DEFAULT_STATS.clone()
     }
 }
 
@@ -129,7 +132,7 @@ pub struct FileContext<'a> {
 /// bounds: the file extension and the row-group aligned roll are decided from
 /// the base properties before the file is opened, and
 /// [`DeltaWriterProperties::resolve`] rejects a layer that does. Per-column
-/// compression is a layer's to set.
+/// compression is a layer's to set; the file extension names the default only.
 #[async_trait::async_trait]
 pub trait WriterPropertiesLayer: Send + Sync + Debug {
     /// Apply this layer's settings to the properties of `file`.
@@ -152,19 +155,18 @@ pub struct DeltaWriterProperties {
     pub(crate) parquet: Option<WriterProperties>,
     /// Options for the arrow writer on top of parquet.
     pub(crate) arrow: ArrowWriterOptions,
-    /// Size above which a data file is closed and a new one started.
-    /// `None` means a single file per partition until the writer is closed.
+    /// Size above which a data file is closed and a new one started. Unset, an
+    /// operation fills in the table's (see [`Self::with_table_defaults`]); a
+    /// writer handed `None` writes a single file per partition until closed.
     pub(crate) target_file_size: Option<NonZeroU64>,
     /// Rows per slice handed to the parquet writer. With the writer's row-group
     /// settings this bounds how precisely file sizes are tracked.
     pub(crate) write_batch_size: Option<usize>,
-    /// Which columns to collect Delta data-skipping statistics for.
-    pub(crate) stats: WriterStatsConfig,
+    /// Which columns to collect Delta data-skipping statistics for. Unset, an
+    /// operation fills in the table's (see [`Self::with_table_defaults`]).
+    pub(crate) stats: Option<WriterStatsConfig>,
     /// Adjustments to the parquet properties, applied per file in this order.
     pub(crate) layers: Vec<Arc<dyn WriterPropertiesLayer>>,
-    /// Prepended to file paths before layers see them, for writers whose object
-    /// store is rooted below the table (change data under `_change_data`).
-    pub(crate) path_prefix: Option<Path>,
 }
 
 impl DeltaWriterProperties {
@@ -180,7 +182,9 @@ impl DeltaWriterProperties {
         self
     }
 
-    /// Close a data file once it reaches `size`; `None` never rolls.
+    /// Close a data file once it reaches `size`. `None` leaves it to the
+    /// operation, which uses the table's target size; only
+    /// `WriteBuilder::with_target_file_size(None)` disables rolling.
     pub fn with_target_file_size(mut self, size: Option<NonZeroU64>) -> Self {
         self.target_file_size = size;
         self
@@ -193,23 +197,33 @@ impl DeltaWriterProperties {
         self
     }
 
-    /// Which columns to collect Delta data-skipping statistics for.
+    /// Which columns to collect Delta data-skipping statistics for, instead of
+    /// the table's configuration.
     pub fn with_stats_config(mut self, stats: WriterStatsConfig) -> Self {
-        self.stats = stats;
+        self.stats = Some(stats);
         self
+    }
+
+    /// Fill an unset stats config from the table's configuration.
+    pub(crate) fn with_table_stats(mut self, table_config: &TableConfiguration) -> Self {
+        if self.stats.is_none() {
+            self.stats = Some(WriterStatsConfig::from_config(table_config));
+        }
+        self
+    }
+
+    /// Fill an unset target file size and stats config from the table's configuration.
+    pub(crate) fn with_table_defaults(mut self, table_config: &TableConfiguration) -> Self {
+        if self.target_file_size.is_none() {
+            self.target_file_size = Some(table_config.table_properties().target_file_size());
+        }
+        self.with_table_stats(table_config)
     }
 
     /// Adjust the parquet properties of every file with `layer`, after the layers
     /// added before it.
     pub fn with_layer(mut self, layer: impl WriterPropertiesLayer + 'static) -> Self {
         self.layers.push(Arc::new(layer));
-        self
-    }
-
-    /// Layers see file paths under `prefix`: for a writer whose object store is
-    /// rooted at `prefix` below the table root, so paths stay table-relative.
-    pub(crate) fn with_path_prefix(mut self, prefix: impl Into<Path>) -> Self {
-        self.path_prefix = Some(prefix.into());
         self
     }
 
@@ -233,9 +247,10 @@ impl DeltaWriterProperties {
         self.write_batch_size
     }
 
-    /// Which columns to collect Delta data-skipping statistics for.
+    /// Which columns to collect Delta data-skipping statistics for: the set
+    /// value, or the delta-rs default when no table has filled it in.
     pub fn stats(&self) -> &WriterStatsConfig {
-        &self.stats
+        self.stats.as_ref().unwrap_or(&DEFAULT_STATS)
     }
 
     /// The parquet writer properties every file starts from: the ones set here,
@@ -245,8 +260,7 @@ impl DeltaWriterProperties {
     }
 
     /// The parquet writer properties for one file: the base properties run
-    /// through every layer in order. `path` is relative to the writer's object
-    /// store; layers see it below the path prefix, if any.
+    /// through every layer in order. `path` is relative to the table root.
     pub async fn resolve(
         &self,
         path: &Path,
@@ -256,14 +270,6 @@ impl DeltaWriterProperties {
         if self.layers.is_empty() {
             return Ok(base.clone());
         }
-        let prefixed;
-        let path = match &self.path_prefix {
-            Some(prefix) => {
-                prefixed = prefix.parts().chain(path.parts()).collect::<Path>();
-                &prefixed
-            }
-            None => path,
-        };
         let file = FileContext { path, schema };
         let mut builder = base.clone().into_builder();
         for layer in &self.layers {
@@ -367,16 +373,42 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn layers_see_the_table_relative_path_under_a_prefix() {
-        let props = DeltaWriterProperties::default()
-            .with_layer(Tag("cdc", true))
-            .with_path_prefix("_change_data");
-        let resolved = props
-            .resolve(&Path::from("p=1/part-0.parquet"), &file_schema())
-            .await
-            .unwrap();
-        assert_eq!(resolved.created_by(), "cdc _change_data/p=1/part-0.parquet");
+    #[test]
+    fn table_defaults_fill_only_what_is_unset() {
+        let logical_schema = StructType::try_new([
+            StructField::nullable("a", DataType::STRING),
+            StructField::nullable("b", DataType::STRING),
+        ])
+        .unwrap();
+        let table_config = build_test_table_configuration(
+            logical_schema,
+            vec![],
+            HashMap::from([
+                ("delta.targetFileSize".to_string(), "1024".to_string()),
+                (
+                    "delta.dataSkippingStatsColumns".to_string(),
+                    "a".to_string(),
+                ),
+            ]),
+        );
+
+        let filled = DeltaWriterProperties::default().with_table_defaults(&table_config);
+        assert_eq!(filled.target_file_size(), NonZeroU64::new(1024));
+        assert_eq!(filled.stats().stats_columns, Some(vec!["a".to_string()]));
+
+        let kept = DeltaWriterProperties::default()
+            .with_target_file_size(NonZeroU64::new(7))
+            .with_stats_config(WriterStatsConfig::new(
+                DataSkippingNumIndexedCols::AllColumns,
+                None,
+            ))
+            .with_table_defaults(&table_config);
+        assert_eq!(kept.target_file_size(), NonZeroU64::new(7));
+        assert_eq!(
+            kept.stats().num_indexed_cols,
+            DataSkippingNumIndexedCols::AllColumns
+        );
+        assert_eq!(kept.stats().stats_columns, None);
     }
 
     #[tokio::test]
