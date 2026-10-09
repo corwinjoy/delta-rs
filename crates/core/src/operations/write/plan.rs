@@ -688,8 +688,8 @@ fn align_plan_to_schema(plan: LogicalPlan, target_plan: &LogicalPlan) -> DeltaRe
     Ok(LogicalPlanBuilder::new(plan).project(projection)?.build()?)
 }
 
-/// The builder's target file size wins (an explicit `None` means files never
-/// roll), then one carried by the writer properties, then the table's.
+/// The builder's target file size wins (explicit `None` never rolls), then the
+/// writer properties', then the table's.
 fn resolve_target_file_size(
     snapshot: Option<&EagerSnapshot>,
     target_file_size: Option<Option<NonZeroU64>>,

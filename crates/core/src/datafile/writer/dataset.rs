@@ -32,8 +32,8 @@ pub struct WriterConfig {
     /// When set, write data files under a random prefix directory of this length instead of
     /// Hive-style partition dirs — keeps physical (UUID) column names out of paths under CM.
     random_prefix_length: Option<usize>,
-    /// Directory under the table root that every data file goes below (`_change_data`
-    /// for change data); `None` writes at the table root.
+    /// Directory under the table root the data files go below (`_change_data`);
+    /// `None` is the root.
     path_prefix: Option<Path>,
     /// [`UploadBudget`] for closed files still uploading. Every writer built from this
     /// config, or from a clone of it, shares it.
@@ -57,8 +57,8 @@ impl WriterConfig {
         }
     }
 
-    /// Write every data file below `prefix` under the table root (`_change_data` for
-    /// change data), so the paths in the returned [`Add`]s are table-relative.
+    /// Write every data file below `prefix` under the table root, so the returned
+    /// [`Add`] paths stay table-relative.
     pub fn with_path_prefix(mut self, prefix: Option<Path>) -> Self {
         self.path_prefix = prefix;
         self

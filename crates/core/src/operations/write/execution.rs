@@ -272,13 +272,13 @@ pub(crate) struct WriteExecutionPlanMetrics {
     pub write_time_ms: u64,
 }
 
-/// Directory under the table root that holds change data files.
+/// Directory under the table root for change data files.
 const CHANGE_DATA_DIR: &str = "_change_data";
 
 struct WriteSinkConfig {
     partition_columns: Vec<String>,
     object_store: ObjectStoreRef,
-    /// How the files are encoded, with the table's stats configuration filled in.
+    /// How the files are encoded, with the table's stats config filled in.
     props: DeltaWriterProperties,
     column_mapping: Option<ColumnMappingState>,
     /// Directory under the table root the data files go below.
@@ -306,8 +306,8 @@ impl WriteSinkConfig {
     }
 }
 
-/// `plan` wrapped in the table's validations (constraints, invariants) and the
-/// rewrite `predicate`, with the internal insert-marker column dropped.
+/// `plan` under the table's constraint and invariant checks plus the rewrite
+/// `predicate`, with the internal insert-marker column dropped.
 fn validated_plan(
     table_config: &TableConfiguration,
     session: &dyn Session,
@@ -337,7 +337,7 @@ fn validated_plan(
     }
 }
 
-/// An [`Add`] for a change data file as the log records it.
+/// The change data action for `add`, whose path is already table-relative.
 fn add_cdc_file(add: Add) -> Action {
     Action::Cdc(AddCDCFile {
         path: add.path,
@@ -922,8 +922,7 @@ async fn write_cdc_plan(
     } = sink_config;
     let (plan, partition_columns, random_prefix_length) =
         apply_column_mapping_to_plan(plan, partition_columns, &column_mapping)?;
-    // Change data files go below `_change_data` in the same store, so their paths
-    // come back table-relative.
+    // Change data goes below `_change_data` in the same store, so paths come back table-relative.
     let cdf_store = object_store.clone();
 
     let write_schema = Arc::new(Schema::new(
@@ -1055,18 +1054,7 @@ async fn write_cdc_plan(
         }
 
         let mut actions = normal_adds.into_iter().map(Action::Add).collect::<Vec<_>>();
-        let mut cdf_actions = cdf_adds
-            .into_iter()
-            .map(|add| {
-                Action::Cdc(AddCDCFile {
-                    path: add.path,
-                    size: add.size,
-                    partition_values: add.partition_values,
-                    data_change: false,
-                    tags: add.tags,
-                })
-            })
-            .collect::<Vec<_>>();
+        let mut cdf_actions = cdf_adds.into_iter().map(add_cdc_file).collect::<Vec<_>>();
         actions.append(&mut cdf_actions);
 
         let write_time_ms = normal_write_ms + cdf_write_ms;
@@ -1122,15 +1110,7 @@ async fn write_cdc_plan(
         match result {
             Ok((normal_adds, cdf_adds, write_ms)) => {
                 all_actions.extend(normal_adds.into_iter().map(Action::Add));
-                all_actions.extend(cdf_adds.into_iter().map(|add| {
-                    Action::Cdc(AddCDCFile {
-                        path: add.path,
-                        size: add.size,
-                        partition_values: add.partition_values,
-                        data_change: false,
-                        tags: add.tags,
-                    })
-                }));
+                all_actions.extend(cdf_adds.into_iter().map(add_cdc_file));
                 max_write_ms = max_write_ms.max(write_ms);
             }
             Err(e) => {

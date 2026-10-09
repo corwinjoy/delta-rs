@@ -312,11 +312,10 @@ impl WriteBuilder {
         self
     }
 
-    /// Everything about how the data files are encoded, replacing any parquet writer
-    /// properties, arrow writer options and write batch size set so far. A target
-    /// file size set on it is used unless [`with_target_file_size`] was called;
-    /// unset, the table's applies, as does an unset stats config. Only
-    /// [`with_target_file_size`] can disable rolling.
+    /// How the data files are encoded, replacing any parquet writer properties,
+    /// arrow writer options and write batch size set so far. Its target file size
+    /// applies unless [`with_target_file_size`] was called; unset, the table's does,
+    /// as does an unset stats config. Only [`with_target_file_size`] disables rolling.
     ///
     /// [`with_target_file_size`]: Self::with_target_file_size
     pub fn with_delta_writer_properties(

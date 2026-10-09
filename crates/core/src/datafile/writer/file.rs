@@ -145,9 +145,8 @@ pub(super) enum FileArrowWriter {
 }
 
 impl FileArrowWriter {
-    /// `writer_properties` are this file's own, resolved through the config's layers.
-    /// Content-defined chunking only exists inside arrow-rs's own writer, so a file
-    /// that enables it is encoded serially even when parallel encoding is on.
+    /// `writer_properties` are this file's own, from the config's layers. Content-defined
+    /// chunking lives only in arrow-rs's own writer, so a file enabling it is encoded serially.
     fn try_new(
         writer: ParquetObjectWriter,
         config: &PartitionWriterConfig,
@@ -249,7 +248,7 @@ impl LazyArrowWriter {
     pub(super) async fn write_batch(&mut self, batch: &RecordBatch) -> DeltaResult<()> {
         match self {
             LazyArrowWriter::Initialized(path, object_store, config) => {
-                // Per-file properties: a layer may key on the path or the schema.
+                // A layer may key on the path or schema, so resolve per file.
                 let writer_properties = config.props.resolve(path, &config.file_schema).await?;
                 let writer = ParquetObjectWriter(
                     BufWriter::with_capacity(

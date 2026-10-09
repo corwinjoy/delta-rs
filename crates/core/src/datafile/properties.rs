@@ -1,20 +1,16 @@
 //! Engine-agnostic Delta read and write configuration.
 //!
-//! [`DeltaWriterProperties`] is everything delta-rs needs to encode data files:
-//! the parquet [`WriterProperties`], the [`ArrowWriterOptions`], file and batch
-//! sizes, and the data-skipping statistics to collect. Every write path carries
-//! one value of it end to end instead of its own subset of these knobs.
+//! [`DeltaWriterProperties`] holds everything that shapes a data file: the parquet
+//! [`WriterProperties`], the [`ArrowWriterOptions`], file and batch sizes, and the
+//! data-skipping stats to collect. Every write path carries one value end to end.
 //!
-//! Concerns that adjust the parquet properties compose as [`WriterPropertiesLayer`]s:
-//! each file's properties are the configured ones run through the layers in order
-//! ([`DeltaWriterProperties::resolve`]), so a table-level setting (such as
-//! content-defined chunking from `format.options`) and a per-file one (such as
-//! encryption keys) can be added independently of each other.
+//! Concerns that adjust the parquet properties are [`WriterPropertiesLayer`]s, run
+//! in order per file by [`DeltaWriterProperties::resolve`]. A table-level setting
+//! (content-defined chunking from `format.options`) and a per-file one (encryption
+//! keys) compose without knowing about each other.
 //!
-//! [`ReaderProperties`] centralizes construction of DataFusion's
-//! [`TableParquetOptions`](datafusion::config::TableParquetOptions) for Delta
-//! scans, so read/parquet-IO config (future: per-file decryption) lives in one
-//! place. Read-side counterpart to [`DeltaWriterProperties`].
+//! [`ReaderProperties`] is the read-side counterpart: it builds DataFusion's
+//! [`TableParquetOptions`](datafusion::config::TableParquetOptions) for Delta scans.
 
 use std::fmt::Debug;
 use std::num::NonZeroU64;
@@ -34,10 +30,10 @@ use crate::kernel::arrow::engine_ext::stats_table_properties;
 use crate::parquet_utils::default_writer_properties;
 use crate::table::config::{DEFAULT_NUM_INDEX_COLS, TablePropertiesExt as _};
 
-/// Rows handed to the parquet writer per slice when no other size is set.
+/// Rows per slice handed to the parquet writer when none is set.
 pub(crate) const DEFAULT_WRITE_BATCH_SIZE: usize = 8192;
 
-/// The parquet writer properties used when none are set: SNAPPY, delta-rs `created_by`.
+/// Parquet writer properties when none are set: SNAPPY, delta-rs `created_by`.
 static DEFAULT_PARQUET_PROPERTIES: LazyLock<WriterProperties> =
     LazyLock::new(|| default_writer_properties(Compression::SNAPPY));
 
@@ -61,16 +57,16 @@ impl ReaderProperties {
     }
 }
 
-/// Configuration for the writer on how to collect stats
+/// Which columns get Delta data-skipping stats.
 #[derive(Clone, Debug)]
 pub struct WriterStatsConfig {
-    /// Number of columns to collect stats for, idx based
+    /// Number of leading columns to collect stats for.
     pub num_indexed_cols: DataSkippingNumIndexedCols,
-    /// Optional list of columns which to collect stats for, takes precedende over num_index_cols
+    /// Columns to collect stats for; takes precedence over `num_indexed_cols`.
     pub stats_columns: Option<Vec<String>>,
 }
 
-/// The stats config used when none is set and no table provides one.
+/// Stats config when none is set and no table fills one in.
 static DEFAULT_STATS: WriterStatsConfig = WriterStatsConfig {
     num_indexed_cols: DataSkippingNumIndexedCols::NumColumns(DEFAULT_NUM_INDEX_COLS),
     stats_columns: None,
@@ -83,7 +79,7 @@ impl Default for WriterStatsConfig {
 }
 
 impl WriterStatsConfig {
-    /// Create new writer stats config
+    /// Stats for the first `num_indexed_cols` columns, or for `stats_columns` when set.
     pub fn new(
         num_indexed_cols: DataSkippingNumIndexedCols,
         stats_columns: Option<Vec<String>>,
@@ -94,7 +90,7 @@ impl WriterStatsConfig {
         }
     }
 
-    /// Derive writer statistics configuration from a table's [`TableConfiguration`].
+    /// The table's stats configuration, with column names made physical.
     pub fn from_config(config: &TableConfiguration) -> Self {
         let properties = stats_table_properties(
             config.logical_schema().as_ref(),
@@ -111,32 +107,27 @@ impl WriterStatsConfig {
     }
 }
 
-/// The data file a [`WriterPropertiesLayer`] is producing properties for.
-///
-/// Table-level layers ignore it; per-file layers (encryption keys derived from
-/// the path, encodings chosen per schema) key on it.
+/// The data file a [`WriterPropertiesLayer`] produces properties for.
 #[derive(Clone, Copy, Debug)]
 pub struct FileContext<'a> {
-    /// Path of the file relative to the table root, as the Delta log records it
-    /// (so `_change_data/...` for change data files).
+    /// Path relative to the table root, as the Delta log records it
+    /// (`_change_data/...` for change data).
     pub path: &'a Path,
-    /// Arrow schema of the file (partition columns removed).
+    /// Schema of the file, partition columns removed.
     pub schema: &'a ArrowSchemaRef,
 }
 
-/// One concern's contribution to the parquet properties of a data file.
+/// One concern's adjustment to a data file's parquet properties.
 ///
-/// Layers run in the order they were added, each over the builder the previous
-/// one returned, so a later layer overrides an earlier one on the settings both
-/// touch. A layer must not change the default compression or the row-group
-/// bounds: the file extension and the row-group aligned roll are decided from
-/// the configured properties ([`DeltaWriterProperties::parquet_properties_or_default`])
-/// before the file is opened, and [`DeltaWriterProperties::resolve`] rejects a
-/// layer that does. Per-column compression is a layer's to set; the file
-/// extension names the default only.
+/// Layers run in insertion order, each over the previous one's builder, so a
+/// later layer wins on the settings both touch. A layer may set per-column
+/// compression but not the default compression or the row-group bounds: the
+/// file extension and the row-group aligned roll are decided from the
+/// configured properties before the file opens, and
+/// [`DeltaWriterProperties::resolve`] rejects a layer that changes them.
 #[async_trait::async_trait]
 pub trait WriterPropertiesLayer: Send + Sync + Debug {
-    /// Apply this layer's settings to the properties of `file`.
+    /// Adjust the properties `file` is written with.
     async fn apply(
         &self,
         builder: WriterPropertiesBuilder,
@@ -144,68 +135,61 @@ pub trait WriterPropertiesLayer: Send + Sync + Debug {
     ) -> DeltaResult<WriterPropertiesBuilder>;
 }
 
-/// Everything delta-rs needs to encode Delta data files.
+/// Everything that shapes a Delta data file.
 ///
-/// Wraps the parquet [`WriterProperties`] together with the delta-rs specific
-/// knobs that every write path used to carry separately. Unset fields fall back
-/// to delta-rs defaults, so `Default::default()` is a complete configuration.
+/// Unset fields fall back to delta-rs defaults, or to the table's where an
+/// operation knows them, so `Default::default()` is a complete configuration.
 #[derive(Clone, Debug, Default)]
 pub struct DeltaWriterProperties {
-    /// Parquet writer properties. `None` means the delta-rs default (SNAPPY,
-    /// delta-rs `created_by`), or whatever default the operation chooses.
+    /// Parquet writer properties; `None` is the delta-rs default, or the operation's.
     pub(crate) parquet: Option<WriterProperties>,
-    /// Options for the arrow writer on top of parquet.
+    /// Arrow writer options.
     pub(crate) arrow: ArrowWriterOptions,
-    /// Size above which a data file is closed and a new one started. Unset, an
-    /// operation fills in the table's (see [`Self::with_table_defaults`]); a
-    /// writer handed `None` writes a single file per partition until closed.
+    /// Size at which a data file rolls. Unset, operations use the table's
+    /// ([`Self::with_table_defaults`]); a writer handed `None` never rolls.
     pub(crate) target_file_size: Option<NonZeroU64>,
-    /// Rows per slice handed to the parquet writer. With the writer's row-group
-    /// settings this bounds how precisely file sizes are tracked.
+    /// Rows per slice handed to the parquet writer.
     pub(crate) write_batch_size: Option<usize>,
-    /// Which columns to collect Delta data-skipping statistics for. Unset, an
-    /// operation fills in the table's (see [`Self::with_table_defaults`]).
+    /// Which columns get data-skipping stats. Unset, operations use the table's.
     pub(crate) stats: Option<WriterStatsConfig>,
-    /// Adjustments to the parquet properties, applied per file in this order.
+    /// Per-file adjustments to the parquet properties, applied in order.
     pub(crate) layers: Vec<Arc<dyn WriterPropertiesLayer>>,
 }
 
 impl DeltaWriterProperties {
-    /// Use these parquet writer properties instead of the delta-rs default.
+    /// Parquet writer properties, instead of the delta-rs default.
     pub fn with_parquet_properties(mut self, properties: WriterProperties) -> Self {
         self.parquet = Some(properties);
         self
     }
 
-    /// Use these arrow writer options.
+    /// Arrow writer options.
     pub fn with_arrow_options(mut self, options: ArrowWriterOptions) -> Self {
         self.arrow = options;
         self
     }
 
-    /// Close a data file once it reaches `size`. `None` leaves it to the
-    /// operation, which uses the table's target size; only
-    /// `WriteBuilder::with_target_file_size(None)` disables rolling.
+    /// Roll data files at `size`. `None` leaves it to the operation (the table's
+    /// size); only `WriteBuilder::with_target_file_size(None)` disables rolling.
     pub fn with_target_file_size(mut self, size: Option<NonZeroU64>) -> Self {
         self.target_file_size = size;
         self
     }
 
-    /// Rows per slice handed to the parquet writer. Zero is rejected when a
-    /// writer is built from these properties.
+    /// Rows per slice handed to the parquet writer; zero is rejected when a
+    /// writer is built.
     pub fn with_write_batch_size(mut self, rows: usize) -> Self {
         self.write_batch_size = Some(rows);
         self
     }
 
-    /// Which columns to collect Delta data-skipping statistics for, instead of
-    /// the table's configuration.
+    /// Which columns get data-skipping stats, instead of the table's configuration.
     pub fn with_stats_config(mut self, stats: WriterStatsConfig) -> Self {
         self.stats = Some(stats);
         self
     }
 
-    /// Fill an unset stats config from the table's configuration.
+    /// The table's stats config, if none is set.
     pub(crate) fn with_table_stats(mut self, table_config: &TableConfiguration) -> Self {
         if self.stats.is_none() {
             self.stats = Some(WriterStatsConfig::from_config(table_config));
@@ -213,7 +197,7 @@ impl DeltaWriterProperties {
         self
     }
 
-    /// Fill an unset target file size and stats config from the table's configuration.
+    /// The table's target file size and stats config, where none are set.
     pub(crate) fn with_table_defaults(mut self, table_config: &TableConfiguration) -> Self {
         if self.target_file_size.is_none() {
             self.target_file_size = Some(table_config.table_properties().target_file_size());
@@ -221,14 +205,13 @@ impl DeltaWriterProperties {
         self.with_table_stats(table_config)
     }
 
-    /// Adjust the parquet properties of every file with `layer`, after the layers
-    /// added before it.
+    /// Run `layer` on every file's parquet properties, after the layers added before it.
     pub fn with_layer(mut self, layer: impl WriterPropertiesLayer + 'static) -> Self {
         self.layers.push(Arc::new(layer));
         self
     }
 
-    /// The parquet writer properties set on these, if any.
+    /// The parquet writer properties set, if any.
     pub fn parquet_properties(&self) -> Option<&WriterProperties> {
         self.parquet.as_ref()
     }
@@ -238,7 +221,7 @@ impl DeltaWriterProperties {
         &self.arrow
     }
 
-    /// The size above which data files roll, if any.
+    /// The size at which data files roll, if set.
     pub fn target_file_size(&self) -> Option<NonZeroU64> {
         self.target_file_size
     }
@@ -248,21 +231,19 @@ impl DeltaWriterProperties {
         self.write_batch_size
     }
 
-    /// Which columns to collect Delta data-skipping statistics for: the set
-    /// value, or the delta-rs default when no table has filled it in.
+    /// Which columns get data-skipping stats: the set value, or the delta-rs default.
     pub fn stats(&self) -> &WriterStatsConfig {
         self.stats.as_ref().unwrap_or(&DEFAULT_STATS)
     }
 
-    /// The parquet writer properties set here, or the delta-rs default (SNAPPY,
-    /// delta-rs `created_by`) when none were. Every file starts from these; the
-    /// layers, if any, adjust them per file in [`Self::resolve`].
+    /// The parquet writer properties set, or the delta-rs default (SNAPPY, delta-rs
+    /// `created_by`). Every file starts from these; [`Self::resolve`] runs the layers over them.
     pub fn parquet_properties_or_default(&self) -> &WriterProperties {
         self.parquet.as_ref().unwrap_or(&DEFAULT_PARQUET_PROPERTIES)
     }
 
-    /// The parquet writer properties for one file: the configured properties
-    /// run through every layer in order. `path` is relative to the table root.
+    /// One file's parquet writer properties: the configured ones run through
+    /// every layer. `path` is relative to the table root.
     pub async fn resolve(
         &self,
         path: &Path,
@@ -278,7 +259,7 @@ impl DeltaWriterProperties {
             builder = layer.apply(builder, file).await?;
         }
         let resolved = builder.build();
-        // The file's name and row-group aligned roll were decided from the configured properties.
+        // Already decided from the configured properties: file name, row-group roll.
         let default_column = ColumnPath::new(vec![]);
         if resolved.compression(&default_column) != configured.compression(&default_column)
             || resolved.max_row_group_row_count() != configured.max_row_group_row_count()
