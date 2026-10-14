@@ -146,16 +146,19 @@ pub(super) enum FileArrowWriter {
 
 impl FileArrowWriter {
     /// `writer_properties` are this file's own, from the config's layers. Content-defined
-    /// chunking lives only in arrow-rs's own writer, so a file enabling it is encoded serially.
+    /// chunking lives only in arrow-rs's own writer; the parallel writer ignores it.
     fn try_new(
         writer: ParquetObjectWriter,
         config: &PartitionWriterConfig,
         writer_properties: WriterProperties,
     ) -> ParquetResult<Self> {
         let options = config.writer_properties.arrow_options();
-        if options.enable_parallel_encoding()
-            && writer_properties.content_defined_chunking().is_none()
-        {
+        if options.enable_parallel_encoding() {
+            if writer_properties.content_defined_chunking().is_some() {
+                warn!(
+                    "content-defined chunking is ignored by the parallel parquet writer; disable parallel encoding to use it"
+                );
+            }
             ParallelArrowWriter::try_new(
                 writer,
                 config.file_schema.clone(),

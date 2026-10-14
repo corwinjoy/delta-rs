@@ -20,7 +20,7 @@ use arrow_schema::SchemaRef as ArrowSchemaRef;
 use delta_kernel::table_configuration::TableConfiguration;
 use delta_kernel::table_properties::DataSkippingNumIndexedCols;
 use object_store::path::Path;
-use parquet::basic::Compression;
+use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
 use parquet::schema::types::ColumnPath;
 
@@ -56,7 +56,7 @@ pub(crate) static DEFAULT_PARQUET_PROPERTIES: LazyLock<WriterProperties> =
 /// written rarely and read often, so the slower, denser codec pays off.
 pub(crate) static OPTIMIZE_PARQUET_PROPERTIES: LazyLock<WriterProperties> = LazyLock::new(|| {
     default_writer_properties(Compression::ZSTD(
-        parquet::basic::ZstdLevel::try_new(4).expect("4 is a valid zstd level"),
+        ZstdLevel::try_new(4).expect("4 is a valid zstd level"),
     ))
 });
 
@@ -163,7 +163,8 @@ pub struct FileContext<'a> {
 ///
 /// Layers run in insertion order, each over the previous one's builder, so a
 /// later layer wins on the settings both touch. A layer may set per-column
-/// compression but not the default compression or the row-group bounds: the
+/// compression or the compression level but not the default codec or the
+/// row-group bounds: the
 /// file extension and the row-group aligned roll are decided from the
 /// configured properties before the file opens, and
 /// [`DeltaWriterProperties::resolve`] rejects a layer that changes them.
@@ -214,19 +215,22 @@ impl DeltaWriterProperties {
     }
 
     /// `overrides` on top of `self`: every field set on `overrides` replaces the one
-    /// here, every unset field keeps this value. The layers of `overrides` run after
-    /// the layers here, so they win on the settings both touch. The operation
-    /// builders' setters go through this, so the order they are called in does not
-    /// matter.
-    pub fn merge(mut self, overrides: Self) -> Self {
-        self.layers.extend(overrides.layers);
+    /// here, every unset field keeps this value. Layers are one field: the layers of
+    /// `overrides`, if it has any, replace the layers here, so merging the same
+    /// properties twice does not run a layer twice. The operation builders' setters
+    /// go through this, so the order they are called in does not matter.
+    pub fn merge(self, overrides: Self) -> Self {
         Self {
             parquet: overrides.parquet.or(self.parquet),
             arrow: overrides.arrow.or(self.arrow),
             target_file_size: overrides.target_file_size.or(self.target_file_size),
             write_batch_size: overrides.write_batch_size.or(self.write_batch_size),
             stats: overrides.stats.or(self.stats),
-            layers: self.layers,
+            layers: if overrides.layers.is_empty() {
+                self.layers
+            } else {
+                overrides.layers
+            },
         }
     }
 
@@ -341,15 +345,28 @@ impl DeltaWriterProperties {
             builder = layer.apply(builder, file).await?;
         }
         let resolved = builder.build();
-        // Already decided from the configured properties: file name, row-group roll.
+        // Already decided from the configured properties: file name (the codec, not
+        // its level), row-group roll.
         let default_column = ColumnPath::new(vec![]);
-        if resolved.compression(&default_column) != configured.compression(&default_column)
-            || resolved.max_row_group_row_count() != configured.max_row_group_row_count()
-            || resolved.max_row_group_bytes() != configured.max_row_group_bytes()
-        {
-            return Err(DeltaTableError::generic(
-                "a writer properties layer must not change the default compression or the row-group bounds",
-            ));
+        let codec = |p: &WriterProperties| std::mem::discriminant(&p.compression(&default_column));
+        let changed = [
+            (
+                codec(&resolved) != codec(configured),
+                "default compression codec",
+            ),
+            (
+                resolved.max_row_group_row_count() != configured.max_row_group_row_count(),
+                "max_row_group_row_count",
+            ),
+            (
+                resolved.max_row_group_bytes() != configured.max_row_group_bytes(),
+                "max_row_group_bytes",
+            ),
+        ];
+        if let Some((_, setting)) = changed.iter().find(|(changed, _)| *changed) {
+            return Err(DeltaTableError::generic(format!(
+                "a writer properties layer changed the {setting} for {path}; the configured properties decide it"
+            )));
         }
         Ok(resolved)
     }
@@ -369,7 +386,22 @@ mod tests {
     #[derive(Debug)]
     struct Tag(&'static str, bool);
 
-    /// Changes the compression, which `resolve` must reject.
+    /// Changes only the compression level, which `resolve` allows.
+    #[derive(Debug)]
+    struct Relevel;
+
+    #[async_trait::async_trait]
+    impl WriterPropertiesLayer for Relevel {
+        async fn apply(
+            &self,
+            builder: WriterPropertiesBuilder,
+            _file: FileContext<'_>,
+        ) -> DeltaResult<WriterPropertiesBuilder> {
+            Ok(builder.set_compression(Compression::ZSTD(ZstdLevel::try_new(9).unwrap())))
+        }
+    }
+
+    /// Changes the compression codec, which `resolve` must reject.
     #[derive(Debug)]
     struct Recompress;
 
@@ -423,10 +455,9 @@ mod tests {
 
     #[tokio::test]
     async fn layers_apply_in_order_and_see_the_file() {
-        // `merge` appends the overrides' layers after the base's.
         let props = DeltaWriterProperties::default()
             .with_layer(Tag("first", false))
-            .merge(DeltaWriterProperties::default().with_layer(Tag("second", true)));
+            .with_layer(Tag("second", true));
         let resolved = props
             .resolve(&Path::from("p=1/part-0.parquet"), &file_schema())
             .await
@@ -478,13 +509,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_rejects_a_layer_that_changes_compression() {
+    async fn resolve_rejects_a_layer_that_changes_the_codec_but_not_its_level() {
         let props = DeltaWriterProperties::default().with_layer(Recompress);
         let err = props
             .resolve(&Path::from("part-0.parquet"), &file_schema())
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("compression"), "{err}");
+        assert!(
+            err.to_string().contains("codec for part-0.parquet"),
+            "{err}"
+        );
+
+        let zstd = |level| {
+            WriterProperties::builder()
+                .set_compression(Compression::ZSTD(ZstdLevel::try_new(level).unwrap()))
+                .build()
+        };
+        let props = DeltaWriterProperties::default()
+            .with_parquet_properties(zstd(3))
+            .with_layer(Relevel);
+        let resolved = props
+            .resolve(&Path::from("part-0.parquet"), &file_schema())
+            .await
+            .unwrap();
+        assert_eq!(
+            resolved.compression(&ColumnPath::from("id")),
+            zstd(9).compression(&ColumnPath::from("id"))
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_replaces_layers_when_set_and_keeps_them_otherwise() {
+        let base = DeltaWriterProperties::default().with_layer(Tag("base", false));
+        let kept = base.clone().merge(DeltaWriterProperties::default());
+        let replaced = base.merge(DeltaWriterProperties::default().with_layer(Tag("over", false)));
+        assert_eq!(kept.layers.len(), 1);
+        assert_eq!(replaced.layers.len(), 1);
+        let path = Path::from("part-0.parquet");
+        let schema = file_schema();
+        let kept = kept.resolve(&path, &schema).await.unwrap();
+        let replaced = replaced.resolve(&path, &schema).await.unwrap();
+        assert_eq!(kept.created_by(), "base");
+        assert_eq!(replaced.created_by(), "over");
     }
 
     #[test]
