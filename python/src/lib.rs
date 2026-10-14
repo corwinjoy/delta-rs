@@ -35,6 +35,7 @@ use pyo3_arrow::PyDataType;
 use deltalake::arrow::array::{
     ArrayRef, BooleanBuilder, LargeStringBuilder, ListBuilder, RecordBatchIterator,
 };
+use deltalake::datafile::DeltaWriterProperties;
 use deltalake::delta_datafusion::create_session_state_with_spill_config;
 use deltalake::delta_datafusion::expr::parse_sql_predicate_to_kernel;
 use deltalake::errors::DeltaTableError;
@@ -2245,7 +2246,11 @@ fn set_post_commithook_properties(
 }
 
 fn set_writer_properties(writer_properties: PyWriterProperties) -> DeltaResult<WriterProperties> {
-    let mut properties = WriterProperties::builder();
+    // Start from the delta-rs default so unset knobs keep SNAPPY and the delta-rs `created_by`.
+    let mut properties = DeltaWriterProperties::default()
+        .parquet_properties_or_default()
+        .clone()
+        .into_builder();
     let data_page_size_limit = writer_properties.data_page_size_limit;
     let dictionary_page_size_limit = writer_properties.dictionary_page_size_limit;
     let data_page_row_count_limit = writer_properties.data_page_row_count_limit;

@@ -922,6 +922,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_delete_rewrites_with_delta_rs_parquet_defaults() {
+        use crate::logstore::parquet_reader::ParquetObjectReader;
+        use parquet::arrow::ParquetRecordBatchStreamBuilder;
+        use parquet::basic::Compression;
+
+        let table = setup_table(None).await;
+        let table = write_batch(table, get_record_batch(None, false)).await;
+        let (table, metrics) = table
+            .delete()
+            .with_predicate(col("value").eq(lit(1)))
+            .await
+            .unwrap();
+        assert_eq!(metrics.num_added_files, 1);
+
+        let store = table.log_store().object_store();
+        for add in table.snapshot().unwrap().log_data() {
+            let path = add.object_store_path();
+            assert!(path.as_ref().ends_with(".snappy.parquet"), "{path}");
+            let reader = ParquetObjectReader::new(store.clone(), path);
+            let metadata = ParquetRecordBatchStreamBuilder::new(reader)
+                .await
+                .unwrap()
+                .metadata()
+                .clone();
+            let created_by = metadata.file_metadata().created_by().unwrap();
+            assert!(created_by.starts_with("delta-rs"), "{created_by}");
+            for column in metadata.row_group(0).columns() {
+                assert_eq!(column.compression(), Compression::SNAPPY);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn test_delete_all_reports_deleted_rows_from_stats() -> DeltaResult<()> {
         let now_ms = chrono::Utc::now().timestamp_millis();
         let table = setup_metadata_only_partition_table(

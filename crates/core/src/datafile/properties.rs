@@ -28,14 +28,13 @@ pub(crate) const DEFAULT_WRITE_BATCH_SIZE: usize = 8192;
 // Every parquet default an operation falls back to when the user sets none.
 // Keep them together so the per-operation differences stay visible:
 //
-// | operation                            | compression                  | `created_by` |
-// |--------------------------------------|------------------------------|--------------|
-// | write, merge, update, legacy writers | SNAPPY                       | delta-rs     |
-// | optimize                             | ZSTD(4)                      | delta-rs     |
-// | delete                               | DataFusion session (zstd(3)) | datafusion   |
+// | operation                                    | compression | `created_by` |
+// |----------------------------------------------|-------------|--------------|
+// | write, merge, update, delete, legacy writers | SNAPPY      | delta-rs     |
+// | optimize                                     | ZSTD(4)     | delta-rs     |
 //
-// Python's `WriterProperties` starts from a bare parquet builder instead, so
-// a knob set there without `compression=` writes UNCOMPRESSED files.
+// Python's `WriterProperties` starts from `DEFAULT_PARQUET_PROPERTIES` too, so
+// knobs it leaves unset keep these defaults.
 
 /// Arrow writer options when none are set.
 static DEFAULT_ARROW_OPTIONS: LazyLock<ArrowWriterOptions> = LazyLock::new(ArrowWriterOptions::new);
@@ -51,20 +50,6 @@ pub(crate) static OPTIMIZE_PARQUET_PROPERTIES: LazyLock<WriterProperties> = Lazy
         parquet::basic::ZstdLevel::try_new(4).expect("4 is a valid zstd level"),
     ))
 });
-
-/// Delete's fallback: whatever the DataFusion session's `execution.parquet`
-/// options say (zstd(3) and a `datafusion version` tag by default).
-#[cfg(feature = "datafusion")]
-pub(crate) fn session_parquet_properties(
-    session: &dyn datafusion::catalog::Session,
-) -> DeltaResult<WriterProperties> {
-    Ok(session
-        .config_options()
-        .execution
-        .parquet
-        .into_writer_properties_builder()?
-        .build())
-}
 
 /// Engine-agnostic parquet read configuration for a Delta scan.
 // Future fields (e.g. per-file decryption) attach here.
