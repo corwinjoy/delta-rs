@@ -33,6 +33,9 @@ pub(crate) const DEFAULT_WRITE_BATCH_SIZE: usize = 8192;
 // | write, merge, update, delete, legacy writers | SNAPPY      | delta-rs     |
 // | optimize                                     | ZSTD(4)     | delta-rs     |
 //
+// Delete given a session via `with_session_state` takes the session's
+// `execution.parquet` options instead (see `session_parquet_properties`).
+//
 // Python's `WriterProperties` starts from the operation's default here, so
 // knobs it leaves unset keep these defaults.
 
@@ -50,6 +53,20 @@ pub static OPTIMIZE_PARQUET_PROPERTIES: LazyLock<WriterProperties> = LazyLock::n
         parquet::basic::ZstdLevel::try_new(4).expect("4 is a valid zstd level"),
     ))
 });
+
+/// Parquet writer properties from a DataFusion session's `execution.parquet`
+/// options (zstd(3) and a `datafusion version` tag unless the session sets them).
+#[cfg(feature = "datafusion")]
+pub(crate) fn session_parquet_properties(
+    session: &dyn datafusion::catalog::Session,
+) -> DeltaResult<WriterProperties> {
+    Ok(session
+        .config_options()
+        .execution
+        .parquet
+        .into_writer_properties_builder()?
+        .build())
+}
 
 /// Engine-agnostic parquet read configuration for a Delta scan.
 // Future fields (e.g. per-file decryption) attach here.
