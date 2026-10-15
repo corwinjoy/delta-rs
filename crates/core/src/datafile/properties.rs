@@ -33,19 +33,19 @@ pub(crate) const DEFAULT_WRITE_BATCH_SIZE: usize = 8192;
 // | write, merge, update, delete, legacy writers | SNAPPY      | delta-rs     |
 // | optimize                                     | ZSTD(4)     | delta-rs     |
 //
-// Python's `WriterProperties` starts from `DEFAULT_PARQUET_PROPERTIES` too, so
+// Python's `WriterProperties` starts from the operation's default here, so
 // knobs it leaves unset keep these defaults.
 
 /// Arrow writer options when none are set.
 static DEFAULT_ARROW_OPTIONS: LazyLock<ArrowWriterOptions> = LazyLock::new(ArrowWriterOptions::new);
 
 /// Parquet writer properties when none are set: SNAPPY, delta-rs `created_by`.
-pub(crate) static DEFAULT_PARQUET_PROPERTIES: LazyLock<WriterProperties> =
+pub static DEFAULT_PARQUET_PROPERTIES: LazyLock<WriterProperties> =
     LazyLock::new(|| default_writer_properties(Compression::SNAPPY));
 
 /// Optimize's fallback: ZSTD(4), delta-rs `created_by`. Compacted files are
 /// written rarely and read often, so the slower, denser codec pays off.
-pub(crate) static OPTIMIZE_PARQUET_PROPERTIES: LazyLock<WriterProperties> = LazyLock::new(|| {
+pub static OPTIMIZE_PARQUET_PROPERTIES: LazyLock<WriterProperties> = LazyLock::new(|| {
     default_writer_properties(Compression::ZSTD(
         parquet::basic::ZstdLevel::try_new(4).expect("4 is a valid zstd level"),
     ))
@@ -197,6 +197,8 @@ impl DeltaWriterProperties {
     /// operation's own fallback (see the table above [`DEFAULT_PARQUET_PROPERTIES`]).
     /// Unlike [`Self::with_parquet_properties`], this never overrides properties
     /// already set.
+    // Only the DataFusion write paths call this.
+    #[cfg_attr(not(feature = "datafusion"), allow(dead_code))]
     pub(crate) fn apply_parquet_default(
         self,
         default: impl FnOnce() -> DeltaResult<WriterProperties>,
@@ -210,6 +212,8 @@ impl DeltaWriterProperties {
 
     /// Fill the stats configuration from the table configuration if it is not already set.
     /// Unlike the `with_` setters, this never overrides a value already set.
+    // Only the DataFusion write paths call this.
+    #[cfg_attr(not(feature = "datafusion"), allow(dead_code))]
     pub(crate) fn apply_table_stats(mut self, table_config: &TableConfiguration) -> Self {
         if self.stats.is_none() {
             self.stats = Some(WriterStatsConfig::from_config(table_config));
@@ -220,6 +224,8 @@ impl DeltaWriterProperties {
     /// Fill the target file size and stats configuration from the table configuration
     /// where they are not already set. Unlike the `with_` setters, this never overrides
     /// a value already set.
+    // Only the DataFusion write paths call this.
+    #[cfg_attr(not(feature = "datafusion"), allow(dead_code))]
     pub(crate) fn apply_table_defaults(mut self, table_config: &TableConfiguration) -> Self {
         if self.target_file_size.is_none() {
             self.target_file_size = Some(table_config.table_properties().target_file_size());
