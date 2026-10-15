@@ -17,7 +17,7 @@ use crate::logstore::LogStoreRef;
 use crate::logstore::with_operation;
 use crate::protocol::{DeltaOperation, SaveMode};
 use crate::table::builder::ensure_table_uri;
-use crate::table::config::TableProperty;
+use crate::table::config::{ENCRYPTION_COLUMN_KEYS_PROP, EncryptionConfig, TableProperty};
 use crate::table::normalize_table_url;
 use crate::{DeltaTable, DeltaTableBuilder};
 
@@ -339,11 +339,30 @@ impl CreateBuilder {
             schema
         };
 
-        let mut metadata = new_metadata(
-            &schema,
-            self.partition_columns.unwrap_or_default(),
-            configuration,
-        )?;
+        let partition_columns = self.partition_columns.unwrap_or_default();
+        // Validate the encryption settings, storing column names as physical names (RFC).
+        if let Some(encryption) = EncryptionConfig::try_from_configuration(&configuration)? {
+            // Files registered at creation (CONVERT TO DELTA) are plaintext, so they cannot
+            // be committed under an encrypted configuration.
+            if self.actions.iter().any(|a| matches!(a, Action::Add(_))) {
+                return Err(DeltaTableError::Generic(
+                    "Invalid table encryption configuration: encryption cannot be configured \
+                     on a table created from existing data files, which are not encrypted"
+                        .to_string(),
+                ));
+            }
+            let encryption = encryption.with_physical_column_names(&schema, column_mapping_mode)?;
+            encryption.validate_columns(&schema, &partition_columns, column_mapping_mode)?;
+            encryption.validate_stats_columns(&configuration, &schema, column_mapping_mode)?;
+            if !encryption.column_keys.is_empty() {
+                configuration.insert(
+                    ENCRYPTION_COLUMN_KEYS_PROP.to_string(),
+                    encryption.column_keys_property(),
+                );
+            }
+        }
+
+        let mut metadata = new_metadata(&schema, partition_columns, configuration)?;
         if let Some(name) = self.name {
             metadata = metadata.with_name(name)?;
         }
@@ -398,6 +417,29 @@ impl std::future::IntoFuture for CreateBuilder {
                             .try_collect::<Vec<_>>()
                             .await?;
                         actions.extend(remove_actions);
+                        // Replace is the one way to change encryption, since every data
+                        // file is removed here; warn that the removed files and old log
+                        // statistics stay in storage until vacuum and log cleanup.
+                        let old_configuration = table.snapshot()?.metadata().configuration();
+                        let new_configuration = actions.iter().find_map(|action| match action {
+                            Action::Metadata(metadata) => Some(metadata.configuration()),
+                            _ => None,
+                        });
+                        if let Some(new_configuration) = new_configuration {
+                            let old = EncryptionConfig::try_from_configuration(old_configuration)
+                                .ok()
+                                .flatten();
+                            let new = EncryptionConfig::try_from_configuration(new_configuration)?;
+                            if EncryptionConfig::frozen_change(old.as_ref(), new.as_ref()).is_some()
+                            {
+                                tracing::warn!(
+                                    "replacing a table with a different encryption \
+                                     configuration: the replaced data files stay in storage \
+                                     until vacuum, and the old log entries with their \
+                                     column statistics until log cleanup"
+                                );
+                            }
+                        }
                         Some(table.snapshot()?)
                     }
                 }

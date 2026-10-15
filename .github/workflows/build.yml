@@ -15,7 +15,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     env:
-      DEFAULT_FEATURES: "azure,datafusion,s3,gcs,glue,hdfs"
+      DEFAULT_FEATURES: "azure,datafusion,s3,gcs,glue,hdfs,encryption"
 
     steps:
       # v6.0.2
@@ -55,7 +55,7 @@ jobs:
         os: ${{ fromJSON(needs.test-matrix.outputs.targets) }}
     runs-on: ${{ matrix.os }}
     env:
-      DEFAULT_FEATURES: "azure,datafusion,s3,gcs,glue,hdfs"
+      DEFAULT_FEATURES: "azure,datafusion,s3,gcs,glue,hdfs,encryption"
 
     steps:
       # v6.0.2
@@ -90,7 +90,7 @@ jobs:
         os: ${{ fromJSON(needs.test-matrix.outputs.targets) }}
     runs-on: ${{ matrix.os }}
     env:
-      DEFAULT_FEATURES: "datafusion"
+      DEFAULT_FEATURES: "datafusion,encryption"
 
     steps:
       # v6.0.2
