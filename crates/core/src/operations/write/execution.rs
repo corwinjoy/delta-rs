@@ -19,6 +19,8 @@ use object_store::path::Path;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
+use datafusion::execution::runtime_env::RuntimeEnv;
+
 use super::encryption::apply_encryption;
 use crate::DeltaTableError;
 use crate::datafile::DeltaWriterProperties;
@@ -276,27 +278,34 @@ pub(crate) struct WriteExecutionPlanMetrics {
 /// Directory under the table root for change data files.
 const CHANGE_DATA_DIR: &str = "_change_data";
 
-struct WriteSinkConfig {
-    partition_columns: Vec<String>,
-    object_store: ObjectStoreRef,
-    /// How the files are encoded, with the table's stats config filled in.
-    props: DeltaWriterProperties,
-    column_mapping: Option<ColumnMappingState>,
+/// How a table's data files are written: what every DataFusion write path derives from
+/// the table configuration.
+pub(crate) struct WriteSinkConfig {
+    pub(crate) partition_columns: Vec<String>,
+    pub(crate) object_store: ObjectStoreRef,
+    /// How the files are encoded, with the table's stats config and encryption filled in.
+    pub(crate) props: DeltaWriterProperties,
+    pub(crate) column_mapping: Option<ColumnMappingState>,
     /// Directory under the table root the data files go below.
     path_prefix: Option<Path>,
 }
 
 impl WriteSinkConfig {
-    /// Errors when the table is encrypted and this build or session cannot encrypt for it.
-    fn new(
+    /// Errors when the table is encrypted and this build or `runtime_env` cannot encrypt
+    /// for it.
+    pub(crate) fn new(
         table_config: &TableConfiguration,
-        session: &dyn Session,
+        runtime_env: Option<&RuntimeEnv>,
         object_store: ObjectStoreRef,
         props: DeltaWriterProperties,
     ) -> DeltaResult<Self> {
         // Table encryption always wins, so no write path can put plaintext files into an
         // encrypted table.
-        let props = apply_encryption(props.apply_table_stats(table_config), table_config, session)?;
+        let props = apply_encryption(
+            props.apply_table_stats(table_config),
+            table_config,
+            runtime_env,
+        )?;
         Ok(Self {
             partition_columns: table_config.metadata().partition_columns().to_vec(),
             object_store,
@@ -395,8 +404,13 @@ pub(crate) async fn write_execution_plan_cdc(
     props: DeltaWriterProperties,
 ) -> DeltaResult<Vec<Action>> {
     let plan = validated_plan(table_config, session, plan, None, false, None)?;
-    let sink_config = WriteSinkConfig::new(table_config, session, object_store, props)?
-        .with_path_prefix(CHANGE_DATA_DIR);
+    let sink_config = WriteSinkConfig::new(
+        table_config,
+        Some(session.runtime_env()),
+        object_store,
+        props,
+    )?
+    .with_path_prefix(CHANGE_DATA_DIR);
     let (actions, _) = write_data_plan(session, plan, sink_config).await?;
     Ok(actions
         .into_iter()
@@ -447,7 +461,12 @@ pub(crate) async fn write_execution_plan_v2(
         contains_cdc,
         insert_marker_column.as_deref(),
     )?;
-    let sink_config = WriteSinkConfig::new(table_config, session, object_store, props)?;
+    let sink_config = WriteSinkConfig::new(
+        table_config,
+        Some(session.runtime_env()),
+        object_store,
+        props,
+    )?;
 
     if !contains_cdc {
         write_data_plan(session, plan, sink_config).await
@@ -487,7 +506,12 @@ pub(crate) async fn write_exec_plan(
     write_as_cdc: bool,
     props: DeltaWriterProperties,
 ) -> DeltaResult<(Vec<Action>, WriteExecutionPlanMetrics)> {
-    let sink_config = WriteSinkConfig::new(table_config, session, log_store.object_store(), props)?;
+    let sink_config = WriteSinkConfig::new(
+        table_config,
+        Some(session.runtime_env()),
+        log_store.object_store(),
+        props,
+    )?;
 
     if write_as_cdc {
         write_cdc_plan(session, exec, sink_config).await

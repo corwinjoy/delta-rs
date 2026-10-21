@@ -5,8 +5,6 @@ use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use delta_kernel::engine::arrow_conversion::TryIntoArrow as _;
-use delta_kernel::table_properties::DataSkippingNumIndexedCols;
-use itertools::Itertools;
 use serde_json::Value;
 use tracing::*;
 use url::Url;
@@ -19,7 +17,6 @@ use crate::datafile::{DeltaWriterProperties, WriterStatsConfig};
 use crate::errors::DeltaTableError;
 use crate::kernel::{Action, Add, Version};
 use crate::table::builder::DeltaTableBuilder;
-use crate::table::config::TablePropertiesExt as _;
 
 /// Writes messages to a delta lake table.
 ///
@@ -78,31 +75,16 @@ impl JsonWriter {
         schema: ArrowSchemaRef,
         partition_columns: Vec<String>,
     ) -> Result<Self, DeltaTableError> {
-        let (num_indexed_cols, stats_columns) = Self::read_stats_config(table)?;
         let factory = SinkFactory {
             storage: table.object_store(),
             partition_columns,
-            props: DeltaWriterProperties::default()
-                .with_stats_config(WriterStatsConfig::new(num_indexed_cols, stats_columns)),
+            props: DeltaWriterProperties::default().with_stats_config(
+                WriterStatsConfig::from_properties(table.snapshot()?.table_config()),
+            ),
         };
         let mut window = WriteWindow::new(factory, schema);
         window.apply_encryption(table.snapshot()?.metadata().configuration())?;
         Ok(Self { window })
-    }
-
-    /// Resolve the data-skipping stats configuration from the table snapshot.
-    fn read_stats_config(
-        table: &DeltaTable,
-    ) -> Result<(DataSkippingNumIndexedCols, Option<Vec<String>>), DeltaTableError> {
-        let snapshot = table.snapshot()?;
-        let table_config = snapshot.table_config();
-        Ok((
-            table_config.num_indexed_cols(),
-            table_config
-                .data_skipping_stats_columns
-                .as_ref()
-                .map(|cols| cols.iter().map(|c| c.to_string()).collect_vec()),
-        ))
     }
 
     /// Approximate encoded (parquet) size written since the last flush,

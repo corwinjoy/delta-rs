@@ -709,9 +709,7 @@ impl EncryptionConfig {
     /// protocol's field-path scheme is not supported, so a column whose name contains a
     /// dot cannot be given its own key (`ColumnName::parse_column_name_list` is the
     /// upgrade path).
-    pub(crate) fn parse_column_keys(
-        value: Option<&str>,
-    ) -> DeltaResult<HashMap<String, Vec<String>>> {
+    fn parse_column_keys(value: Option<&str>) -> DeltaResult<HashMap<String, Vec<String>>> {
         let mut map: HashMap<String, Vec<String>> = HashMap::new();
         let mut seen: Vec<(String, String)> = Vec::new();
         let Some(value) = value else { return Ok(map) };
@@ -928,6 +926,39 @@ impl EncryptionConfig {
             }
         }
         Ok(self)
+    }
+
+    /// The parquet leaf columns each column key covers in a file with `schema`, by key ID:
+    /// a configured column covers every leaf under it (`address` covers `address.street`
+    /// and `address.city`). A configured column with no leaf in the schema is an error.
+    pub fn column_key_leaves(
+        &self,
+        schema: &arrow_schema::Schema,
+    ) -> DeltaResult<Vec<(String, Vec<String>)>> {
+        let leaves: Vec<String> = parquet::arrow::ArrowSchemaConverter::new()
+            .convert(schema)?
+            .columns()
+            .iter()
+            .map(|column| column.path().string())
+            .collect();
+        let mut keyed = Vec::new();
+        for (key_id, columns) in &self.column_keys {
+            for column in columns {
+                let nested = format!("{column}.");
+                let covered: Vec<String> = leaves
+                    .iter()
+                    .filter(|leaf| *leaf == column || leaf.starts_with(&nested))
+                    .cloned()
+                    .collect();
+                if covered.is_empty() {
+                    return Err(invalid_encryption_config(format!(
+                        "key '{key_id}' names column '{column}', which is not in the file schema"
+                    )));
+                }
+                keyed.push((key_id.clone(), covered));
+            }
+        }
+        Ok(keyed)
     }
 
     /// [`column_keys`](Self::column_keys) in the `delta.encryption.column_keys` format,

@@ -2,8 +2,9 @@
 //!
 //! [`apply_encryption`] reads the properties from the raw metadata configuration, finds the
 //! `EncryptionFactory` registered as `delta.encryption.kms_id` (in the session's
-//! `RuntimeEnv`, else the process-wide registry) and adds a [`WriterPropertiesLayer`] to the
-//! operation's [`DeltaWriterProperties`] that asks it for each file's encryption keys,
+//! `RuntimeEnv`, else the process-wide registry) and adds a
+//! [`WriterPropertiesLayer`](crate::datafile::WriterPropertiesLayer) to the operation's
+//! [`DeltaWriterProperties`] that asks it for each file's encryption keys,
 //! passing the file's table-relative path. Nothing is configured per operation: once a
 //! table is created encrypted, every write encrypts, whatever parquet properties the caller
 //! set, since the layer runs after them.
@@ -14,13 +15,10 @@
 
 use std::collections::HashMap;
 
-use datafusion::catalog::Session;
 use datafusion::execution::runtime_env::RuntimeEnv;
 use delta_kernel::table_configuration::TableConfiguration;
 
 use crate::datafile::DeltaWriterProperties;
-#[cfg(doc)]
-use crate::datafile::WriterPropertiesLayer;
 use crate::errors::DeltaResult;
 use crate::table::config::EncryptionConfig;
 
@@ -43,26 +41,35 @@ pub use kms::{KmsClient, KmsEncryptionFactory};
 /// apply but cannot turn encryption off: table encryption always wins. For any other
 /// table `props` is returned unchanged. An invalid configuration or an unregistered KMS
 /// factory is an error, never a plaintext write.
+///
+/// `runtime_env` (a session's or a `TaskContext`'s) is checked for the KMS factory first;
+/// without one (e.g. the legacy writers, which have no DataFusion context), only the global
+/// registry is.
 pub fn apply_encryption(
     props: DeltaWriterProperties,
     config: &TableConfiguration,
-    session: &dyn Session,
+    runtime_env: Option<&RuntimeEnv>,
 ) -> DeltaResult<DeltaWriterProperties> {
-    let env = session.runtime_env();
-    apply_encryption_from_configuration(props, config.metadata().configuration(), Some(env))
+    apply_encryption_from_configuration(props, config.metadata().configuration(), runtime_env)
 }
 
-/// [`apply_encryption`] for a table's raw metadata `configuration` and an optional
-/// `RuntimeEnv`. The env (a session's or a `TaskContext`'s) is checked for the KMS factory
-/// first; without one (e.g. the legacy writers, which have no DataFusion context), only the
-/// global registry is.
+/// [`apply_encryption`] for a table's raw metadata `configuration`.
 pub fn apply_encryption_from_configuration(
     props: DeltaWriterProperties,
     configuration: &HashMap<String, String>,
     runtime_env: Option<&RuntimeEnv>,
 ) -> DeltaResult<DeltaWriterProperties> {
     match EncryptionConfig::try_from_configuration(configuration)? {
-        Some(enc) => backend::apply(props, enc, runtime_env),
+        Some(enc) => apply_encryption_config(props, enc, runtime_env),
         None => Ok(props),
     }
+}
+
+/// [`apply_encryption`] for an already parsed configuration.
+pub(crate) fn apply_encryption_config(
+    props: DeltaWriterProperties,
+    enc: EncryptionConfig,
+    runtime_env: Option<&RuntimeEnv>,
+) -> DeltaResult<DeltaWriterProperties> {
+    backend::apply(props, enc, runtime_env)
 }

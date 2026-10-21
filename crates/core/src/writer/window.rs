@@ -144,10 +144,12 @@ impl WriteWindow {
         &mut self,
         configuration: &HashMap<String, String>,
     ) -> DeltaResult<()> {
-        let props =
-            super::apply_legacy_writer_encryption(self.factory.props.clone(), configuration)?;
-        self.encryption = EncryptionConfig::try_from_configuration(configuration)?;
-        self.factory.props = props;
+        let encryption = EncryptionConfig::try_from_configuration(configuration)?;
+        if let Some(enc) = &encryption {
+            self.factory.props =
+                super::apply_legacy_writer_encryption(self.factory.props.clone(), enc)?;
+        }
+        self.encryption = encryption;
         Ok(())
     }
 

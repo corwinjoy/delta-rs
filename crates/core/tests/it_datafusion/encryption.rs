@@ -84,46 +84,42 @@ async fn create_encrypted_table(uri: &str, kms_id: &str) -> DeltaResult<()> {
     Ok(())
 }
 
-/// Walk `dir` and assert every `.parquet` file has an encrypted footer.
+/// Assert every `.parquet` file under `dir` has an encrypted footer.
 async fn assert_all_parquets_encrypted(dir: &std::path::Path) {
-    use object_store::{ObjectStoreExt as _, local::LocalFileSystem, path::Path};
+    use futures::TryStreamExt as _;
+    use object_store::{ObjectMeta, ObjectStore as _, local::LocalFileSystem};
     use parquet::arrow::ParquetRecordBatchStreamBuilder;
     use parquet::arrow::async_reader::ParquetObjectReader;
 
-    fn find_parquet(d: &std::path::Path, result: &mut Vec<std::path::PathBuf>) {
-        if let Ok(entries) = std::fs::read_dir(d) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    find_parquet(&path, result);
-                } else if path.extension().and_then(|s| s.to_str()) == Some("parquet") {
-                    result.push(path);
-                }
-            }
-        }
-    }
-
-    let mut parquet_files = vec![];
-    find_parquet(dir, &mut parquet_files);
-    assert!(
-        !parquet_files.is_empty(),
-        "No parquet files found — cannot verify encryption"
-    );
-
     let store = Arc::new(LocalFileSystem::new_with_prefix(dir).unwrap());
-    for abs_path in &parquet_files {
-        let rel = abs_path.strip_prefix(dir).unwrap();
-        let object_path = Path::parse(rel.to_string_lossy().as_ref()).unwrap();
-        let meta = store.head(&object_path).await.unwrap();
-        let reader =
-            ParquetObjectReader::new(store.clone(), object_path.clone()).with_file_size(meta.size);
-        let result = ParquetRecordBatchStreamBuilder::new(reader).await;
+    let files: Vec<ObjectMeta> = store.list(None).try_collect().await.unwrap();
+    let parquet: Vec<_> = files
+        .into_iter()
+        .filter(|meta| meta.location.extension() == Some("parquet"))
+        .collect();
+    assert!(!parquet.is_empty(), "no parquet files to verify encryption");
+    for meta in parquet {
+        let reader = ParquetObjectReader::new(store.clone(), meta.location.clone())
+            .with_file_size(meta.size);
         assert!(
-            result.is_err(),
-            "File {:?} opened without decryption — NOT encrypted!",
-            rel
+            ParquetRecordBatchStreamBuilder::new(reader).await.is_err(),
+            "{} opened without decryption: not encrypted",
+            meta.location
         );
     }
+}
+
+/// The parsed `stats` of every add action in version 1 of the table at `dir`.
+fn add_stats(dir: &std::path::Path) -> Vec<serde_json::Value> {
+    let log = std::fs::read_to_string(dir.join("_delta_log/00000000000000000001.json")).unwrap();
+    let stats: Vec<serde_json::Value> = log
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|action| action.get("add").cloned())
+        .map(|add| serde_json::from_str(add["stats"].as_str().expect("add has stats")).unwrap())
+        .collect();
+    assert!(!stats.is_empty(), "no add actions");
+    stats
 }
 
 // ---------------------------------------------------------------------------
@@ -492,16 +488,7 @@ async fn test_column_key_on_a_struct_encrypts_its_leaves() -> DeltaResult<()> {
     .unwrap();
     table.write(vec![batch]).await?;
 
-    let log = std::fs::read_to_string(dir.path().join("_delta_log/00000000000000000001.json"))?;
-    let adds: Vec<serde_json::Value> = log
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter_map(|action| action.get("add").cloned())
-        .collect();
-    assert!(!adds.is_empty(), "no add actions");
-    for add in adds {
-        let stats: serde_json::Value =
-            serde_json::from_str(add["stats"].as_str().expect("add has stats")).unwrap();
+    for stats in add_stats(dir.path()) {
         assert_eq!(stats["numRecords"], 2, "{stats}");
         assert!(stats["minValues"].get("id").is_some(), "{stats}");
         assert!(stats["minValues"].get("address").is_none(), "{stats}");
@@ -607,17 +594,7 @@ async fn test_no_log_statistics_for_encrypted_columns() -> DeltaResult<()> {
         let table = create.await?;
         table.write(vec![get_table_batches()]).await?;
 
-        let log = std::fs::read_to_string(tmp.path().join("_delta_log/00000000000000000001.json"))
-            .unwrap();
-        let adds: Vec<serde_json::Value> = log
-            .lines()
-            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-            .filter_map(|action| action.get("add").cloned())
-            .collect();
-        assert!(!adds.is_empty(), "{column_keys:?}: no add actions");
-        for add in adds {
-            let stats: serde_json::Value =
-                serde_json::from_str(add["stats"].as_str().expect("add has stats")).unwrap();
+        for stats in add_stats(tmp.path()) {
             assert_eq!(stats["numRecords"], 11, "{column_keys:?}: {stats}");
             for section in ["minValues", "maxValues", "nullCount"] {
                 let values = &stats[section];
@@ -668,14 +645,7 @@ async fn test_schema_evolution_adds_plaintext_columns_to_column_keyed_table() ->
         .await?;
     assert!(table.snapshot()?.schema().field("extra").is_some());
 
-    let log =
-        std::fs::read_to_string(tmp.path().join("_delta_log/00000000000000000001.json")).unwrap();
-    let add = log
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .find_map(|action| action.get("add").cloned())
-        .expect("an add action");
-    let stats: serde_json::Value = serde_json::from_str(add["stats"].as_str().unwrap()).unwrap();
+    let stats = &add_stats(tmp.path())[0];
     assert!(stats["minValues"].get("extra").is_some(), "{stats}");
     assert!(stats["minValues"].get("int").is_none(), "{stats}");
     assert_all_parquets_encrypted(tmp.path()).await;

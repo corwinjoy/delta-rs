@@ -34,13 +34,10 @@ use std::sync::{Arc, Mutex};
 
 use arrow_schema::Schema as ArrowSchema;
 use async_trait::async_trait;
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64;
 use datafusion::config::EncryptionFactoryOptions;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::parquet_encryption::EncryptionFactory;
 use object_store::path::Path;
-use parquet::arrow::ArrowSchemaConverter;
 use parquet::encryption::decrypt::{FileDecryptionProperties, KeyRetriever};
 use parquet::encryption::encrypt::FileEncryptionProperties;
 use parquet::errors::ParquetError;
@@ -48,9 +45,9 @@ use rand::Rng as _;
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{DeltaResult, DeltaTableError};
+use crate::kernel::spawn_blocking_with_span;
 use crate::table::config::{
-    ENCRYPTION_COLUMN_KEYS_PROP, ENCRYPTION_FOOTER_KEY_PROP, ENCRYPTION_KMS_CONFIGURATION_PROP,
-    ENCRYPTION_KMS_ID_PROP, ENCRYPTION_PLAINTEXT_FOOTER_PROP, EncryptionConfig,
+    ENCRYPTION_FOOTER_KEY_PROP, ENCRYPTION_KMS_CONFIGURATION_PROP, EncryptionConfig,
 };
 
 /// The key material format this factory writes and reads.
@@ -63,7 +60,10 @@ pub const DATA_KEY_LENGTH: usize = 16;
 ///
 /// This is the extension point for encryption: implement it for your KMS and hand it to
 /// [`KmsEncryptionFactory`]. A master key never leaves the KMS; `wrap_key` returns an
-/// opaque blob that only `unwrap_key` on the same KMS can turn back into the key.
+/// opaque string (base64 in the parquet-mr and PyArrow clients) that is stored as the
+/// file's `wrappedDEK` and that only `unwrap_key` on the same KMS can turn back into the
+/// key. The signatures match `parquet-key-management`'s `KmsClient`, so a client serves
+/// both.
 ///
 /// The methods are synchronous because Parquet asks for keys from a synchronous
 /// [`KeyRetriever`] while decoding a footer. A client that talks to a remote service should
@@ -79,12 +79,12 @@ pub trait KmsClient: Send + Sync + Debug {
         key: &[u8],
         master_key_id: &str,
         kms_configuration: Option<&str>,
-    ) -> DeltaResult<Vec<u8>>;
+    ) -> DeltaResult<String>;
 
     /// Decrypt a key that [`wrap_key`](Self::wrap_key) encrypted under `master_key_id`.
     fn unwrap_key(
         &self,
-        wrapped_key: &[u8],
+        wrapped_key: &str,
         master_key_id: &str,
         kms_configuration: Option<&str>,
     ) -> DeltaResult<Vec<u8>>;
@@ -121,7 +121,7 @@ pub struct KeyMaterial {
     /// The master key ID from the table properties that wrapped the data key.
     #[serde(rename = "masterKeyID")]
     pub master_key_id: String,
-    /// The data encryption key, wrapped by the KMS and base64-encoded.
+    /// The data encryption key, wrapped by the KMS, as its client returned it.
     #[serde(rename = "wrappedDEK")]
     pub wrapped_dek: String,
     /// Always `false`: the data key is wrapped directly with the master key.
@@ -170,29 +170,30 @@ impl KmsEncryptionFactory {
     pub fn new(kms: Arc<dyn KmsClient>) -> Self {
         Self { kms }
     }
+}
 
-    fn wrapped_data_key(
-        &self,
-        master_key_id: &str,
-        is_footer_key: bool,
-        kms_instance_id: &str,
-        kms_configuration: Option<&str>,
-    ) -> DeltaResult<(Vec<u8>, Vec<u8>)> {
-        let mut key = vec![0u8; DATA_KEY_LENGTH];
-        rand::rng().fill_bytes(&mut key);
-        let wrapped = self.kms.wrap_key(&key, master_key_id, kms_configuration)?;
-        let material = KeyMaterial {
-            key_material_type: KEY_MATERIAL_TYPE.to_string(),
-            internal_storage: true,
-            is_footer_key,
-            kms_instance_id: is_footer_key.then(|| kms_instance_id.to_string()),
-            kms_instance_url: is_footer_key.then(|| "DEFAULT".to_string()),
-            master_key_id: master_key_id.to_string(),
-            wrapped_dek: BASE64.encode(wrapped),
-            double_wrapping: false,
-        };
-        Ok((key, material.to_bytes()?))
-    }
+/// A fresh data key wrapped by `kms` under `master_key_id`, with its key material.
+fn wrapped_data_key(
+    kms: &dyn KmsClient,
+    master_key_id: &str,
+    is_footer_key: bool,
+    kms_instance_id: &str,
+    kms_configuration: Option<&str>,
+) -> DeltaResult<(Vec<u8>, Vec<u8>)> {
+    let mut key = vec![0u8; DATA_KEY_LENGTH];
+    rand::rng().fill_bytes(&mut key);
+    let wrapped = kms.wrap_key(&key, master_key_id, kms_configuration)?;
+    let material = KeyMaterial {
+        key_material_type: KEY_MATERIAL_TYPE.to_string(),
+        internal_storage: true,
+        is_footer_key,
+        kms_instance_id: is_footer_key.then(|| kms_instance_id.to_string()),
+        kms_instance_url: is_footer_key.then(|| "DEFAULT".to_string()),
+        master_key_id: master_key_id.to_string(),
+        wrapped_dek: wrapped,
+        double_wrapping: false,
+    };
+    Ok((key, material.to_bytes()?))
 }
 
 /// The file name of `file_path`: the AAD prefix on both the write and the read side.
@@ -212,59 +213,55 @@ impl EncryptionFactory for KmsEncryptionFactory {
         schema: &Arc<ArrowSchema>,
         file_path: &Path,
     ) -> DataFusionResult<Option<Arc<FileEncryptionProperties>>> {
-        let option = |key: &str| config.options.get(key).map(String::as_str);
-        let kms_configuration = option(ENCRYPTION_KMS_CONFIGURATION_PROP);
-        let footer_key_id = option(ENCRYPTION_FOOTER_KEY_PROP).ok_or_else(|| {
+        // The options are the table's `delta.encryption.*` properties
+        // (`EncryptionConfig::writer_factory_options`).
+        let enc = EncryptionConfig::try_from_configuration(&config.options)?.ok_or_else(|| {
             DataFusionError::Configuration(format!(
                 "encryption factory option '{ENCRYPTION_FOOTER_KEY_PROP}' is required to encrypt"
             ))
         })?;
-        let kms_id = option(ENCRYPTION_KMS_ID_PROP).unwrap_or_default();
-        let plaintext_footer = match option(ENCRYPTION_PLAINTEXT_FOOTER_PROP) {
-            None => false,
-            Some(value) => value.parse::<bool>().map_err(|_| {
-                DataFusionError::Configuration(format!(
-                    "encryption factory option '{ENCRYPTION_PLAINTEXT_FOOTER_PROP}' must be a \
-                     boolean, got '{value}'"
-                ))
-            })?,
-        };
-        let column_keys = EncryptionConfig::parse_column_keys(option(ENCRYPTION_COLUMN_KEYS_PROP))?;
+        let column_leaves = enc.column_key_leaves(schema)?;
+        let plaintext_footer = enc.plaintext_footer;
+        // The KMS client is synchronous, so its round trips run off the async executor.
+        let kms = Arc::clone(&self.kms);
+        let (footer, columns) = spawn_blocking_with_span(move || -> DeltaResult<_> {
+            let kms_configuration = enc.kms_configuration.as_deref();
+            let footer = wrapped_data_key(
+                kms.as_ref(),
+                &enc.footer_key,
+                true,
+                &enc.kms_id,
+                kms_configuration,
+            )?;
+            let columns = column_leaves
+                .into_iter()
+                .map(|(master_key_id, leaves)| {
+                    let key = wrapped_data_key(
+                        kms.as_ref(),
+                        &master_key_id,
+                        false,
+                        &enc.kms_id,
+                        kms_configuration,
+                    )?;
+                    Ok((key, leaves))
+                })
+                .collect::<DeltaResult<Vec<_>>>()?;
+            Ok((footer, columns))
+        })
+        .await
+        .map_err(|err| DataFusionError::External(Box::new(err)))??;
 
-        let (footer_key, footer_metadata) =
-            self.wrapped_data_key(footer_key_id, true, kms_id, kms_configuration)?;
+        let (footer_key, footer_metadata) = footer;
         let mut builder = FileEncryptionProperties::builder(footer_key)
             .with_footer_key_metadata(footer_metadata)
             .with_plaintext_footer(plaintext_footer)
             .with_aad_prefix(aad_prefix(file_path))
             .with_aad_prefix_storage(false);
-        // Parquet keys leaf columns; a configured column covers every leaf under it
-        // (`address` → `address.street`, `address.city`), all under one data key.
-        let leaves: Vec<String> = ArrowSchemaConverter::new()
-            .convert(schema)?
-            .columns()
-            .iter()
-            .map(|column| column.path().string())
-            .collect();
-        for (master_key_id, columns) in column_keys {
-            for column in columns {
-                let nested = format!("{column}.");
-                let column_leaves = leaves
-                    .iter()
-                    .filter(|leaf| **leaf == column || leaf.starts_with(&nested));
-                let (key, metadata) =
-                    self.wrapped_data_key(&master_key_id, false, kms_id, kms_configuration)?;
-                let mut found = false;
-                for leaf in column_leaves {
-                    found = true;
-                    builder =
-                        builder.with_column_key_and_metadata(leaf, key.clone(), metadata.clone());
-                }
-                if !found {
-                    return Err(DataFusionError::Configuration(format!(
-                        "encrypted column '{column}' is not in the schema of '{file_path}'"
-                    )));
-                }
+        // A configured column covers every parquet leaf under it, all under one data key.
+        for ((key, metadata), leaves) in columns {
+            for leaf in leaves {
+                builder =
+                    builder.with_column_key_and_metadata(&leaf, key.clone(), metadata.clone());
             }
         }
         Ok(Some(builder.build()?))
@@ -323,14 +320,9 @@ impl KmsKeyRetriever {
     fn unwrap_key(&self, key_metadata: &[u8]) -> parquet::errors::Result<Vec<u8>> {
         let general = |err: DeltaTableError| ParquetError::General(err.to_string());
         let material = KeyMaterial::from_bytes(key_metadata).map_err(general)?;
-        let wrapped = BASE64.decode(&material.wrapped_dek).map_err(|e| {
-            ParquetError::General(format!(
-                "encryption key material has a malformed wrappedDEK: {e}"
-            ))
-        })?;
         self.kms
             .unwrap_key(
-                &wrapped,
+                &material.wrapped_dek,
                 &material.master_key_id,
                 self.kms_configuration.as_deref(),
             )
@@ -369,11 +361,11 @@ mod tests {
     use parquet::file::properties::WriterProperties;
 
     use super::*;
+    use crate::table::config::{ENCRYPTION_COLUMN_KEYS_PROP, ENCRYPTION_KMS_ID_PROP};
     use crate::test_utils::kms_encryption::InMemoryKmsClient;
 
-    fn factory() -> (KmsEncryptionFactory, Arc<InMemoryKmsClient>) {
-        let kms = Arc::new(InMemoryKmsClient::default());
-        (KmsEncryptionFactory::new(kms.clone()), kms)
+    fn factory() -> KmsEncryptionFactory {
+        KmsEncryptionFactory::new(Arc::new(InMemoryKmsClient::default()))
     }
 
     fn options(entries: &[(&str, &str)]) -> EncryptionFactoryOptions {
@@ -453,7 +445,7 @@ mod tests {
             key: &[u8],
             master_key_id: &str,
             kms_configuration: Option<&str>,
-        ) -> DeltaResult<Vec<u8>> {
+        ) -> DeltaResult<String> {
             self.seen
                 .lock()
                 .unwrap()
@@ -463,7 +455,7 @@ mod tests {
 
         fn unwrap_key(
             &self,
-            wrapped_key: &[u8],
+            wrapped_key: &str,
             master_key_id: &str,
             kms_configuration: Option<&str>,
         ) -> DeltaResult<Vec<u8>> {
@@ -511,7 +503,7 @@ mod tests {
     /// Each key gets its own wrapped data key, stored in the file as PKMT1 key material.
     #[tokio::test]
     async fn key_material_names_the_master_keys() {
-        let (factory, _) = factory();
+        let factory = factory();
         let properties = factory
             .get_file_encryption_properties(
                 &options(&[
@@ -549,7 +541,7 @@ mod tests {
     /// properties, here a rotated footer key and no column keys at all, do not matter.
     #[tokio::test]
     async fn decrypts_from_file_key_metadata_regardless_of_options() {
-        let (factory, _) = factory();
+        let factory = factory();
         let file = encrypt(
             &factory,
             &options(&[
@@ -574,7 +566,7 @@ mod tests {
     /// A KMS that cannot unwrap the key refuses the file instead of returning garbage.
     #[tokio::test]
     async fn unknown_wrapped_key_is_refused() {
-        let (writer_factory, _) = factory();
+        let writer_factory = factory();
         let file = encrypt(
             &writer_factory,
             &options(&[
@@ -583,7 +575,7 @@ mod tests {
             ]),
         )
         .await;
-        let (other_factory, _) = factory();
+        let other_factory = factory();
         let err = decrypt(&other_factory, &options(&[]), file)
             .await
             .unwrap_err();

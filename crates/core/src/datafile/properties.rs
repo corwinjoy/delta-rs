@@ -18,7 +18,7 @@ use std::sync::{Arc, LazyLock};
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 use delta_kernel::table_configuration::TableConfiguration;
-use delta_kernel::table_properties::DataSkippingNumIndexedCols;
+use delta_kernel::table_properties::{DataSkippingNumIndexedCols, TableProperties};
 use object_store::path::Path;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
@@ -134,13 +134,8 @@ impl WriterStatsConfig {
         }
     }
 
-    /// The table's stats configuration, with column names made physical.
-    pub fn from_config(config: &TableConfiguration) -> Self {
-        let properties = stats_table_properties(
-            config.logical_schema().as_ref(),
-            config.table_properties(),
-            config.column_mapping_mode(),
-        );
+    /// The stats configuration in `properties`, column names as given there.
+    pub fn from_properties(properties: &TableProperties) -> Self {
         Self {
             num_indexed_cols: properties.num_indexed_cols(),
             stats_columns: properties
@@ -148,6 +143,15 @@ impl WriterStatsConfig {
                 .as_ref()
                 .map(|columns| columns.iter().map(|c| c.to_string()).collect()),
         }
+    }
+
+    /// The table's stats configuration, with column names made physical.
+    pub fn from_config(config: &TableConfiguration) -> Self {
+        Self::from_properties(&stats_table_properties(
+            config.logical_schema().as_ref(),
+            config.table_properties(),
+            config.column_mapping_mode(),
+        ))
     }
 }
 
