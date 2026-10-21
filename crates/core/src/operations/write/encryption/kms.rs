@@ -22,8 +22,10 @@
 //! refuses the file rather than guessing.
 //!
 //! # Additional authenticated data
-//! The file name is the AAD prefix and is not stored in the file: readers derive it from
-//! the path they are given, which is relative to the table root on both sides (see
+//! The file name, not the table-relative path, is the AAD prefix, so a table can be moved or
+//! renamed and its files still authenticate; a file copied under its own name elsewhere
+//! does too. The prefix is not stored in the file: readers derive it from the path they are
+//! given, which is relative to the table root on both sides (see
 //! [`FileContext`](crate::datafile::FileContext)).
 
 use std::collections::HashMap;
@@ -38,6 +40,7 @@ use datafusion::config::EncryptionFactoryOptions;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::parquet_encryption::EncryptionFactory;
 use object_store::path::Path;
+use parquet::arrow::ArrowSchemaConverter;
 use parquet::encryption::decrypt::{FileDecryptionProperties, KeyRetriever};
 use parquet::encryption::encrypt::FileEncryptionProperties;
 use parquet::errors::ParquetError;
@@ -46,8 +49,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::table::config::{
-    ENCRYPTION_COLUMN_KEYS_PROP, ENCRYPTION_FOOTER_KEY_PROP, ENCRYPTION_KMS_ID_PROP,
-    ENCRYPTION_PLAINTEXT_FOOTER_PROP, EncryptionConfig,
+    ENCRYPTION_COLUMN_KEYS_PROP, ENCRYPTION_FOOTER_KEY_PROP, ENCRYPTION_KMS_CONFIGURATION_PROP,
+    ENCRYPTION_KMS_ID_PROP, ENCRYPTION_PLAINTEXT_FOOTER_PROP, EncryptionConfig,
 };
 
 /// The key material format this factory writes and reads.
@@ -65,12 +68,26 @@ pub const DATA_KEY_LENGTH: usize = 16;
 /// The methods are synchronous because Parquet asks for keys from a synchronous
 /// [`KeyRetriever`] while decoding a footer. A client that talks to a remote service should
 /// do so with a blocking client and cache unwrapped keys where its security policy allows.
+///
+/// `kms_configuration` is the table's `delta.encryption.kms_configuration`, if set: how to
+/// reach the KMS (an endpoint, a vault), opaque to delta-rs. Tables sharing a `kms_id` may
+/// differ in it.
 pub trait KmsClient: Send + Sync + Debug {
     /// Encrypt `key` under the master key `master_key_id`.
-    fn wrap_key(&self, key: &[u8], master_key_id: &str) -> DeltaResult<Vec<u8>>;
+    fn wrap_key(
+        &self,
+        key: &[u8],
+        master_key_id: &str,
+        kms_configuration: Option<&str>,
+    ) -> DeltaResult<Vec<u8>>;
 
     /// Decrypt a key that [`wrap_key`](Self::wrap_key) encrypted under `master_key_id`.
-    fn unwrap_key(&self, wrapped_key: &[u8], master_key_id: &str) -> DeltaResult<Vec<u8>>;
+    fn unwrap_key(
+        &self,
+        wrapped_key: &[u8],
+        master_key_id: &str,
+        kms_configuration: Option<&str>,
+    ) -> DeltaResult<Vec<u8>>;
 }
 
 /// The key material stored in a file's key metadata, one document per key.
@@ -159,10 +176,11 @@ impl KmsEncryptionFactory {
         master_key_id: &str,
         is_footer_key: bool,
         kms_instance_id: &str,
+        kms_configuration: Option<&str>,
     ) -> DeltaResult<(Vec<u8>, Vec<u8>)> {
         let mut key = vec![0u8; DATA_KEY_LENGTH];
         rand::rng().fill_bytes(&mut key);
-        let wrapped = self.kms.wrap_key(&key, master_key_id)?;
+        let wrapped = self.kms.wrap_key(&key, master_key_id, kms_configuration)?;
         let material = KeyMaterial {
             key_material_type: KEY_MATERIAL_TYPE.to_string(),
             internal_storage: true,
@@ -191,10 +209,11 @@ impl EncryptionFactory for KmsEncryptionFactory {
     async fn get_file_encryption_properties(
         &self,
         config: &EncryptionFactoryOptions,
-        _schema: &Arc<ArrowSchema>,
+        schema: &Arc<ArrowSchema>,
         file_path: &Path,
     ) -> DataFusionResult<Option<Arc<FileEncryptionProperties>>> {
         let option = |key: &str| config.options.get(key).map(String::as_str);
+        let kms_configuration = option(ENCRYPTION_KMS_CONFIGURATION_PROP);
         let footer_key_id = option(ENCRYPTION_FOOTER_KEY_PROP).ok_or_else(|| {
             DataFusionError::Configuration(format!(
                 "encryption factory option '{ENCRYPTION_FOOTER_KEY_PROP}' is required to encrypt"
@@ -212,30 +231,58 @@ impl EncryptionFactory for KmsEncryptionFactory {
         };
         let column_keys = EncryptionConfig::parse_column_keys(option(ENCRYPTION_COLUMN_KEYS_PROP))?;
 
-        let (footer_key, footer_metadata) = self.wrapped_data_key(footer_key_id, true, kms_id)?;
+        let (footer_key, footer_metadata) =
+            self.wrapped_data_key(footer_key_id, true, kms_id, kms_configuration)?;
         let mut builder = FileEncryptionProperties::builder(footer_key)
             .with_footer_key_metadata(footer_metadata)
             .with_plaintext_footer(plaintext_footer)
             .with_aad_prefix(aad_prefix(file_path))
             .with_aad_prefix_storage(false);
+        // Parquet keys leaf columns; a configured column covers every leaf under it
+        // (`address` → `address.street`, `address.city`), all under one data key.
+        let leaves: Vec<String> = ArrowSchemaConverter::new()
+            .convert(schema)?
+            .columns()
+            .iter()
+            .map(|column| column.path().string())
+            .collect();
         for (master_key_id, columns) in column_keys {
             for column in columns {
-                let (key, metadata) = self.wrapped_data_key(&master_key_id, false, kms_id)?;
-                builder = builder.with_column_key_and_metadata(&column, key, metadata);
+                let nested = format!("{column}.");
+                let column_leaves = leaves
+                    .iter()
+                    .filter(|leaf| **leaf == column || leaf.starts_with(&nested));
+                let (key, metadata) =
+                    self.wrapped_data_key(&master_key_id, false, kms_id, kms_configuration)?;
+                let mut found = false;
+                for leaf in column_leaves {
+                    found = true;
+                    builder =
+                        builder.with_column_key_and_metadata(leaf, key.clone(), metadata.clone());
+                }
+                if !found {
+                    return Err(DataFusionError::Configuration(format!(
+                        "encrypted column '{column}' is not in the schema of '{file_path}'"
+                    )));
+                }
             }
         }
         Ok(Some(builder.build()?))
     }
 
-    /// Decryption keys for `file_path`, from its own key metadata and the KMS. The options
-    /// are not read: see the module documentation.
+    /// Decryption keys for `file_path`, from its own key metadata and the KMS. Of the
+    /// options only `kms_configuration` is read: see the module documentation.
     async fn get_file_decryption_properties(
         &self,
-        _config: &EncryptionFactoryOptions,
+        config: &EncryptionFactoryOptions,
         file_path: &Path,
     ) -> DataFusionResult<Option<Arc<FileDecryptionProperties>>> {
         let retriever = Arc::new(KmsKeyRetriever {
             kms: Arc::clone(&self.kms),
+            kms_configuration: config
+                .options
+                .get(ENCRYPTION_KMS_CONFIGURATION_PROP)
+                .cloned(),
             unwrapped: Mutex::new(HashMap::new()),
         });
         Ok(Some(
@@ -253,6 +300,7 @@ impl EncryptionFactory for KmsEncryptionFactory {
 #[derive(Debug)]
 struct KmsKeyRetriever {
     kms: Arc<dyn KmsClient>,
+    kms_configuration: Option<String>,
     /// key metadata → unwrapped data key
     unwrapped: Mutex<HashMap<Vec<u8>, Vec<u8>>>,
 }
@@ -281,7 +329,11 @@ impl KmsKeyRetriever {
             ))
         })?;
         self.kms
-            .unwrap_key(&wrapped, &material.master_key_id)
+            .unwrap_key(
+                &wrapped,
+                &material.master_key_id,
+                self.kms_configuration.as_deref(),
+            )
             .map_err(general)
     }
 }
@@ -386,6 +438,74 @@ mod tests {
             .next()
             .unwrap()
             .map_err(|e| ParquetError::ArrowError(e.to_string()))
+    }
+
+    /// Records the `kms_configuration` each call receives.
+    #[derive(Debug, Default)]
+    struct RecordingKms {
+        inner: InMemoryKmsClient,
+        seen: Mutex<Vec<Option<String>>>,
+    }
+
+    impl KmsClient for RecordingKms {
+        fn wrap_key(
+            &self,
+            key: &[u8],
+            master_key_id: &str,
+            kms_configuration: Option<&str>,
+        ) -> DeltaResult<Vec<u8>> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(kms_configuration.map(str::to_string));
+            self.inner.wrap_key(key, master_key_id, kms_configuration)
+        }
+
+        fn unwrap_key(
+            &self,
+            wrapped_key: &[u8],
+            master_key_id: &str,
+            kms_configuration: Option<&str>,
+        ) -> DeltaResult<Vec<u8>> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(kms_configuration.map(str::to_string));
+            self.inner
+                .unwrap_key(wrapped_key, master_key_id, kms_configuration)
+        }
+    }
+
+    /// The table's `kms_configuration` reaches the client when wrapping and unwrapping.
+    #[tokio::test]
+    async fn kms_configuration_reaches_the_client() {
+        let kms = Arc::new(RecordingKms::default());
+        let factory = KmsEncryptionFactory::new(kms.clone());
+        let file = encrypt(
+            &factory,
+            &options(&[
+                (ENCRYPTION_KMS_ID_PROP, "kms"),
+                (ENCRYPTION_KMS_CONFIGURATION_PROP, "vault-a"),
+                (ENCRYPTION_FOOTER_KEY_PROP, "fk"),
+            ]),
+        )
+        .await;
+        decrypt(
+            &factory,
+            &options(&[
+                (ENCRYPTION_KMS_ID_PROP, "kms"),
+                (ENCRYPTION_KMS_CONFIGURATION_PROP, "vault-a"),
+            ]),
+            file,
+        )
+        .await
+        .unwrap();
+        let seen = kms.seen.lock().unwrap();
+        assert!(seen.len() >= 2, "{seen:?}");
+        assert!(
+            seen.iter().all(|c| c.as_deref() == Some("vault-a")),
+            "{seen:?}"
+        );
     }
 
     /// Each key gets its own wrapped data key, stored in the file as PKMT1 key material.

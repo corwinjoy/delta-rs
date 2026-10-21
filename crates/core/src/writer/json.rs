@@ -17,7 +17,7 @@ use super::{DeltaWriter, DeltaWriterError, WriteMode, ensure_legacy_writer_suppo
 use crate::DeltaTable;
 use crate::datafile::{DeltaWriterProperties, WriterStatsConfig};
 use crate::errors::DeltaTableError;
-use crate::kernel::Add;
+use crate::kernel::{Action, Add, Version};
 use crate::table::builder::DeltaTableBuilder;
 use crate::table::config::TablePropertiesExt as _;
 
@@ -79,19 +79,15 @@ impl JsonWriter {
         partition_columns: Vec<String>,
     ) -> Result<Self, DeltaTableError> {
         let (num_indexed_cols, stats_columns) = Self::read_stats_config(table)?;
-        let configuration = table.snapshot()?.metadata().configuration();
         let factory = SinkFactory {
             storage: table.object_store(),
             partition_columns,
-            props: super::apply_legacy_writer_encryption(
-                DeltaWriterProperties::default()
-                    .with_stats_config(WriterStatsConfig::new(num_indexed_cols, stats_columns)),
-                configuration,
-            )?,
+            props: DeltaWriterProperties::default()
+                .with_stats_config(WriterStatsConfig::new(num_indexed_cols, stats_columns)),
         };
-        Ok(Self {
-            window: WriteWindow::new(factory, schema),
-        })
+        let mut window = WriteWindow::new(factory, schema);
+        window.apply_encryption(table.snapshot()?.metadata().configuration())?;
+        Ok(Self { window })
     }
 
     /// Resolve the data-skipping stats configuration from the table snapshot.
@@ -258,6 +254,18 @@ impl DeltaWriter<Vec<Value>> for JsonWriter {
         let actions = self.window.drain().await?;
         debug!(actions_count = actions.len(), "flush completed");
         Ok(actions)
+    }
+
+    /// Flush buffered files and commit them to the Delta log, creating a new version.
+    async fn flush_and_commit(
+        &mut self,
+        table: &mut DeltaTable,
+    ) -> Result<Version, DeltaTableError> {
+        // The caller's table may have been replaced since the writer read its configuration.
+        self.window
+            .check_target(table.snapshot()?.metadata().configuration())?;
+        let adds: Vec<_> = self.flush().await?.drain(..).map(Action::Add).collect();
+        super::flush_and_commit(adds, table, None).await
     }
 }
 

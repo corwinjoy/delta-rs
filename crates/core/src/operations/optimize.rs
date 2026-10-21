@@ -53,7 +53,9 @@ use crate::delta_datafusion::{
     create_session_state_with_spill_config, resolve_session_state, update_datafusion_session,
 };
 use crate::errors::{ColumnMappingOperation, DeltaResult, DeltaTableError};
-use crate::kernel::transaction::{CommitBuilder, CommitProperties, DEFAULT_RETRIES, PROTOCOL};
+use crate::kernel::transaction::{
+    CommitBuilder, CommitProperties, DEFAULT_RETRIES, PROTOCOL, READS_ENCRYPTED_TABLES,
+};
 use crate::kernel::{Action, Add, DataType, PartitionsExt, Remove, StructType, Version};
 use crate::kernel::{EagerSnapshot, resolve_snapshot};
 use crate::logstore::with_operation;
@@ -432,6 +434,9 @@ impl<'a> std::future::IntoFuture for OptimizeBuilder<'a> {
                 ));
             }
             PROTOCOL.can_write_to(&snapshot)?;
+            // Optimize reads the files it rewrites, outside `DeltaScan` and its check.
+            PROTOCOL
+                .check_encryption(snapshot.metadata().configuration(), READS_ENCRYPTED_TABLES)?;
 
             let writer_properties = this.writer_properties;
             let (session, _) = resolve_session_state(

@@ -30,6 +30,7 @@ use crate::datafile::writer::{ArrowWriterOptions, DeltaWriter as DatasetSink, Wr
 use crate::datafile::{DeltaWriterProperties, WriterStatsConfig};
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::kernel::Add;
+use crate::table::config::EncryptionConfig;
 
 /// Everything needed to open a streaming sink for a given schema — exactly the
 /// per-writer configuration, minus the schema (which varies as a window widens).
@@ -52,6 +53,8 @@ impl SinkFactory {
 /// upholds. The writers drive it and never touch the inner state directly.
 pub(crate) struct WriteWindow {
     factory: SinkFactory,
+    /// The encryption the sinks' files are written under, for [`Self::check_target`].
+    encryption: Option<EncryptionConfig>,
     /// Schema the open sink encodes under; widens on a `MergeSchema` write.
     schema: ArrowSchemaRef,
     /// The last committed schema; the window reverts to it on `abort`.
@@ -70,6 +73,7 @@ impl WriteWindow {
     pub(crate) fn new(factory: SinkFactory, schema: ArrowSchemaRef) -> Self {
         Self {
             factory,
+            encryption: None,
             baseline: schema.clone(),
             schema,
             sink: None,
@@ -134,20 +138,33 @@ impl WriteWindow {
     }
 
     /// Encrypt the files of sinks opened from now on as `configuration` (the table's
-    /// `delta.encryption.*` properties) says; a no-op for an unencrypted table.
+    /// `delta.encryption.*` properties) says; a no-op for an unencrypted table. On an
+    /// error (an unregistered KMS, say) the properties are left as they were.
     pub(crate) fn apply_encryption(
         &mut self,
         configuration: &HashMap<String, String>,
     ) -> DeltaResult<()> {
-        let props = std::mem::take(&mut self.factory.props);
-        self.factory.props = super::apply_legacy_writer_encryption(props, configuration)?;
+        let props =
+            super::apply_legacy_writer_encryption(self.factory.props.clone(), configuration)?;
+        self.encryption = EncryptionConfig::try_from_configuration(configuration)?;
+        self.factory.props = props;
         Ok(())
     }
 
-    /// Whether sinks are opened with an encryption layer: the legacy writers add no other
-    /// layer to their properties.
-    pub(crate) fn encrypts(&self) -> bool {
-        !self.factory.props.layers.is_empty()
+    /// Refuse to hand this window's files to a table whose encryption differs from what
+    /// they were written under, in any frozen setting and in either direction: the table
+    /// was created or replaced after the writer read its configuration.
+    pub(crate) fn check_target(&self, configuration: &HashMap<String, String>) -> DeltaResult<()> {
+        let target = EncryptionConfig::try_from_configuration(configuration)?;
+        match EncryptionConfig::frozen_change(self.encryption.as_ref(), target.as_ref()) {
+            None => Ok(()),
+            Some(key) => Err(DeltaTableError::Generic(format!(
+                "The table's '{key}' differs from the encryption configuration this writer's \
+                 files were written under, because the table was created or replaced after \
+                 the writer read its configuration; create the table first, then the writer \
+                 with for_table or try_new_checked"
+            ))),
+        }
     }
 
     /// Schema widening rotates the whole window's sink, which only makes sense when
