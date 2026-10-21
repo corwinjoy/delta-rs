@@ -73,10 +73,9 @@ specifies. Under uniform encryption new columns are encrypted with the footer ke
 
 Passing `delta.encryption.*` properties to a write on an existing table is an error when they
 differ from the table's, since a write does not change the configuration of an existing table.
-Matching values pass, so a pipeline can send the same configuration on every run, with the
-column names as it stored them or as displayed. `kms_configuration` is not frozen, so a
-differing value also passes, but the write does not apply it either: change it with the
-table-property operations.
+Matching values pass, so a pipeline can resend the same configuration on every run, with
+column names as stored or as displayed. A different `kms_configuration` also passes, since
+it is not frozen, but is not applied either: change it with the table-property operations.
 
 ## Protocol
 
@@ -86,6 +85,6 @@ delta-rs does not add it and recognises encrypted tables by their properties ins
 the feature can be added, other engines are not protected.
 
 Any `delta.encryption.*` key marks a table as encrypted, valid or not, so a misconfigured
-table is refused rather than read as ciphertext or written as plaintext. That holds for a
-stray key another engine wrote on a plaintext table: delta-rs refuses it, and since removing
-the key is itself a commit to an "encrypted" table, the way out is create-or-replace.
+table is refused rather than read as ciphertext or written as plaintext. A stray key another
+engine wrote on a plaintext table therefore locks it out of delta-rs; removing the key is
+itself a refused commit, so the way out is create-or-replace.

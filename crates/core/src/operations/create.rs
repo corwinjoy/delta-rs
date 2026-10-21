@@ -431,7 +431,7 @@ impl std::future::IntoFuture for CreateBuilder {
                             _ => None,
                         });
                         if let Some(new_configuration) = new_configuration {
-                            // The new configuration was validated by `into_table_and_actions`.
+                            // Already validated by `into_table_and_actions`.
                             let new = EncryptionConfig::try_from_configuration(new_configuration)?;
                             let changed =
                                 match EncryptionConfig::try_from_configuration(old_configuration) {
@@ -439,7 +439,7 @@ impl std::future::IntoFuture for CreateBuilder {
                                         EncryptionConfig::frozen_change(old.as_ref(), new.as_ref())
                                             .is_some()
                                     }
-                                    // An invalid configuration is replaced whatever the new one is.
+                                    // Invalid before: replaced whatever the new one is.
                                     Err(_) => true,
                                 };
                             if changed {

@@ -457,14 +457,12 @@ impl WriteBuilder {
                         Err(WriteError::AlreadyExists(self.log_store.root_url().clone()).into())
                     }
                     _ => {
-                        // `configuration` only applies when the write creates the table.
-                        // Encryption keys are compared as parsed values, so a pipeline can
-                        // send the same configuration every run, in any order and with
-                        // display or physical names; differing keys would be dropped
-                        // silently and leave the user believing the table is encrypted, so
-                        // refuse them. `kms_configuration` is not frozen, so a differing
-                        // value passes, but it is not applied either: a write never changes
-                        // an existing table's configuration.
+                        // `configuration` only applies when the write creates the table,
+                        // so encryption keys that differ from the table's are refused
+                        // rather than dropped silently. Compared as parsed values, so a
+                        // pipeline can resend the same configuration in any order and with
+                        // display or physical names. `kms_configuration` is not frozen: a
+                        // different value passes, and is not applied either.
                         let given: Vec<_> = self
                             .configuration
                             .iter()
@@ -479,8 +477,7 @@ impl WriteBuilder {
                                     None => merged.remove(*key),
                                 };
                             }
-                            // A key whose value differs as text; the parsed comparison
-                            // below may still find it equal.
+                            // Differs as text; the parsed comparison may still find it equal.
                             let differs = given
                                 .iter()
                                 .find(|(key, _)| merged.get(*key) != current.get(*key))
@@ -509,8 +506,7 @@ impl WriteBuilder {
                                                     new.as_ref(),
                                                 )
                                             }
-                                            // The merged configuration is not even valid, e.g.
-                                            // one key unset on its own: it differs.
+                                            // Not even valid (e.g. one key unset alone): differs.
                                             Err(_) => Some(key),
                                         }
                                     }
@@ -921,8 +917,8 @@ mod tests {
         );
     }
 
-    /// On an encrypted table, unsetting one key leaves an invalid configuration; that is
-    /// reported as a change, not as an invalid configuration the user should complete.
+    /// Unsetting one key on an encrypted table is reported as a change, not as an invalid
+    /// configuration to complete.
     #[tokio::test]
     async fn test_write_reports_a_key_unset_on_an_encrypted_table_as_a_change() {
         use crate::kernel::transaction::WRITES_ENCRYPTED_TABLES;
@@ -956,8 +952,7 @@ mod tests {
 
         use crate::kernel::transaction::{TransactionError, WRITES_ENCRYPTED_TABLES};
 
-        // Only meaningful while this build refuses encrypted writes. Once the write path
-        // enables them, its integration tests cover create-with-data instead.
+        // Moot once this build encrypts: the write path's tests cover create-with-data.
         if WRITES_ENCRYPTED_TABLES {
             return;
         }

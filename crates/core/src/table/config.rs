@@ -552,8 +552,7 @@ fn invalid_encryption_config(msg: String) -> DeltaTableError {
     DeltaTableError::Generic(format!("Invalid table encryption configuration: {msg}"))
 }
 
-/// Whether every part of `path` names a field, each matched by `matches(field, name)`
-/// within the previous one's struct.
+/// Whether `path` resolves through the schema, each part by `matches(field, name)`.
 fn path_exists<'p>(
     schema: &StructType,
     path: impl IntoIterator<Item = &'p str>,
@@ -572,9 +571,8 @@ fn path_exists<'p>(
     true
 }
 
-/// Whether a stats column (physical path components) is an encrypted column (an RFC
-/// dot-separated path) or inside one. Components are compared whole, so a field whose
-/// name contains a dot is not confused with a nested path of the same spelling.
+/// Whether a stats column (physical path components) is an encrypted column (RFC
+/// dot-separated path) or nested in one. Whole components, so `a.b` is not `a`'s child.
 fn stats_column_is_encrypted(physical: &[String], encrypted: &str) -> bool {
     let encrypted: Vec<&str> = encrypted.split('.').collect();
     let physical: Vec<&str> = physical.iter().map(String::as_str).collect();
@@ -615,12 +613,11 @@ impl EncryptionConfig {
     /// Whether any `delta.encryption.*` property is set, valid or not: an invalid
     /// configuration must still not be read or written as plaintext.
     ///
-    /// This is deliberately fail-closed, as a `parquetEncryption` table feature would be.
-    /// A stray key, say one another engine wrote on a plaintext table, makes the table
-    /// unreadable and unwritable here: removing the key is itself a commit, which is
-    /// refused, so the way out is create-or-replace, which drops the data files. Per the
-    /// RFC only `footer_key` turns encryption on, but treating the other keys as "not
-    /// encrypted" would read ciphertext or write plaintext on a misconfigured table.
+    /// Fail-closed on purpose, like the RFC's `parquetEncryption` feature: treating a
+    /// misconfigured table as plaintext would read ciphertext or write plaintext. A stray
+    /// key another engine wrote on a plaintext table therefore locks it out of delta-rs,
+    /// and since removing the key is itself a refused commit, create-or-replace is the way
+    /// out.
     pub fn is_configured(configuration: &HashMap<String, String>) -> bool {
         configuration
             .keys()
@@ -770,7 +767,7 @@ impl EncryptionConfig {
     /// log is plaintext, so the RFC forbids their statistics in it. The writer leaves them
     /// out regardless; this turns the conflict into an error. Stats columns are display
     /// names, resolved to physical names; unknown ones are left to the stats validation.
-    /// Partition columns are never in a data file, so they are never encrypted.
+    /// Partition columns are never in a data file, hence never encrypted.
     pub fn validate_stats_columns(
         &self,
         configuration: &HashMap<String, String>,
@@ -855,8 +852,7 @@ impl EncryptionConfig {
 
     /// Rewrite [`column_keys`](Self::column_keys) from display names to the physical names
     /// the RFC stores, so renaming a column does not invalidate the configuration. A name
-    /// that is already physical, as the table's own configuration stores it, is kept, so
-    /// a stored configuration can be passed back as it is.
+    /// that is already physical is kept, so a stored configuration can be passed back.
     pub fn with_physical_column_names(
         mut self,
         schema: &StructType,
@@ -1236,7 +1232,7 @@ mod encryption_tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("every column"), "{err}");
-        // Partition columns are not in the data files, so they are never encrypted.
+        // Partition columns are never in a data file.
         config_with_column_keys("")
             .validate_stats_columns(&stats("region"), &schema(), &["region".to_string()], mode)
             .unwrap();
@@ -1434,7 +1430,7 @@ mod encryption_tests {
         enc.validate_columns(&physical_schema, &[], ColumnMappingMode::Name)
             .unwrap();
 
-        // The stored configuration, with physical names, can be passed back as it is.
+        // The stored (physical) names can be passed back.
         let resent = enc
             .clone()
             .with_physical_column_names(&physical_schema, ColumnMappingMode::Name)
@@ -1516,8 +1512,8 @@ mod encryption_tests {
         ));
     }
 
-    /// The legacy writers and blind appends upload or register files without a commit
-    /// check, so they refuse an encrypted table up front while this build cannot encrypt.
+    /// Legacy writers and blind appends upload or register files without a commit check,
+    /// so they refuse an encrypted table up front.
     #[tokio::test]
     async fn legacy_writers_refuse_encrypted_tables_before_any_upload() {
         use crate::DeltaTableError;

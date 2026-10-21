@@ -157,7 +157,7 @@ impl RecordBatchWriter {
         table: &crate::table::BlindDeltaTable,
     ) -> Result<Self, DeltaTableError> {
         let metadata = table.metadata();
-        // Before a sink opens: `flush` uploads files without a commit check.
+        // `flush` uploads without a commit check, so refuse before a sink opens.
         crate::kernel::transaction::PROTOCOL.check_encryption(
             metadata.configuration(),
             crate::kernel::transaction::WRITES_ENCRYPTED_TABLES,
