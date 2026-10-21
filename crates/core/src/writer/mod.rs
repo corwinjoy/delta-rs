@@ -20,7 +20,6 @@ pub mod record_batch;
 pub(crate) mod stats;
 pub mod utils;
 pub(crate) mod window;
-pub mod writer_factory;
 
 pub(crate) mod partition_split;
 #[cfg(test)]
