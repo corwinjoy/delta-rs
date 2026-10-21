@@ -31,7 +31,12 @@ pub struct InMemoryKmsClient {
 type Vault = HashMap<Vec<u8>, (String, Vec<u8>)>;
 
 impl KmsClient for InMemoryKmsClient {
-    fn wrap_key(&self, key: &[u8], master_key_id: &str) -> DeltaResult<Vec<u8>> {
+    fn wrap_key(
+        &self,
+        key: &[u8],
+        master_key_id: &str,
+        _kms_configuration: Option<&str>,
+    ) -> DeltaResult<Vec<u8>> {
         let token = uuid::Uuid::new_v4().as_bytes().to_vec();
         self.vault
             .lock()
@@ -40,7 +45,12 @@ impl KmsClient for InMemoryKmsClient {
         Ok(token)
     }
 
-    fn unwrap_key(&self, wrapped_key: &[u8], master_key_id: &str) -> DeltaResult<Vec<u8>> {
+    fn unwrap_key(
+        &self,
+        wrapped_key: &[u8],
+        master_key_id: &str,
+        _kms_configuration: Option<&str>,
+    ) -> DeltaResult<Vec<u8>> {
         let vault = self.vault.lock().unwrap();
         let (wrapped_under, key) = vault.get(wrapped_key).ok_or_else(|| {
             DeltaTableError::Generic(format!(

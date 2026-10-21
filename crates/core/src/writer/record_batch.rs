@@ -30,7 +30,7 @@ use crate::kernel::{Action, Add};
 use crate::kernel::{MetadataExt as _, Version};
 use crate::parquet_utils::default_writer_properties;
 use crate::table::builder::DeltaTableBuilder;
-use crate::table::config::{EncryptionConfig, TablePropertiesExt as _};
+use crate::table::config::TablePropertiesExt as _;
 use crate::writer::utils::{arrow_schema_without_partitions, record_batch_without_partitions};
 
 /// Writes messages to a delta lake table.
@@ -247,18 +247,28 @@ impl RecordBatchWriter {
         let factory = SinkFactory {
             storage,
             partition_columns,
-            props: super::apply_legacy_writer_encryption(
-                DeltaWriterProperties::default()
-                    .with_parquet_properties(writer_properties)
-                    .with_stats_config(WriterStatsConfig::new(num_indexed_cols, stats_columns)),
-                configuration,
-            )?,
+            props: DeltaWriterProperties::default()
+                .with_parquet_properties(writer_properties)
+                .with_stats_config(WriterStatsConfig::new(num_indexed_cols, stats_columns)),
         };
+        let mut window = WriteWindow::new(factory, arrow_schema_ref);
+        window.apply_encryption(configuration)?;
         Ok(Self {
-            window: WriteWindow::new(factory, arrow_schema_ref),
+            window,
             commit_properties: None,
             table_config: TableConfigState::Applied,
         })
+    }
+
+    /// Apply a table's stats and encryption settings to the sinks opened from now on.
+    fn apply_table_config(
+        &mut self,
+        configuration: &HashMap<String, String>,
+    ) -> Result<(), DeltaTableError> {
+        let (num_indexed_cols, stats_columns) = stats_config(configuration);
+        self.window
+            .set_stats_config(WriterStatsConfig::new(num_indexed_cols, stats_columns));
+        self.window.apply_encryption(configuration)
     }
 
     /// Load the table [`try_new`](Self::try_new) was given and apply its configuration.
@@ -270,10 +280,7 @@ impl RecordBatchWriter {
         match table.load().await {
             Ok(()) => {
                 let configuration = table.snapshot()?.metadata().configuration().clone();
-                let (num_indexed_cols, stats_columns) = stats_config(&configuration);
-                self.window
-                    .set_stats_config(WriterStatsConfig::new(num_indexed_cols, stats_columns));
-                self.window.apply_encryption(&configuration)?;
+                self.apply_table_config(&configuration)?;
                 self.table_config = TableConfigState::Applied;
             }
             Err(DeltaTableError::NotATable(_)) => self.table_config.set_missing(),
@@ -283,39 +290,21 @@ impl RecordBatchWriter {
     }
 
     /// Check a table that did not exist at the first write before handing out files: the
-    /// caller may have created it since, and if it is encrypted the files are plaintext.
+    /// caller may have created it since. Its files are plaintext, so an encrypted table
+    /// refuses them; otherwise the table's settings apply from now on.
     async fn check_missing_table(&mut self) -> Result<(), DeltaTableError> {
         let TableConfigState::Missing(table) = &mut self.table_config else {
             return Ok(());
         };
         match table.load().await {
             Ok(()) => {
-                let encrypted =
-                    EncryptionConfig::is_configured(table.snapshot()?.metadata().configuration());
-                self.refuse_plaintext_for_encrypted_table(encrypted)?;
+                let configuration = table.snapshot()?.metadata().configuration().clone();
+                self.window.check_target(&configuration)?;
+                self.apply_table_config(&configuration)?;
                 self.table_config = TableConfigState::Applied;
             }
             Err(DeltaTableError::NotATable(_)) => {}
             Err(err) => return Err(err),
-        }
-        Ok(())
-    }
-
-    /// Refuse to hand out this writer's files when `table_encrypted` but the writer does
-    /// not encrypt, which happens when the table was created, or replaced, with encryption
-    /// after the writer read its configuration.
-    fn refuse_plaintext_for_encrypted_table(
-        &self,
-        table_encrypted: bool,
-    ) -> Result<(), DeltaTableError> {
-        if table_encrypted && !self.window.encrypts() {
-            return Err(DeltaTableError::Generic(
-                "The table is encrypted but this writer wrote plaintext files, because the \
-                 table was created or replaced with encryption after the writer read its \
-                 configuration; create the table first, then the writer with \
-                 RecordBatchWriter::for_table or try_new_checked"
-                    .to_owned(),
-            ));
         }
         Ok(())
     }
@@ -489,6 +478,7 @@ impl DeltaWriter<RecordBatch> for RecordBatchWriter {
     /// Finalize all files written since the last flush and return their [`Add`]
     /// actions, resetting internal state to handle another flush window.
     async fn flush(&mut self) -> Result<Vec<Add>, DeltaTableError> {
+        self.load_table_config().await?;
         self.check_missing_table().await?;
         self.window.drain().await
     }
@@ -499,12 +489,11 @@ impl DeltaWriter<RecordBatch> for RecordBatchWriter {
         table: &mut DeltaTable,
     ) -> Result<Version, DeltaTableError> {
         use crate::kernel::StructType;
+        self.load_table_config().await?;
         self.check_missing_table().await?;
-        // The caller's table may have been replaced with an encrypted one since the writer
-        // read its configuration.
-        self.refuse_plaintext_for_encrypted_table(EncryptionConfig::is_configured(
-            table.snapshot()?.metadata().configuration(),
-        ))?;
+        // The caller's table may have been replaced since the writer read its configuration.
+        self.window
+            .check_target(table.snapshot()?.metadata().configuration())?;
         // Schema changes only via `MergeSchema` widening, so a difference from the
         // committed baseline is the signal to evolve the metadata. The window rejects
         // widening on partitioned tables at write time; this check (kept before

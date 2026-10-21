@@ -848,12 +848,11 @@ fn warn_about_plaintext_new_columns(snapshot: &EagerSnapshot, new_schema: &arrow
     if added.is_empty() {
         return;
     }
-    let column_keyed = crate::table::config::EncryptionConfig::try_from_configuration(
-        snapshot.metadata().configuration(),
-    )
-    .ok()
-    .flatten()
-    .is_some_and(|encryption| !encryption.column_keys.is_empty());
+    let column_keyed = snapshot
+        .metadata()
+        .configuration()
+        .get(crate::table::config::ENCRYPTION_COLUMN_KEYS_PROP)
+        .is_some_and(|keys| !keys.trim().is_empty());
     if column_keyed {
         tracing::warn!(
             "schema evolution adds columns {added:?} to a table encrypted with \

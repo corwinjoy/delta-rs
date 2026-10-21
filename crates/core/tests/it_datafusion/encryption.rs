@@ -9,10 +9,10 @@ use arrow::{
     datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema, TimeUnit},
     record_batch::RecordBatch,
 };
-use deltalake_core::DeltaResult;
 use deltalake_core::kernel::{DataType, PrimitiveType, StructField};
 use deltalake_core::operations::write::encryption::register_encryption_factory;
 use deltalake_core::test_utils::kms_encryption::mock_kms_factory;
+use deltalake_core::{DeltaResult, DeltaTable};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -347,13 +347,167 @@ async fn test_record_batch_writer_refuses_plaintext_for_table_created_encrypted(
         .flush()
         .await
         .expect_err("flush must refuse plaintext files for an encrypted table");
-    assert!(err.to_string().contains("encrypted"), "{err}");
+    assert!(err.to_string().contains("differs"), "{err}");
     let err = writer
         .flush_and_commit(&mut table)
         .await
         .expect_err("flush_and_commit must refuse plaintext files for an encrypted table");
-    assert!(err.to_string().contains("encrypted"), "{err}");
+    assert!(err.to_string().contains("differs"), "{err}");
     assert_eq!(table.version(), version);
+    Ok(())
+}
+
+/// Replace `uri` with a table of the same schema and the given encryption properties.
+async fn replace_table(uri: &str, properties: &[(&str, &str)]) -> DeltaResult<DeltaTable> {
+    use deltalake_core::protocol::SaveMode;
+
+    let mut create = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
+        .load()
+        .await?
+        .create()
+        .with_columns(get_table_columns())
+        .with_save_mode(SaveMode::Overwrite);
+    for (key, value) in properties {
+        create = create.with_property(*key, *value);
+    }
+    create.await
+}
+
+/// A writer's files are refused by a table whose frozen encryption settings differ from
+/// the ones they were written under, not only by one that turned encryption on: here a
+/// column-keyed writer against a table replaced with uniform encryption, and a plaintext
+/// `JsonWriter` against a table replaced with encryption.
+#[tokio::test]
+async fn test_writers_refuse_tables_whose_encryption_settings_changed() -> DeltaResult<()> {
+    use deltalake_core::writer::{DeltaWriter as _, JsonWriter, RecordBatchWriter};
+
+    let kms_id = register_fresh_factory();
+    let dir = TempDir::new()?;
+    let uri = dir.path().to_str().unwrap();
+    let encryption = [
+        ("delta.encryption.kms_id", kms_id.as_str()),
+        ("delta.encryption.footer_key", "test-footer-key"),
+    ];
+
+    let column_keyed = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
+        .build()?
+        .create()
+        .with_columns(get_table_columns())
+        .with_property("delta.encryption.kms_id", kms_id.as_str())
+        .with_property("delta.encryption.footer_key", "test-footer-key")
+        .with_property("delta.encryption.column_keys", "test-key:int")
+        .await?;
+    let mut writer = RecordBatchWriter::for_table(&column_keyed)?;
+    writer.write(get_table_batches()).await?;
+    let mut uniform = replace_table(uri, &encryption).await?;
+    let version = uniform.version();
+    let err = writer
+        .flush_and_commit(&mut uniform)
+        .await
+        .expect_err("column-keyed files must not enter a uniformly encrypted table");
+    assert!(err.to_string().contains("column_keys"), "{err}");
+    assert_eq!(uniform.version(), version);
+
+    let plaintext = replace_table(uri, &[]).await?;
+    let mut writer = JsonWriter::for_table(&plaintext)?;
+    writer
+        .write(vec![serde_json::json!({"int": 1, "string": "a"})])
+        .await?;
+    let mut encrypted = replace_table(uri, &encryption).await?;
+    let version = encrypted.version();
+    let err = writer
+        .flush_and_commit(&mut encrypted)
+        .await
+        .expect_err("plaintext files must not enter an encrypted table");
+    assert!(err.to_string().contains("differs"), "{err}");
+    assert_eq!(encrypted.version(), version);
+    Ok(())
+}
+
+/// A `try_new` writer that never wrote loads the table's configuration when it commits, so
+/// an empty flush on an encrypted table is not mistaken for plaintext files.
+#[tokio::test]
+async fn test_record_batch_writer_try_new_commits_an_empty_window() -> DeltaResult<()> {
+    use deltalake_core::writer::{DeltaWriter as _, RecordBatchWriter};
+
+    let kms_id = register_fresh_factory();
+    let dir = TempDir::new()?;
+    let uri = dir.path().to_str().unwrap();
+    create_encrypted_table(uri, &kms_id).await?;
+    let mut table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
+        .load()
+        .await?;
+    let mut writer = RecordBatchWriter::try_new(
+        table_url(uri).as_str(),
+        get_table_batches().schema(),
+        None,
+        None,
+    )?;
+    writer.flush_and_commit(&mut table).await?;
+    Ok(())
+}
+
+/// A column key may name a struct: every leaf under it is encrypted, so the write succeeds
+/// and the log holds statistics for the plaintext column only.
+#[tokio::test]
+async fn test_column_key_on_a_struct_encrypts_its_leaves() -> DeltaResult<()> {
+    use arrow::array::{ArrayRef, StructArray};
+    use deltalake_core::kernel::StructType;
+
+    let kms_id = register_fresh_factory();
+    let dir = TempDir::new()?;
+    let uri = dir.path().to_str().unwrap();
+    let address = StructType::try_new([
+        StructField::new("street", DataType::Primitive(PrimitiveType::String), true),
+        StructField::new("city", DataType::Primitive(PrimitiveType::String), true),
+    ])?;
+    let table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
+        .build()?
+        .create()
+        .with_columns([
+            StructField::new("id", DataType::Primitive(PrimitiveType::Integer), false),
+            StructField::new("address", DataType::Struct(Box::new(address)), true),
+        ])
+        .with_property("delta.encryption.kms_id", kms_id.as_str())
+        .with_property("delta.encryption.footer_key", "test-footer-key")
+        .with_property("delta.encryption.column_keys", "pii:address")
+        .await?;
+
+    let street: ArrayRef = Arc::new(StringArray::from(vec!["1 Main St", "2 High St"]));
+    let city: ArrayRef = Arc::new(StringArray::from(vec!["Springfield", "Shelbyville"]));
+    let address = StructArray::from(vec![
+        (
+            Arc::new(Field::new("street", ArrowDataType::Utf8, true)),
+            street,
+        ),
+        (
+            Arc::new(Field::new("city", ArrowDataType::Utf8, true)),
+            city,
+        ),
+    ]);
+    let batch = RecordBatch::try_from_iter(vec![
+        ("id", Arc::new(Int32Array::from(vec![1, 2])) as ArrayRef),
+        ("address", Arc::new(address) as ArrayRef),
+    ])
+    .unwrap();
+    table.write(vec![batch]).await?;
+
+    let log = std::fs::read_to_string(dir.path().join("_delta_log/00000000000000000001.json"))?;
+    let adds: Vec<serde_json::Value> = log
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|action| action.get("add").cloned())
+        .collect();
+    assert!(!adds.is_empty(), "no add actions");
+    for add in adds {
+        let stats: serde_json::Value =
+            serde_json::from_str(add["stats"].as_str().expect("add has stats")).unwrap();
+        assert_eq!(stats["numRecords"], 2, "{stats}");
+        assert!(stats["minValues"].get("id").is_some(), "{stats}");
+        assert!(stats["minValues"].get("address").is_none(), "{stats}");
+        assert!(stats["nullCount"].get("address").is_none(), "{stats}");
+    }
+    assert_all_parquets_encrypted(dir.path()).await;
     Ok(())
 }
 
