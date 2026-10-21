@@ -19,6 +19,7 @@ use object_store::path::Path;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
+use super::encryption::apply_encryption;
 use crate::DeltaTableError;
 use crate::datafile::DeltaWriterProperties;
 use crate::datafile::writer::{DeltaWriter, UploadBudget, WriterConfig, write_batches_timed};
@@ -286,18 +287,23 @@ struct WriteSinkConfig {
 }
 
 impl WriteSinkConfig {
+    /// Errors when the table is encrypted and this build or session cannot encrypt for it.
     fn new(
         table_config: &TableConfiguration,
+        session: &dyn Session,
         object_store: ObjectStoreRef,
         props: DeltaWriterProperties,
-    ) -> Self {
-        Self {
+    ) -> DeltaResult<Self> {
+        // Table encryption always wins, so no write path can put plaintext files into an
+        // encrypted table.
+        let props = apply_encryption(props.apply_table_stats(table_config), table_config, session)?;
+        Ok(Self {
             partition_columns: table_config.metadata().partition_columns().to_vec(),
             object_store,
-            props: props.apply_table_stats(table_config),
+            props,
             column_mapping: ColumnMappingState::from_table_config(table_config),
             path_prefix: None,
-        }
+        })
     }
 
     fn with_path_prefix(mut self, prefix: &str) -> Self {
@@ -389,8 +395,8 @@ pub(crate) async fn write_execution_plan_cdc(
     props: DeltaWriterProperties,
 ) -> DeltaResult<Vec<Action>> {
     let plan = validated_plan(table_config, session, plan, None, false, None)?;
-    let sink_config =
-        WriteSinkConfig::new(table_config, object_store, props).with_path_prefix(CHANGE_DATA_DIR);
+    let sink_config = WriteSinkConfig::new(table_config, session, object_store, props)?
+        .with_path_prefix(CHANGE_DATA_DIR);
     let (actions, _) = write_data_plan(session, plan, sink_config).await?;
     Ok(actions
         .into_iter()
@@ -441,7 +447,7 @@ pub(crate) async fn write_execution_plan_v2(
         contains_cdc,
         insert_marker_column.as_deref(),
     )?;
-    let sink_config = WriteSinkConfig::new(table_config, object_store, props);
+    let sink_config = WriteSinkConfig::new(table_config, session, object_store, props)?;
 
     if !contains_cdc {
         write_data_plan(session, plan, sink_config).await
@@ -481,7 +487,7 @@ pub(crate) async fn write_exec_plan(
     write_as_cdc: bool,
     props: DeltaWriterProperties,
 ) -> DeltaResult<(Vec<Action>, WriteExecutionPlanMetrics)> {
-    let sink_config = WriteSinkConfig::new(table_config, log_store.object_store(), props);
+    let sink_config = WriteSinkConfig::new(table_config, session, log_store.object_store(), props)?;
 
     if write_as_cdc {
         write_cdc_plan(session, exec, sink_config).await

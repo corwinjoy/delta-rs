@@ -79,11 +79,15 @@ impl JsonWriter {
         partition_columns: Vec<String>,
     ) -> Result<Self, DeltaTableError> {
         let (num_indexed_cols, stats_columns) = Self::read_stats_config(table)?;
+        let configuration = table.snapshot()?.metadata().configuration();
         let factory = SinkFactory {
             storage: table.object_store(),
             partition_columns,
-            props: DeltaWriterProperties::default()
-                .with_stats_config(WriterStatsConfig::new(num_indexed_cols, stats_columns)),
+            props: super::apply_legacy_writer_encryption(
+                DeltaWriterProperties::default()
+                    .with_stats_config(WriterStatsConfig::new(num_indexed_cols, stats_columns)),
+                configuration,
+            )?,
         };
         Ok(Self {
             window: WriteWindow::new(factory, schema),
