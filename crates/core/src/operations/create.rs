@@ -353,7 +353,12 @@ impl CreateBuilder {
             }
             let encryption = encryption.with_physical_column_names(&schema, column_mapping_mode)?;
             encryption.validate_columns(&schema, &partition_columns, column_mapping_mode)?;
-            encryption.validate_stats_columns(&configuration, &schema, column_mapping_mode)?;
+            encryption.validate_stats_columns(
+                &configuration,
+                &schema,
+                &partition_columns,
+                column_mapping_mode,
+            )?;
             if !encryption.column_keys.is_empty() {
                 configuration.insert(
                     ENCRYPTION_COLUMN_KEYS_PROP.to_string(),
@@ -426,12 +431,18 @@ impl std::future::IntoFuture for CreateBuilder {
                             _ => None,
                         });
                         if let Some(new_configuration) = new_configuration {
-                            let old = EncryptionConfig::try_from_configuration(old_configuration)
-                                .ok()
-                                .flatten();
+                            // The new configuration was validated by `into_table_and_actions`.
                             let new = EncryptionConfig::try_from_configuration(new_configuration)?;
-                            if EncryptionConfig::frozen_change(old.as_ref(), new.as_ref()).is_some()
-                            {
+                            let changed =
+                                match EncryptionConfig::try_from_configuration(old_configuration) {
+                                    Ok(old) => {
+                                        EncryptionConfig::frozen_change(old.as_ref(), new.as_ref())
+                                            .is_some()
+                                    }
+                                    // An invalid configuration is replaced whatever the new one is.
+                                    Err(_) => true,
+                                };
+                            if changed {
                                 tracing::warn!(
                                     "replacing a table with a different encryption \
                                      configuration: the replaced data files stay in storage \

@@ -472,14 +472,22 @@ fn check_encryption_change(
     let Some(new) = new else {
         return Ok(());
     };
+    // `CreateBuilder` already validated a Create's configuration, after rewriting display
+    // names to physical ones; this is the safety net for commits built by hand, and the
+    // only check for a schema change, so the names here must already be physical.
     let schema = metadata.parse_schema().map_err(|err| invalid(err.into()))?;
     let column_mapping_mode = TableProperties::from(new_configuration.iter())
         .column_mapping_mode
         .unwrap_or(ColumnMappingMode::None);
     new.validate_columns(&schema, metadata.partition_columns(), column_mapping_mode)
         .map_err(invalid)?;
-    new.validate_stats_columns(new_configuration, &schema, column_mapping_mode)
-        .map_err(invalid)
+    new.validate_stats_columns(
+        new_configuration,
+        &schema,
+        metadata.partition_columns(),
+        column_mapping_mode,
+    )
+    .map_err(invalid)
 }
 
 #[cfg(test)]

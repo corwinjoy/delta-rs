@@ -460,8 +460,11 @@ impl WriteBuilder {
                         // `configuration` only applies when the write creates the table.
                         // Encryption keys are compared as parsed values, so a pipeline can
                         // send the same configuration every run, in any order and with
-                        // display names; differing keys would be dropped silently and leave
-                        // the user believing the table is encrypted, so refuse them.
+                        // display or physical names; differing keys would be dropped
+                        // silently and leave the user believing the table is encrypted, so
+                        // refuse them. `kms_configuration` is not frozen, so a differing
+                        // value passes, but it is not applied either: a write never changes
+                        // an existing table's configuration.
                         let given: Vec<_> = self
                             .configuration
                             .iter()
@@ -476,24 +479,41 @@ impl WriteBuilder {
                                     None => merged.remove(*key),
                                 };
                             }
-                            let changed = match EncryptionConfig::try_from_configuration(current)? {
+                            // A key whose value differs as text; the parsed comparison
+                            // below may still find it equal.
+                            let differs = given
+                                .iter()
+                                .find(|(key, _)| merged.get(*key) != current.get(*key))
+                                .map(|(key, _)| key.as_str());
+                            let changed = match (
+                                differs,
+                                EncryptionConfig::try_from_configuration(current)?,
+                            ) {
+                                (None, _) => None,
                                 // Any key set on an unencrypted table is a change.
-                                None => given
-                                    .iter()
-                                    .find(|(key, _)| merged.contains_key(*key))
-                                    .map(|(key, _)| key.as_str()),
-                                Some(old) => {
-                                    let new = EncryptionConfig::try_from_configuration(&merged)?
-                                        .map(|new| {
-                                            new.with_physical_column_names(
-                                                &snapshot.schema(),
-                                                snapshot
-                                                    .table_configuration()
-                                                    .column_mapping_mode(),
+                                (Some(key), None) => Some(key),
+                                (Some(key), Some(old)) => {
+                                    match EncryptionConfig::try_from_configuration(&merged) {
+                                        Ok(new) => {
+                                            let new = new
+                                                .map(|new| {
+                                                    new.with_physical_column_names(
+                                                        &snapshot.schema(),
+                                                        snapshot
+                                                            .table_configuration()
+                                                            .column_mapping_mode(),
+                                                    )
+                                                })
+                                                .transpose()?;
+                                            EncryptionConfig::frozen_change(
+                                                Some(&old),
+                                                new.as_ref(),
                                             )
-                                        })
-                                        .transpose()?;
-                                    EncryptionConfig::frozen_change(Some(&old), new.as_ref())
+                                        }
+                                        // The merged configuration is not even valid, e.g.
+                                        // one key unset on its own: it differs.
+                                        Err(_) => Some(key),
+                                    }
                                 }
                             };
                             if let Some(key) = changed {
@@ -902,6 +922,32 @@ mod tests {
         );
     }
 
+    /// On an encrypted table, unsetting one key leaves an invalid configuration; that is
+    /// reported as a change, not as an invalid configuration the user should complete.
+    #[tokio::test]
+    async fn test_write_reports_a_key_unset_on_an_encrypted_table_as_a_change() {
+        use crate::kernel::transaction::WRITES_ENCRYPTED_TABLES;
+
+        let table = DeltaTable::new_in_memory()
+            .create()
+            .with_columns(get_delta_schema().fields().cloned())
+            .with_configuration_property(TableProperty::EncryptionKmsId, Some("kms"))
+            .with_configuration_property(TableProperty::EncryptionFooterKey, Some("fk"))
+            .await
+            .unwrap();
+        let err = table
+            .write(vec![get_record_batch(None, false)])
+            .with_configuration([("delta.encryption.footer_key", None::<&str>)])
+            .await
+            .unwrap_err()
+            .to_string();
+        if WRITES_ENCRYPTED_TABLES {
+            assert!(err.contains("differs from the table's"), "{err}");
+        } else {
+            assert!(err.contains("parquetEncryption"), "{err}");
+        }
+    }
+
     /// A first write creates the table and commits without a snapshot, bypassing
     /// `can_commit`, so the encryption write check runs in the write itself: until this
     /// build can encrypt, the table is not created and no file is uploaded.
@@ -911,6 +957,8 @@ mod tests {
 
         use crate::kernel::transaction::{TransactionError, WRITES_ENCRYPTED_TABLES};
 
+        // Only meaningful while this build refuses encrypted writes. Once the write path
+        // enables them, its integration tests cover create-with-data instead.
         if WRITES_ENCRYPTED_TABLES {
             return;
         }

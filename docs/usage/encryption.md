@@ -69,12 +69,14 @@ A replace removes every data file in one commit, but the removed files stay in s
 `vacuum` runs, and the old log entries with their statistics until log cleanup.
 
 Adding columns to a table with `column_keys` leaves the new columns unencrypted, as the RFC
-specifies; the write logs a warning naming them. Under uniform encryption new columns are
-encrypted with the footer key.
+specifies. Under uniform encryption new columns are encrypted with the footer key.
 
 Passing `delta.encryption.*` properties to a write on an existing table is an error when they
 differ from the table's, since a write does not change the configuration of an existing table.
-Matching values pass, so a pipeline can send the same configuration on every run.
+Matching values pass, so a pipeline can send the same configuration on every run, with the
+column names as it stored them or as displayed. `kms_configuration` is not frozen, so a
+differing value also passes, but the write does not apply it either: change it with the
+table-property operations.
 
 ## Protocol
 
@@ -82,3 +84,8 @@ The RFC guards encrypted tables with a `parquetEncryption` table feature so that
 without encryption support refuse them. delta-kernel does not accept that feature yet, so
 delta-rs does not add it and recognises encrypted tables by their properties instead. Until
 the feature can be added, other engines are not protected.
+
+Any `delta.encryption.*` key marks a table as encrypted, valid or not, so a misconfigured
+table is refused rather than read as ciphertext or written as plaintext. That holds for a
+stray key another engine wrote on a plaintext table: delta-rs refuses it, and since removing
+the key is itself a commit to an "encrypted" table, the way out is create-or-replace.

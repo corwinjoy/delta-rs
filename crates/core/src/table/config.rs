@@ -552,24 +552,33 @@ fn invalid_encryption_config(msg: String) -> DeltaTableError {
     DeltaTableError::Generic(format!("Invalid table encryption configuration: {msg}"))
 }
 
-/// The fields along `path`, each matched by `matches(field, name)` within the previous
-/// one's struct, or `None` if any part is missing.
-fn fields_along_path<'a, 'p>(
-    schema: &'a StructType,
+/// Whether every part of `path` names a field, each matched by `matches(field, name)`
+/// within the previous one's struct.
+fn path_exists<'p>(
+    schema: &StructType,
     path: impl IntoIterator<Item = &'p str>,
     matches: impl Fn(&StructField, &str) -> bool,
-) -> Option<Vec<&'a StructField>> {
+) -> bool {
     let mut fields = Some(schema);
-    let mut found = Vec::new();
     for part in path {
-        let field = fields?.fields().find(|f| matches(f, part))?;
+        let Some(field) = fields.and_then(|s| s.fields().find(|f| matches(f, part))) else {
+            return false;
+        };
         fields = match field.data_type() {
             DataType::Struct(inner) => Some(inner.as_ref()),
             _ => None,
         };
-        found.push(field);
     }
-    Some(found)
+    true
+}
+
+/// Whether a stats column (physical path components) is an encrypted column (an RFC
+/// dot-separated path) or inside one. Components are compared whole, so a field whose
+/// name contains a dot is not confused with a nested path of the same spelling.
+fn stats_column_is_encrypted(physical: &[String], encrypted: &str) -> bool {
+    let encrypted: Vec<&str> = encrypted.split('.').collect();
+    let physical: Vec<&str> = physical.iter().map(String::as_str).collect();
+    physical.starts_with(&encrypted) || encrypted.starts_with(&physical)
 }
 
 /// Parquet Modular Encryption settings from a table's `delta.encryption.*` properties, with
@@ -605,6 +614,13 @@ pub struct EncryptionConfig {
 impl EncryptionConfig {
     /// Whether any `delta.encryption.*` property is set, valid or not: an invalid
     /// configuration must still not be read or written as plaintext.
+    ///
+    /// This is deliberately fail-closed, as a `parquetEncryption` table feature would be.
+    /// A stray key, say one another engine wrote on a plaintext table, makes the table
+    /// unreadable and unwritable here: removing the key is itself a commit, which is
+    /// refused, so the way out is create-or-replace, which drops the data files. Per the
+    /// RFC only `footer_key` turns encryption on, but treating the other keys as "not
+    /// encrypted" would read ciphertext or write plaintext on a misconfigured table.
     pub fn is_configured(configuration: &HashMap<String, String>) -> bool {
         configuration
             .keys()
@@ -733,7 +749,7 @@ impl EncryptionConfig {
                 let by_physical_name = |field: &StructField, name: &str| {
                     field.physical_name(column_mapping_mode) == name
                 };
-                if fields_along_path(schema, column.split('.'), by_physical_name).is_none() {
+                if !path_exists(schema, column.split('.'), by_physical_name) {
                     return Err(invalid_encryption_config(format!(
                         "key '{key_id}' names column '{column}', which is not in the table"
                     )));
@@ -754,10 +770,12 @@ impl EncryptionConfig {
     /// log is plaintext, so the RFC forbids their statistics in it. The writer leaves them
     /// out regardless; this turns the conflict into an error. Stats columns are display
     /// names, resolved to physical names; unknown ones are left to the stats validation.
+    /// Partition columns are never in a data file, so they are never encrypted.
     pub fn validate_stats_columns(
         &self,
         configuration: &HashMap<String, String>,
         schema: &StructType,
+        partition_columns: &[String],
         column_mapping_mode: ColumnMappingMode,
     ) -> DeltaResult<()> {
         let stats_prop = TableProperty::DataSkippingStatsColumns.as_ref();
@@ -772,11 +790,17 @@ impl EncryptionConfig {
             .map_err(|e| invalid_encryption_config(format!("'{stats_prop}' is malformed: {e}")))?;
         for stats_column in stats_columns {
             let display = &stats_column;
+            if stats_column
+                .path()
+                .first()
+                .is_some_and(|top_level| partition_columns.contains(top_level))
+            {
+                continue;
+            }
             let Some(physical) = physical_column_name(schema, &stats_column, column_mapping_mode)
             else {
                 continue;
             };
-            let physical = physical.path().join(".");
             if self.column_keys.is_empty() {
                 return Err(invalid_encryption_config(format!(
                     "'{stats_prop}' names column '{display}', but every column of this table \
@@ -788,7 +812,7 @@ impl EncryptionConfig {
                 .column_keys
                 .iter()
                 .flat_map(|(key_id, cols)| cols.iter().map(move |c| (key_id, c)))
-                .find(|(_, encrypted)| column_paths_overlap(&physical, encrypted))
+                .find(|(_, encrypted)| stats_column_is_encrypted(physical.path(), encrypted))
             {
                 return Err(invalid_encryption_config(format!(
                     "'{stats_prop}' names column '{display}', which is encrypted with key \
@@ -830,7 +854,9 @@ impl EncryptionConfig {
     }
 
     /// Rewrite [`column_keys`](Self::column_keys) from display names to the physical names
-    /// the RFC stores, so renaming a column does not invalidate the configuration.
+    /// the RFC stores, so renaming a column does not invalidate the configuration. A name
+    /// that is already physical, as the table's own configuration stores it, is kept, so
+    /// a stored configuration can be passed back as it is.
     pub fn with_physical_column_names(
         mut self,
         schema: &StructType,
@@ -839,17 +865,20 @@ impl EncryptionConfig {
         if column_mapping_mode == ColumnMappingMode::None {
             return Ok(self);
         }
+        let by_physical_name =
+            |field: &StructField, name: &str| field.physical_name(column_mapping_mode) == name;
         for (key_id, columns) in self.column_keys.iter_mut() {
             for column in columns.iter_mut() {
                 let logical = ColumnName::new(column.split('.'));
-                *column = physical_column_name(schema, &logical, column_mapping_mode)
-                    .ok_or_else(|| {
-                        invalid_encryption_config(format!(
+                match physical_column_name(schema, &logical, column_mapping_mode) {
+                    Some(physical) => *column = physical.path().join("."),
+                    None if path_exists(schema, column.split('.'), by_physical_name) => {}
+                    None => {
+                        return Err(invalid_encryption_config(format!(
                             "key '{key_id}' names column '{column}', which is not in the table"
-                        ))
-                    })?
-                    .path()
-                    .join(".");
+                        )));
+                    }
+                }
             }
         }
         Ok(self)
@@ -1186,34 +1215,51 @@ mod encryption_tests {
         let stats = |cols: &str| props_with(&[("delta.dataSkippingStatsColumns", cols)]);
         let mode = ColumnMappingMode::None;
         let enc = config_with_column_keys("pii:ssn;geo:address.city");
-        enc.validate_stats_columns(&props_with(&[]), &schema(), mode)
+        enc.validate_stats_columns(&props_with(&[]), &schema(), &[], mode)
             .unwrap();
         enc.validate_stats_columns(
             &stats("id, region, address.street, missing"),
             &schema(),
+            &[],
             mode,
         )
         .unwrap();
         for cols in ["ssn", "id,ssn", "address.city", "address"] {
             let err = enc
-                .validate_stats_columns(&stats(cols), &schema(), mode)
+                .validate_stats_columns(&stats(cols), &schema(), &[], mode)
                 .unwrap_err()
                 .to_string();
             assert!(err.contains("encrypted with key"), "{cols}: {err}");
         }
         let err = config_with_column_keys("")
-            .validate_stats_columns(&stats("id"), &schema(), mode)
+            .validate_stats_columns(&stats("id"), &schema(), &[], mode)
             .unwrap_err()
             .to_string();
         assert!(err.contains("every column"), "{err}");
+        // Partition columns are not in the data files, so they are never encrypted.
+        config_with_column_keys("")
+            .validate_stats_columns(&stats("region"), &schema(), &["region".to_string()], mode)
+            .unwrap();
 
         // A quoted field whose name contains a dot is one component, not a nested path.
-        let dotted = StructType::try_new([StructField::nullable("a.b", DataType::STRING)]).unwrap();
+        let dotted = StructType::try_new([
+            StructField::nullable("a.b", DataType::STRING),
+            StructField::nullable("a", DataType::STRING),
+        ])
+        .unwrap();
         let err = config_with_column_keys("")
-            .validate_stats_columns(&stats("`a.b`"), &dotted, mode)
+            .validate_stats_columns(&stats("`a.b`"), &dotted, &[], mode)
             .unwrap_err()
             .to_string();
         assert!(err.contains("every column"), "{err}");
+        config_with_column_keys("pii:a")
+            .validate_stats_columns(&stats("`a.b`"), &dotted, &[], mode)
+            .unwrap();
+        let err = config_with_column_keys("pii:a")
+            .validate_stats_columns(&stats("a"), &dotted, &[], mode)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("encrypted with key"), "{err}");
     }
 
     /// The fixture shows an encrypted table's metadata on disk. Kernel rejects its
@@ -1387,6 +1433,18 @@ mod encryption_tests {
         assert!(columns.contains(&expected_street), "{columns:?}");
         enc.validate_columns(&physical_schema, &[], ColumnMappingMode::Name)
             .unwrap();
+
+        // The stored configuration, with physical names, can be passed back as it is.
+        let resent = enc
+            .clone()
+            .with_physical_column_names(&physical_schema, ColumnMappingMode::Name)
+            .unwrap();
+        assert_eq!(resent.column_keys, enc.column_keys);
+        let err = config_with_column_keys("pii:missing")
+            .with_physical_column_names(&physical_schema, ColumnMappingMode::Name)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not in the table"), "{err}");
     }
 
     fn plaintext_table() -> CreateBuilder {
@@ -1456,6 +1514,38 @@ mod encryption_tests {
         assert!(EncryptionConfig::is_configured(
             table.snapshot().unwrap().metadata().configuration()
         ));
+    }
+
+    /// The legacy writers and blind appends upload or register files without a commit
+    /// check, so they refuse an encrypted table up front while this build cannot encrypt.
+    #[tokio::test]
+    async fn legacy_writers_refuse_encrypted_tables_before_any_upload() {
+        use crate::DeltaTableError;
+        use crate::kernel::transaction::WRITES_ENCRYPTED_TABLES;
+        use crate::table::BlindDeltaTable;
+        use crate::writer::{JsonWriter, RecordBatchWriter};
+
+        if WRITES_ENCRYPTED_TABLES {
+            return;
+        }
+        let table = plaintext_table()
+            .with_configuration(
+                encryption_properties(ENCRYPTION_FOOTER_KEY_PROP)
+                    .into_iter()
+                    .map(|(k, v)| (k, Some(v))),
+            )
+            .await
+            .unwrap();
+        let refused = |err: DeltaTableError| {
+            assert!(err.to_string().contains("parquetEncryption"), "{err}");
+        };
+        refused(RecordBatchWriter::for_table(&table).unwrap_err());
+        refused(JsonWriter::for_table(&table).unwrap_err());
+        let mut blind = BlindDeltaTable::try_new_with_log_store(table.log_store())
+            .await
+            .unwrap();
+        refused(RecordBatchWriter::for_blind_appends(&blind).unwrap_err());
+        refused(blind.commit(vec![]).await.unwrap_err());
     }
 
     /// Removing encryption would leave a table mixing encrypted and plaintext files, so it is

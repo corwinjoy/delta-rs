@@ -157,6 +157,11 @@ impl RecordBatchWriter {
         table: &crate::table::BlindDeltaTable,
     ) -> Result<Self, DeltaTableError> {
         let metadata = table.metadata();
+        // Before a sink opens: `flush` uploads files without a commit check.
+        crate::kernel::transaction::PROTOCOL.check_encryption(
+            metadata.configuration(),
+            crate::kernel::transaction::WRITES_ENCRYPTED_TABLES,
+        )?;
         let arrow_schema: ArrowSchema = (&metadata.parse_schema()?).try_into_arrow()?;
         let arrow_schema_ref = Arc::new(arrow_schema);
         let partition_columns = metadata.partition_columns().to_vec();

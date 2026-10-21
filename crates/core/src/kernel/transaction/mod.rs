@@ -107,7 +107,6 @@ use crate::{DeltaResult, crate_version};
 
 pub use self::conflict_checker::CommitConflictError;
 pub use self::protocol::INSTANCE as PROTOCOL;
-#[cfg(feature = "datafusion")]
 pub(crate) use self::protocol::{READS_ENCRYPTED_TABLES, WRITES_ENCRYPTED_TABLES};
 
 #[cfg(test)]

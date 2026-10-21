@@ -43,7 +43,11 @@ pub(crate) fn ensure_legacy_writer_supports_table(
             operation,
         ));
     }
-
+    // Before a sink opens: `flush` uploads files without a commit check.
+    crate::kernel::transaction::PROTOCOL.check_encryption(
+        table.snapshot()?.metadata().configuration(),
+        crate::kernel::transaction::WRITES_ENCRYPTED_TABLES,
+    )?;
     Ok(())
 }
 
