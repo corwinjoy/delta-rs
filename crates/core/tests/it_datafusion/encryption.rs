@@ -1,12 +1,18 @@
 //! Integration tests for Parquet encryption via `delta.encryption.*` table properties.
+//! Each test registers its own in-memory KMS under a fresh `kms_id`.
 
 use arrow::{
     array::{Int32Array, StringArray, TimestampMicrosecondArray},
     datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema, TimeUnit},
     record_batch::RecordBatch,
 };
+use datafusion::{
+    logical_expr::{col, lit},
+    prelude::SessionContext,
+};
 use deltalake_core::kernel::{DataType, PrimitiveType, StructField};
 use deltalake_core::operations::create::CreateBuilder;
+use deltalake_core::operations::optimize::OptimizeType;
 use deltalake_core::operations::write::encryption::register_encryption_factory;
 use deltalake_core::test_utils::kms_encryption::mock_kms_factory;
 use deltalake_core::{DeltaResult, DeltaTable};
@@ -51,7 +57,7 @@ fn get_table_batches() -> RecordBatch {
     .unwrap()
 }
 
-/// Register a fresh factory with a unique ID to prevent test interference.
+/// Register a fresh in-memory KMS under a unique ID, so tests cannot read each other's files.
 fn register_fresh_factory() -> String {
     let kms_id = format!("test-kms-{}", Uuid::new_v4());
     register_encryption_factory(&kms_id, mock_kms_factory());
@@ -91,16 +97,41 @@ async fn load_table(uri: &str) -> DeltaResult<DeltaTable> {
         .await
 }
 
-/// Create a uniformly encrypted table at `uri` and write two batches to it.
-async fn create_encrypted_table(uri: &str, kms_id: &str) -> DeltaResult<()> {
-    create_table(uri, get_table_columns(), &encryption(kms_id)).await?;
+/// Create a uniformly encrypted table at `uri`, write two batches to it and return it.
+async fn create_encrypted_table(uri: &str, kms_id: &str) -> DeltaResult<DeltaTable> {
+    create_table(uri, get_table_columns(), &encryption(kms_id))
+        .with_table_name("test")
+        .await?;
     let batch = get_table_batches();
     let table = load_table(uri).await?.write(vec![batch.clone()]).await?;
-    table.write(vec![batch]).await?;
-    Ok(())
+    table.write(vec![batch]).await
 }
 
-/// Assert every `.parquet` file under `dir` has an encrypted footer.
+/// Every row of the table at `uri`, read through DataFusion.
+async fn read_table(uri: &str) -> DeltaResult<Vec<RecordBatch>> {
+    let table: DeltaTable = load_table(uri).await?;
+    let ctx = SessionContext::new();
+    ctx.register_table("t", table.table_provider().await?)?;
+    let batches = ctx.sql("SELECT * FROM t").await?.collect().await?;
+    Ok(batches)
+}
+
+/// Recursively collect all `.parquet` files under `dir`.
+fn find_parquet(d: &std::path::Path, result: &mut Vec<std::path::PathBuf>) {
+    if let Ok(entries) = std::fs::read_dir(d) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                find_parquet(&path, result);
+            } else if path.extension().and_then(|s| s.to_str()) == Some("parquet") {
+                result.push(path);
+            }
+        }
+    }
+}
+
+/// Assert every `.parquet` file under `dir` has an encrypted footer: opening it without keys
+/// must fail.
 async fn assert_all_parquets_encrypted(dir: &std::path::Path) {
     use futures::TryStreamExt as _;
     use object_store::{ObjectMeta, ObjectStore as _, local::LocalFileSystem};
@@ -138,13 +169,175 @@ fn add_stats(dir: &std::path::Path) -> Vec<serde_json::Value> {
     stats
 }
 
-/// Every data file is encrypted on disk: opening one without keys fails.
+/// The files of an encrypted table are encrypted on disk (opening one without keys fails)
+/// and readable through the registered factory.
 #[tokio::test]
-async fn test_parquet_files_are_physically_encrypted() -> DeltaResult<()> {
+async fn test_encrypted_create_and_read() -> DeltaResult<()> {
     let kms_id = register_fresh_factory();
     let dir = TempDir::new()?;
-    create_encrypted_table(dir.path().to_str().unwrap(), &kms_id).await?;
+    let uri = dir.path().to_str().unwrap();
+    create_encrypted_table(uri, &kms_id).await?;
     assert_all_parquets_encrypted(dir.path()).await;
+    let batches = read_table(uri).await?;
+    assert!(!batches.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_encrypted_optimize_compact() -> DeltaResult<()> {
+    let kms_id = register_fresh_factory();
+    let dir = TempDir::new()?;
+    let uri = dir.path().to_str().unwrap();
+    let table = create_encrypted_table(uri, &kms_id).await?;
+    let (_table, metrics) = table.optimize().await?;
+    assert!(
+        metrics.num_files_added > 0 || metrics.num_files_removed > 0,
+        "Compact should have changed files: {metrics:?}"
+    );
+    assert_all_parquets_encrypted(dir.path()).await;
+    let batches = read_table(uri).await?;
+    assert!(!batches.is_empty());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_encrypted_optimize_zorder() -> DeltaResult<()> {
+    let kms_id = register_fresh_factory();
+    let dir = TempDir::new()?;
+    let uri = dir.path().to_str().unwrap();
+    let table = create_encrypted_table(uri, &kms_id).await?;
+    let (_table, metrics) = table
+        .optimize()
+        .with_type(OptimizeType::ZOrder(vec!["int".to_string()]))
+        .await?;
+    assert!(metrics.num_files_added > 0, "Z-order should add files");
+    assert_all_parquets_encrypted(dir.path()).await;
+    let batches = read_table(uri).await?;
+    assert!(!batches.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_encrypted_delete() -> DeltaResult<()> {
+    let kms_id = register_fresh_factory();
+    let dir = TempDir::new()?;
+    let uri = dir.path().to_str().unwrap();
+    let table = create_encrypted_table(uri, &kms_id).await?;
+    let (_table, metrics) = table.delete().with_predicate(col("int").eq(lit(1))).await?;
+    assert!(metrics.num_deleted_rows.unwrap_or(0) > 0);
+    assert_all_parquets_encrypted(dir.path()).await;
+    let batches = read_table(uri).await?;
+    assert!(!batches.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_encrypted_update() -> DeltaResult<()> {
+    let kms_id = register_fresh_factory();
+    let dir = TempDir::new()?;
+    let uri = dir.path().to_str().unwrap();
+    let table = create_encrypted_table(uri, &kms_id).await?;
+    let (_table, metrics) = table
+        .update()
+        .with_predicate(col("int").eq(lit(1)))
+        .with_update("int", lit(100))
+        .await?;
+    assert!(metrics.num_updated_rows > 0);
+    assert_all_parquets_encrypted(dir.path()).await;
+    let batches = read_table(uri).await?;
+    assert!(!batches.is_empty());
+    Ok(())
+}
+
+/// Column keys with a plaintext footer: only `int` and `string` are encrypted; the footer
+/// and `timestamp` are readable without keys. Checks that `column_keys` and
+/// `plaintext_footer` reach the factory.
+#[tokio::test]
+async fn test_encrypted_columnar_plaintext_footer() -> DeltaResult<()> {
+    use object_store::{ObjectStoreExt as _, local::LocalFileSystem, path::Path as ObjPath};
+    use parquet::arrow::ParquetRecordBatchStreamBuilder;
+    use parquet::arrow::async_reader::ParquetObjectReader;
+
+    let kms_id = register_fresh_factory();
+    let dir = TempDir::new()?;
+    let uri = dir.path().to_str().unwrap();
+    let table_url = table_url(uri);
+
+    // Only `int` and `string` are encrypted; the footer is plaintext.
+    let table = deltalake_core::DeltaTableBuilder::from_url(table_url.clone())?.build()?;
+    table
+        .create()
+        .with_columns(get_table_columns())
+        .with_table_name("col-enc-test")
+        .with_configuration([
+            ("delta.encryption.kms_id", Some(kms_id.as_str())),
+            ("delta.encryption.footer_key", Some("footer-master-key")),
+            ("delta.encryption.plaintext_footer", Some("true")),
+            (
+                "delta.encryption.column_keys",
+                Some("col-master-key:int,string"),
+            ),
+        ])
+        .await?;
+
+    // Two writes, so there is more than one file.
+    let table = deltalake_core::DeltaTableBuilder::from_url(table_url.clone())?
+        .load()
+        .await?;
+    let batch = get_table_batches();
+    let table = table.write(vec![batch.clone()]).await?;
+    table.write(vec![batch]).await?;
+
+    // Reads back through the factory.
+    let batches = read_table(uri).await?;
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(
+        total_rows, 22,
+        "Expected 22 rows (2 writes × 11 rows each), got {total_rows}"
+    );
+
+    // Without keys the footer is readable but the encrypted columns are not.
+    let mut parquet_files = vec![];
+    find_parquet(dir.path(), &mut parquet_files);
+    assert!(
+        !parquet_files.is_empty(),
+        "No parquet files found — cannot verify columnar encryption"
+    );
+
+    let store = Arc::new(LocalFileSystem::new_with_prefix(dir.path()).unwrap());
+    for abs_path in &parquet_files {
+        let rel = abs_path.strip_prefix(dir.path()).unwrap();
+        let obj_path = ObjPath::parse(rel.to_string_lossy().as_ref()).unwrap();
+
+        let meta = store.head(&obj_path).await.unwrap();
+        let reader =
+            ParquetObjectReader::new(store.clone(), obj_path.clone()).with_file_size(meta.size);
+
+        let builder = ParquetRecordBatchStreamBuilder::new(reader)
+            .await
+            .unwrap_or_else(|e| {
+                panic!(
+                    "Expected plaintext footer to be readable for {:?}, got: {e}",
+                    rel
+                )
+            });
+
+        let result: parquet::errors::Result<Vec<_>> = async {
+            let stream = builder.build()?;
+            futures::StreamExt::collect::<Vec<_>>(stream)
+                .await
+                .into_iter()
+                .collect()
+        }
+        .await;
+        assert!(
+            result.is_err(),
+            "Expected reading encrypted column data to fail for {:?} without keys, \
+             but it succeeded — columnar encryption may not have been applied",
+            rel
+        );
+    }
+
     Ok(())
 }
 
@@ -156,9 +349,7 @@ async fn test_caller_writer_properties_cannot_defeat_encryption() -> DeltaResult
     let kms_id = register_fresh_factory();
     let dir = TempDir::new()?;
     let uri = dir.path().to_str().unwrap();
-    create_encrypted_table(uri, &kms_id).await?;
-
-    let table = load_table(uri).await?;
+    let table = create_encrypted_table(uri, &kms_id).await?;
     table
         .write(vec![get_table_batches()])
         .with_writer_properties(WriterProperties::builder().build())
@@ -177,9 +368,7 @@ async fn test_legacy_record_batch_writer_is_encrypted() -> DeltaResult<()> {
     let kms_id = register_fresh_factory();
     let dir = TempDir::new()?;
     let uri = dir.path().to_str().unwrap();
-    create_encrypted_table(uri, &kms_id).await?;
-
-    let mut table = load_table(uri).await?;
+    let mut table = create_encrypted_table(uri, &kms_id).await?;
     let mut writer = RecordBatchWriter::for_table(&table)?;
     writer.write(get_table_batches()).await?;
     writer.flush_and_commit(&mut table).await?;
@@ -221,9 +410,7 @@ async fn test_insert_into_datasink_is_encrypted() -> DeltaResult<()> {
     let kms_id = register_fresh_factory();
     let dir = TempDir::new()?;
     let uri = dir.path().to_str().unwrap();
-    create_encrypted_table(uri, &kms_id).await?;
-
-    let table = load_table(uri).await?;
+    let table = create_encrypted_table(uri, &kms_id).await?;
     let ctx = SessionContext::new();
     ctx.register_table("t", table.table_provider().await?)?;
     ctx.sql("INSERT INTO t (int, string) VALUES (42, 'Z')")
@@ -344,8 +531,7 @@ async fn test_record_batch_writer_refuses_plaintext_for_table_created_encrypted(
     let mut writer =
         RecordBatchWriter::try_new(table_url(uri).as_str(), batch.schema(), None, None)?;
     writer.write(batch).await?;
-    create_encrypted_table(uri, &kms_id).await?;
-    let mut table = load_table(uri).await?;
+    let mut table = create_encrypted_table(uri, &kms_id).await?;
     let version = table.version();
 
     let err = writer
@@ -466,8 +652,7 @@ async fn test_record_batch_writer_try_new_commits_an_empty_window() -> DeltaResu
     let kms_id = register_fresh_factory();
     let dir = TempDir::new()?;
     let uri = dir.path().to_str().unwrap();
-    create_encrypted_table(uri, &kms_id).await?;
-    let mut table = load_table(uri).await?;
+    let mut table = create_encrypted_table(uri, &kms_id).await?;
     let mut writer = RecordBatchWriter::try_new(
         table_url(uri).as_str(),
         get_table_batches().schema(),
@@ -733,5 +918,240 @@ async fn test_write_with_matching_encryption_configuration_is_idempotent() -> De
         .to_string();
     assert!(err.contains("differs from the table's"), "{err}");
     assert_all_parquets_encrypted(tmp.path()).await;
+    Ok(())
+}
+
+/// The change feed of an encrypted table must decrypt like every other read
+/// path (both `_change_data` files and the regular add/remove data files).
+#[tokio::test]
+async fn test_cdf_read_on_encrypted_table() -> DeltaResult<()> {
+    use datafusion::physical_plan::collect;
+
+    let kms_id = register_fresh_factory();
+    let dir = TempDir::new()?;
+    let uri = dir.path().to_str().unwrap();
+
+    let table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?.build()?;
+    table
+        .create()
+        .with_columns(get_table_columns())
+        .with_configuration([
+            ("delta.encryption.kms_id", Some(kms_id.as_str())),
+            ("delta.encryption.footer_key", Some("test-footer-key")),
+            ("delta.enableChangeDataFeed", Some("true")),
+        ])
+        .await?;
+
+    let table: DeltaTable = load_table(uri).await?;
+    let table = table.write(vec![get_table_batches()]).await?;
+    // An update produces `_change_data` files, which are encrypted too.
+    let (table, metrics) = table
+        .update()
+        .with_predicate(col("int").eq(lit(1)))
+        .with_update("int", lit(100))
+        .await?;
+    assert!(metrics.num_updated_rows > 0);
+    assert_all_parquets_encrypted(dir.path()).await;
+
+    let ctx = SessionContext::new();
+    let plan = table
+        .scan_cdf()
+        .with_starting_version(0)
+        .build(&ctx.state(), None)
+        .await?;
+    let batches = collect(plan, ctx.task_ctx()).await?;
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert!(
+        rows > 0,
+        "change feed of an encrypted table must be readable"
+    );
+    Ok(())
+}
+
+/// A scan of a table with deletion vectors reads each file's footer to check the vector
+/// against the file, which needs the decryption keys like the data read does.
+#[tokio::test]
+async fn test_encrypted_table_with_deletion_vectors() -> DeltaResult<()> {
+    use deltalake_core::kernel::transaction::CommitBuilder;
+    use deltalake_core::kernel::{Action, DeletionVectorDescriptor, StorageType};
+    use deltalake_core::protocol::DeltaOperation;
+    use futures::TryStreamExt as _;
+
+    let kms_id = register_fresh_factory();
+    let dir = TempDir::new()?;
+    let uri = dir.path().to_str().unwrap();
+    let table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?.build()?;
+    table
+        .create()
+        .with_columns(get_table_columns())
+        .with_configuration([
+            ("delta.encryption.kms_id", Some(kms_id.as_str())),
+            ("delta.encryption.footer_key", Some("test-footer-key")),
+            ("delta.enableDeletionVectors", Some("true")),
+        ])
+        .await?;
+    let table: DeltaTable = load_table(uri).await?;
+    let batch = get_table_batches();
+    let rows = batch.num_rows();
+    let table = table.write(vec![batch]).await?;
+
+    // delta-rs rewrites files on delete rather than writing deletion vectors, so attach an
+    // inline vector that removes the first row of the one file by hand.
+    let snapshot = table.snapshot()?.snapshot();
+    let files: Vec<_> = snapshot
+        .file_views(&table.log_store(), None)
+        .try_collect()
+        .await?;
+    assert_eq!(files.len(), 1);
+    let mut bitmap = roaring::RoaringTreemap::new();
+    bitmap.insert(0);
+    // The portable roaring bitmap magic, then the bitmap (PROTOCOL.md, Deletion Vector Format).
+    let mut bytes = 1681511377u32.to_le_bytes().to_vec();
+    bitmap.serialize_into(&mut bytes).unwrap();
+    let mut add = files[0].add_action();
+    add.deletion_vector = Some(DeletionVectorDescriptor {
+        storage_type: StorageType::Inline,
+        path_or_inline_dv: z85::encode(&bytes),
+        offset: None,
+        size_in_bytes: bytes.len() as i32,
+        cardinality: 1,
+    });
+    let remove = files[0].remove_action(true);
+    CommitBuilder::default()
+        .with_actions(vec![Action::Remove(remove), Action::Add(add)])
+        .build(
+            Some(snapshot),
+            table.log_store(),
+            DeltaOperation::Delete { predicate: None },
+        )
+        .await?;
+
+    let batches = read_table(uri).await?;
+    let read_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(read_rows, rows - 1);
+    Ok(())
+}
+
+/// Round-trip on a partitioned encrypted table: partitioned writes go through
+/// the per-partition writer fan-out, and reads reassemble partition values.
+#[tokio::test]
+async fn test_partitioned_encrypted_round_trip() -> DeltaResult<()> {
+    let kms_id = register_fresh_factory();
+    let dir = TempDir::new()?;
+    let uri = dir.path().to_str().unwrap();
+
+    let table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?.build()?;
+    table
+        .create()
+        .with_columns(get_table_columns())
+        .with_partition_columns(["string"])
+        .with_configuration([
+            ("delta.encryption.kms_id", Some(kms_id.as_str())),
+            ("delta.encryption.footer_key", Some("test-footer-key")),
+        ])
+        .await?;
+
+    let table: DeltaTable = load_table(uri).await?;
+    let expected_rows = get_table_batches().num_rows();
+    table.write(vec![get_table_batches()]).await?;
+
+    assert_all_parquets_encrypted(dir.path()).await;
+    let batches = read_table(uri).await?;
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(rows, expected_rows);
+    Ok(())
+}
+
+/// A provider that crossed the wire (DeltaLogicalCodec serde round-trip) loses
+/// its `#[serde(skip)]` parquet options; the scan must re-derive the crypto
+/// options from the snapshot's table properties instead of failing to decode.
+#[tokio::test]
+async fn test_serde_round_tripped_provider_still_decrypts() -> DeltaResult<()> {
+    use deltalake_core::delta_datafusion::DeltaScanNext;
+
+    let kms_id = register_fresh_factory();
+    let dir = TempDir::new()?;
+    let uri = dir.path().to_str().unwrap();
+    let table = create_encrypted_table(uri, &kms_id).await?;
+    let provider = table.table_provider().await?;
+    let scan = provider
+        .downcast_ref::<DeltaScanNext>()
+        .expect("table_provider returns DeltaScanNext");
+
+    // Same round-trip DeltaLogicalCodec performs for distributed plans.
+    let encoded = serde_json::to_vec(scan).expect("encode provider");
+    let decoded: DeltaScanNext = serde_json::from_slice(&encoded).expect("decode provider");
+
+    let ctx = SessionContext::new();
+    ctx.register_table("t", Arc::new(decoded))?;
+    let batches = ctx.sql("SELECT * FROM t").await?.collect().await?;
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert!(rows > 0, "decoded provider must still decrypt the table");
+    Ok(())
+}
+
+/// Readers take nothing from the table's current `footer_key` / `column_keys`: a table whose
+/// files were written under two different key configurations, plus a plaintext file, reads
+/// correctly. delta-rs refuses to change the properties itself, so the log is assembled by
+/// hand, the way another engine following the RFC could leave it.
+#[tokio::test]
+async fn test_reads_files_written_under_different_keys_and_plaintext() -> DeltaResult<()> {
+    use std::fs;
+
+    let kms_id = register_fresh_factory();
+    let target = TempDir::new()?;
+    let target_uri = target.path().to_str().unwrap();
+    let table = deltalake_core::DeltaTableBuilder::from_url(table_url(target_uri))?.build()?;
+    table
+        .create()
+        .with_columns(get_table_columns())
+        .with_configuration([
+            ("delta.encryption.kms_id", Some(kms_id.as_str())),
+            ("delta.encryption.footer_key", Some("footer-v1")),
+            ("delta.encryption.column_keys", Some("pii-v1:string")),
+        ])
+        .await?
+        .write(vec![get_table_batches()])
+        .await?;
+
+    // Files written by sibling tables with other keys (same KMS) and without encryption.
+    let mut foreign_adds = Vec::new();
+    for properties in [
+        vec![
+            ("delta.encryption.kms_id", kms_id.as_str()),
+            ("delta.encryption.footer_key", "footer-v2"),
+        ],
+        vec![],
+    ] {
+        let source = TempDir::new()?;
+        let mut create = deltalake_core::DeltaTableBuilder::from_url(table_url(
+            source.path().to_str().unwrap(),
+        ))?
+        .build()?
+        .create()
+        .with_columns(get_table_columns());
+        for (key, value) in properties {
+            create = create.with_configuration([(key, Some(value))]);
+        }
+        create.await?.write(vec![get_table_batches()]).await?;
+        let log = fs::read_to_string(source.path().join("_delta_log/00000000000000000001.json"))?;
+        for line in log.lines() {
+            let action: serde_json::Value = serde_json::from_str(line).unwrap();
+            if let Some(add) = action.get("add") {
+                let name = add["path"].as_str().unwrap();
+                fs::copy(source.path().join(name), target.path().join(name))?;
+                foreign_adds.push(serde_json::json!({ "add": add }).to_string());
+            }
+        }
+    }
+    assert_eq!(foreign_adds.len(), 2);
+    fs::write(
+        target.path().join("_delta_log/00000000000000000002.json"),
+        foreign_adds.join("\n") + "\n",
+    )?;
+
+    let batches = read_table(target_uri).await?;
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(rows, 3 * get_table_batches().num_rows());
     Ok(())
 }

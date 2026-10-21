@@ -387,6 +387,9 @@ pub static INSTANCE: LazyLock<ProtocolChecker> = LazyLock::new(|| {
     {
         reader_features.insert(TableFeature::ColumnMapping);
     }
+    // Reading encrypted tables needs the KMS-backed decryption of the DataFusion scan.
+    #[cfg(all(feature = "datafusion", feature = "encryption"))]
+    reader_features.insert(TableFeature::ParquetEncryptionDev);
 
     let mut writer_features = HashSet::new();
     writer_features.insert(TableFeature::AppendOnly);
