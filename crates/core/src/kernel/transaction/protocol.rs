@@ -230,9 +230,36 @@ impl ProtocolChecker {
 
     /// Check if delta-rs can write to the given delta table.
     pub fn can_write_to(&self, snapshot: &dyn TableReference) -> Result<(), TransactionError> {
-        // NOTE: writers must always support all required reader features
-        self.can_read_from(snapshot)?;
+        // NOTE: writers must always support all required reader features. Encryption is
+        // the exception: writing an encrypted table needs write support only, and an
+        // operation that also reads data files fails on them without read support.
+        self.ignoring_write_only_features(self.can_read_from_protocol(snapshot.protocol()))?;
         self.can_write_to_protocol(snapshot.protocol())
+    }
+
+    /// Drop from an unsupported-features error the reader features a writer need not read:
+    /// encryption, when this build writes it, since a write alone never opens a data file.
+    pub(crate) fn ignoring_write_only_features(
+        &self,
+        result: Result<(), TransactionError>,
+    ) -> Result<(), TransactionError> {
+        match result {
+            Err(TransactionError::UnsupportedTableFeatures(features)) => {
+                let features: Vec<_> = features
+                    .into_iter()
+                    .filter(|feature| {
+                        !(*feature == TableFeature::ParquetEncryptionDev
+                            && self.writer_features.contains(feature))
+                    })
+                    .collect();
+                if features.is_empty() {
+                    Ok(())
+                } else {
+                    Err(TransactionError::UnsupportedTableFeatures(features))
+                }
+            }
+            other => other,
+        }
     }
 
     /// The writer-feature half of [`can_write_to`](Self::can_write_to): no reader checks.
@@ -373,6 +400,9 @@ pub static INSTANCE: LazyLock<ProtocolChecker> = LazyLock::new(|| {
         writer_features.insert(TableFeature::ColumnMapping);
     }
     writer_features.insert(TableFeature::DeletionVectors);
+    // Writing encrypted tables needs the KMS-backed writer properties layer.
+    #[cfg(all(feature = "datafusion", feature = "encryption"))]
+    writer_features.insert(TableFeature::ParquetEncryptionDev);
     // writer_features.insert(TableFeature::IdentityColumns);
     // `checkpointProtection` is a writer-only feature which constrains checkpoint
     // creation and metadata cleanup, neither of which this crate performs when

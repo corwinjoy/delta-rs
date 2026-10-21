@@ -15,6 +15,7 @@
 //! [`RecordBatchWriter`]: super::record_batch::RecordBatchWriter
 //! [`JsonWriter`]: super::json::JsonWriter
 
+use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
@@ -25,8 +26,8 @@ use indexmap::IndexMap;
 use object_store::ObjectStore;
 use parquet::file::properties::WriterProperties;
 
-use crate::datafile::DeltaWriterProperties;
 use crate::datafile::writer::{ArrowWriterOptions, DeltaWriter as DatasetSink, WriterConfig};
+use crate::datafile::{DeltaWriterProperties, WriterStatsConfig};
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::kernel::Add;
 
@@ -125,6 +126,28 @@ impl WriteWindow {
     /// Set the arrow writer options used for sinks opened from now on.
     pub(crate) fn set_arrow_options(&mut self, arrow_options: ArrowWriterOptions) {
         self.factory.props.arrow = Some(arrow_options);
+    }
+
+    /// Set the statistics settings used for sinks opened from now on.
+    pub(crate) fn set_stats_config(&mut self, stats: WriterStatsConfig) {
+        self.factory.props.stats = Some(stats);
+    }
+
+    /// Encrypt the files of sinks opened from now on as `configuration` (the table's
+    /// `delta.encryption.*` properties) says; a no-op for an unencrypted table.
+    pub(crate) fn apply_encryption(
+        &mut self,
+        configuration: &HashMap<String, String>,
+    ) -> DeltaResult<()> {
+        let props = std::mem::take(&mut self.factory.props);
+        self.factory.props = super::apply_legacy_writer_encryption(props, configuration)?;
+        Ok(())
+    }
+
+    /// Whether sinks are opened with an encryption layer: the legacy writers add no other
+    /// layer to their properties.
+    pub(crate) fn encrypts(&self) -> bool {
+        !self.factory.props.layers.is_empty()
     }
 
     /// Schema widening rotates the whole window's sink, which only makes sense when

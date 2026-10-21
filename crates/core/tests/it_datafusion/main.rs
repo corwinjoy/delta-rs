@@ -11,6 +11,8 @@ mod command_vacuum;
 mod commit_info_format;
 mod datafusion_dat;
 mod datafusion_table_provider;
+#[cfg(feature = "encryption")]
+mod encryption;
 mod file_selection_bench_bridge;
 mod integration;
 mod integration_checkpoint;

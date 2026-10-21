@@ -77,9 +77,10 @@ A replace removes every data file in one commit, but the removed files stay in s
 `vacuum` runs, and the old log entries with their statistics until log cleanup.
 
 Adding columns to a table with `column_keys` leaves the new columns unencrypted, as the RFC
-specifies. Under uniform encryption new columns are encrypted with the footer key. Dropping an
-encrypted column removes it from `column_keys`, as the RFC requires; dropping the last one is
-refused, since an empty `column_keys` would mean uniform encryption.
+specifies; the write logs a warning naming them. Under uniform encryption new columns are
+encrypted with the footer key. Dropping an encrypted column removes it from `column_keys`,
+as the RFC requires; dropping the last one is refused, since an empty `column_keys` would
+mean uniform encryption.
 
 Passing `delta.encryption.*` properties to a write on an existing table is an error when they
 differ from the table's, since a write does not change the configuration of an existing table.

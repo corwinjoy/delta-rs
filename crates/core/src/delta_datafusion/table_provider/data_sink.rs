@@ -20,6 +20,7 @@ use crate::{
     delta_datafusion::{ColumnMappingState, DataFusionMixins as _},
     kernel::{Action, EagerSnapshot, transaction::CommitBuilder},
     logstore::{LogStoreRef, with_operation},
+    operations::write::encryption::apply_encryption_from_configuration,
     operations::write::execution::write_streams,
     protocol::{DeltaOperation, SaveMode},
 };
@@ -105,10 +106,10 @@ impl DataSink for DeltaDataSink {
     async fn write_all(
         &self,
         data: SendableRecordBatchStream,
-        _context: &Arc<TaskContext>,
+        context: &Arc<TaskContext>,
     ) -> datafusion::common::Result<u64> {
         with_operation(&self.log_store, |log_store| async move {
-            self.write_all_with(log_store, data).await
+            self.write_all_with(log_store, data, context).await
         })
         .await
         .map_err(|e| DataFusionError::External(Box::new(e)))
@@ -120,6 +121,7 @@ impl DeltaDataSink {
         &self,
         log_store: LogStoreRef,
         data: SendableRecordBatchStream,
+        context: &Arc<TaskContext>,
     ) -> crate::DeltaResult<u64> {
         let target_schema = self.snapshot.input_schema();
 
@@ -141,8 +143,14 @@ impl DeltaDataSink {
         };
         let column_mapping =
             ColumnMappingState::from_table_config(self.snapshot.table_configuration());
-        let props = DeltaWriterProperties::default()
-            .apply_table_defaults(self.snapshot.table_configuration());
+        // Encrypting if the table's properties say so; the task's RuntimeEnv is checked
+        // for the KMS factory first, then the global registry.
+        let table_config = self.snapshot.table_configuration();
+        let props = apply_encryption_from_configuration(
+            DeltaWriterProperties::default().apply_table_defaults(table_config),
+            table_config.metadata().configuration(),
+            Some(&context.runtime_env()),
+        )?;
         let (stream, table_schema, physical_partition_columns, random_prefix_length) =
             match &column_mapping {
                 None => (

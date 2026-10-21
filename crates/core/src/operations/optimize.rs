@@ -58,6 +58,7 @@ use crate::kernel::{Action, Add, DataType, PartitionsExt, Remove, StructType, Ve
 use crate::kernel::{EagerSnapshot, resolve_snapshot};
 use crate::logstore::with_operation;
 use crate::logstore::{LogStore, LogStoreRef, ObjectStoreRef};
+use crate::operations::write::encryption::apply_encryption;
 use crate::protocol::DeltaOperation;
 use crate::table::config::TablePropertiesExt as _;
 use crate::table::state::DeltaTableState;
@@ -1008,6 +1009,10 @@ pub async fn create_merge_plan(
     // properties fall back to ZSTD(4) rather than the SNAPPY default.
     let writer_properties =
         writer_properties.apply_parquet_default(|| Ok(OPTIMIZE_PARQUET_PROPERTIES.clone()))?;
+    // Table encryption always wins, so optimize can never rewrite an encrypted table's
+    // files as plaintext.
+    let writer_properties =
+        apply_encryption(writer_properties, snapshot.table_configuration(), &session)?;
     let partitions_keys = snapshot.metadata().partition_columns();
 
     let (operations, metrics, planner_stats) = match optimize_type {
