@@ -11,7 +11,7 @@ use arrow_array::{ArrayRef, RecordBatch, new_null_array};
 use arrow_schema::{DataType, Schema as ArrowSchema, SchemaRef as ArrowSchemaRef};
 use delta_kernel::engine::arrow_conversion::{TryIntoArrow, TryIntoKernel};
 use delta_kernel::expressions::Scalar;
-use delta_kernel::table_properties::{DataSkippingNumIndexedCols, TableProperties};
+use delta_kernel::table_properties::TableProperties;
 use indexmap::IndexMap;
 use object_store::ObjectStore;
 use parquet::file::properties::WriterProperties;
@@ -26,11 +26,11 @@ use crate::errors::DeltaTableError;
 use crate::kernel::schema::cast::{cast_record_batch, normalize_for_delta};
 use crate::kernel::schema::merge_arrow_schema;
 use crate::kernel::transaction::CommitProperties;
-use crate::kernel::{Action, Add};
+use crate::kernel::{Action, Add, Snapshot};
 use crate::kernel::{MetadataExt as _, Version};
+use crate::logstore::LogStoreRef;
 use crate::parquet_utils::default_writer_properties;
 use crate::table::builder::DeltaTableBuilder;
-use crate::table::config::TablePropertiesExt as _;
 use crate::writer::utils::{arrow_schema_without_partitions, record_batch_without_partitions};
 
 /// Writes messages to a delta lake table.
@@ -52,36 +52,16 @@ pub struct RecordBatchWriter {
 
 /// What the writer knows about its table's configuration. [`RecordBatchWriter::try_new`]
 /// does not load the table, so whether files must be encrypted is unknown until the first
-/// write: the table is loaded before the first upload, and one that did not exist then is
-/// checked again before files are handed out, since the caller may create it meanwhile.
+/// write: the table's metadata is read before the first upload, and a table that did not
+/// exist then is checked again before files are handed out, since the caller may create it
+/// meanwhile.
 enum TableConfigState {
     /// The configuration has been applied to the writer.
     Applied,
-    /// The table has not been loaded yet; load it before the first upload.
-    Unloaded(DeltaTable),
+    /// The table has not been read yet; read it before the first upload.
+    Unloaded(LogStoreRef),
     /// The table did not exist at the first write; check it again before handing out files.
-    Missing(DeltaTable),
-}
-
-impl TableConfigState {
-    fn set_missing(&mut self) {
-        if let Self::Unloaded(table) = std::mem::replace(self, Self::Applied) {
-            *self = Self::Missing(table);
-        }
-    }
-}
-
-/// The statistics settings from a table's configuration, with defaults for a table that has
-/// none.
-fn stats_config(
-    configuration: &HashMap<String, String>,
-) -> (DataSkippingNumIndexedCols, Option<Vec<String>>) {
-    let properties = TableProperties::from(configuration.iter());
-    let stats_columns = properties
-        .data_skipping_stats_columns
-        .as_ref()
-        .map(|columns| columns.iter().map(ToString::to_string).collect());
-    (properties.num_indexed_cols(), stats_columns)
+    Missing(LogStoreRef),
 }
 
 impl std::fmt::Debug for RecordBatchWriter {
@@ -112,15 +92,15 @@ impl RecordBatchWriter {
         // Initialize writer properties for the underlying arrow writer
         let writer_properties = default_writer_properties(parquet::basic::Compression::SNAPPY);
 
-        // The configuration is applied on the first write, once the table is loaded.
-        let mut writer = Self::new_with_table(
-            delta_table.clone(),
-            schema,
-            partition_columns,
-            HashMap::new(),
+        // The configuration is applied on the first write, once the table is read.
+        let mut writer = Self::from_parts(
+            delta_table.object_store(),
+            normalize_for_delta(&schema),
+            partition_columns.unwrap_or_default(),
+            &HashMap::new(),
             writer_properties,
         )?;
-        writer.table_config = TableConfigState::Unloaded(delta_table);
+        writer.table_config = TableConfigState::Unloaded(delta_table.log_store());
         Ok(writer)
     }
 
@@ -242,22 +222,18 @@ impl RecordBatchWriter {
         configuration: &HashMap<String, String>,
         writer_properties: WriterProperties,
     ) -> Result<Self, DeltaTableError> {
-        let (num_indexed_cols, stats_columns) = stats_config(configuration);
-
         let factory = SinkFactory {
             storage,
             partition_columns,
-            props: DeltaWriterProperties::default()
-                .with_parquet_properties(writer_properties)
-                .with_stats_config(WriterStatsConfig::new(num_indexed_cols, stats_columns)),
+            props: DeltaWriterProperties::default().with_parquet_properties(writer_properties),
         };
-        let mut window = WriteWindow::new(factory, arrow_schema_ref);
-        window.apply_encryption(configuration)?;
-        Ok(Self {
-            window,
+        let mut writer = Self {
+            window: WriteWindow::new(factory, arrow_schema_ref),
             commit_properties: None,
             table_config: TableConfigState::Applied,
-        })
+        };
+        writer.apply_table_config(configuration)?;
+        Ok(writer)
     }
 
     /// Apply a table's stats and encryption settings to the sinks opened from now on.
@@ -265,45 +241,39 @@ impl RecordBatchWriter {
         &mut self,
         configuration: &HashMap<String, String>,
     ) -> Result<(), DeltaTableError> {
-        let (num_indexed_cols, stats_columns) = stats_config(configuration);
         self.window
-            .set_stats_config(WriterStatsConfig::new(num_indexed_cols, stats_columns));
+            .set_stats_config(WriterStatsConfig::from_properties(&TableProperties::from(
+                configuration.iter(),
+            )));
         self.window.apply_encryption(configuration)
     }
 
-    /// Load the table [`try_new`](Self::try_new) was given and apply its configuration.
-    /// Called before the first upload, so an encrypted table never gets plaintext files.
-    async fn load_table_config(&mut self) -> Result<(), DeltaTableError> {
-        let TableConfigState::Unloaded(table) = &mut self.table_config else {
-            return Ok(());
+    /// Read the configuration of the table [`try_new`](Self::try_new) was given, before the
+    /// first upload, so an encrypted table never gets plaintext files. A table that did not
+    /// exist then is read again `at_flush`, when files are about to be handed out: its
+    /// settings must match what they were written under.
+    async fn sync_table_config(&mut self, at_flush: bool) -> Result<(), DeltaTableError> {
+        let (log_store, must_match) = match &self.table_config {
+            TableConfigState::Unloaded(log_store) => (log_store, false),
+            TableConfigState::Missing(log_store) if at_flush => (log_store, true),
+            _ => return Ok(()),
         };
-        match table.load().await {
-            Ok(()) => {
-                let configuration = table.snapshot()?.metadata().configuration().clone();
+        match Snapshot::try_new(log_store.as_ref(), None).await {
+            Ok(snapshot) => {
+                let configuration = snapshot.metadata().configuration().clone();
+                if must_match {
+                    self.window.check_target(&configuration)?;
+                }
                 self.apply_table_config(&configuration)?;
                 self.table_config = TableConfigState::Applied;
             }
-            Err(DeltaTableError::NotATable(_)) => self.table_config.set_missing(),
-            Err(err) => return Err(err),
-        }
-        Ok(())
-    }
-
-    /// Check a table that did not exist at the first write before handing out files: the
-    /// caller may have created it since. Its files are plaintext, so an encrypted table
-    /// refuses them; otherwise the table's settings apply from now on.
-    async fn check_missing_table(&mut self) -> Result<(), DeltaTableError> {
-        let TableConfigState::Missing(table) = &mut self.table_config else {
-            return Ok(());
-        };
-        match table.load().await {
-            Ok(()) => {
-                let configuration = table.snapshot()?.metadata().configuration().clone();
-                self.window.check_target(&configuration)?;
-                self.apply_table_config(&configuration)?;
-                self.table_config = TableConfigState::Applied;
+            Err(DeltaTableError::NotATable(_)) => {
+                if let TableConfigState::Unloaded(log_store) =
+                    std::mem::replace(&mut self.table_config, TableConfigState::Applied)
+                {
+                    self.table_config = TableConfigState::Missing(log_store);
+                }
             }
-            Err(DeltaTableError::NotATable(_)) => {}
             Err(err) => return Err(err),
         }
         Ok(())
@@ -381,7 +351,7 @@ impl RecordBatchWriter {
         partition_values: &IndexMap<String, Scalar>,
         mode: WriteMode,
     ) -> Result<ArrowSchemaRef, DeltaTableError> {
-        self.load_table_config().await?;
+        self.sync_table_config(false).await?;
         // Phase 1 — validate against the partition-stripped file schema (what the
         // sink encodes under), so bad caller data errors before any window state
         // changes. Merging against the stripped schema also keeps a batch that
@@ -425,7 +395,7 @@ impl DeltaWriter<RecordBatch> for RecordBatchWriter {
         values: RecordBatch,
         mode: WriteMode,
     ) -> Result<(), DeltaTableError> {
-        self.load_table_config().await?;
+        self.sync_table_config(false).await?;
         if mode == WriteMode::MergeSchema && !self.window.partition_columns().is_empty() {
             return Err(DeltaTableError::Generic(
                 "Merging Schemas with partition columns present is currently unsupported"
@@ -478,8 +448,7 @@ impl DeltaWriter<RecordBatch> for RecordBatchWriter {
     /// Finalize all files written since the last flush and return their [`Add`]
     /// actions, resetting internal state to handle another flush window.
     async fn flush(&mut self) -> Result<Vec<Add>, DeltaTableError> {
-        self.load_table_config().await?;
-        self.check_missing_table().await?;
+        self.sync_table_config(true).await?;
         self.window.drain().await
     }
 
@@ -489,8 +458,7 @@ impl DeltaWriter<RecordBatch> for RecordBatchWriter {
         table: &mut DeltaTable,
     ) -> Result<Version, DeltaTableError> {
         use crate::kernel::StructType;
-        self.load_table_config().await?;
-        self.check_missing_table().await?;
+        self.sync_table_config(true).await?;
         // The caller's table may have been replaced since the writer read its configuration.
         self.window
             .check_target(table.snapshot()?.metadata().configuration())?;

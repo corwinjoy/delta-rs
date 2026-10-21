@@ -96,13 +96,6 @@ pub fn register_encryption_factory(id: impl Into<String>, factory: Arc<dyn Encry
     }
 }
 
-/// Look up a previously registered [`EncryptionFactory`] by id.
-fn get_encryption_factory(id: &str) -> Option<Arc<dyn EncryptionFactory>> {
-    GLOBAL_FACTORY_REGISTRY
-        .get(id)
-        .map(|e| Arc::clone(e.value()))
-}
-
 /// The [`EncryptionFactory`] registered as `kms_id`: the one in `runtime_env`, if any, else
 /// the one in the global registry, which operations that create their own internal sessions
 /// rely on. Errors when neither has it.
@@ -112,7 +105,11 @@ pub fn resolve_encryption_factory(
 ) -> DeltaResult<Arc<dyn EncryptionFactory>> {
     runtime_env
         .and_then(|env| env.parquet_encryption_factory(kms_id).ok())
-        .or_else(|| get_encryption_factory(kms_id))
+        .or_else(|| {
+            GLOBAL_FACTORY_REGISTRY
+                .get(kms_id)
+                .map(|e| Arc::clone(e.value()))
+        })
         .ok_or_else(|| {
             DeltaTableError::Generic(format!(
                 "No EncryptionFactory registered for kms_id '{kms_id}'. Register one via \

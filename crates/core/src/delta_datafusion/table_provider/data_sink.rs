@@ -17,11 +17,10 @@ use itertools::Itertools as _;
 use crate::{
     cast_record_batch,
     datafile::{DeltaWriterProperties, writer::WriterConfig},
-    delta_datafusion::{ColumnMappingState, DataFusionMixins as _},
+    delta_datafusion::DataFusionMixins as _,
     kernel::{Action, EagerSnapshot, transaction::CommitBuilder},
     logstore::{LogStoreRef, with_operation},
-    operations::write::encryption::apply_encryption_from_configuration,
-    operations::write::execution::write_streams,
+    operations::write::execution::{WriteSinkConfig, write_streams},
     protocol::{DeltaOperation, SaveMode},
 };
 
@@ -126,8 +125,19 @@ impl DeltaDataSink {
         let target_schema = self.snapshot.input_schema();
 
         let stream = self.create_converted_stream(data, target_schema.clone());
-        let logical_partition_columns = self.snapshot.metadata().partition_columns();
-        let object_store = log_store.object_store();
+        let table_config = self.snapshot.table_configuration();
+        let WriteSinkConfig {
+            partition_columns: logical_partition_columns,
+            object_store,
+            props,
+            column_mapping,
+            ..
+        } = WriteSinkConfig::new(
+            table_config,
+            Some(&context.runtime_env()),
+            log_store.object_store(),
+            DeltaWriterProperties::default().apply_table_defaults(table_config),
+        )?;
         let total_rows_metric = MetricBuilder::new(&self.metrics).counter("total_rows", 0);
         let stream = {
             let metric = total_rows_metric.clone();
@@ -141,28 +151,18 @@ impl DeltaDataSink {
                 }),
             )) as SendableRecordBatchStream
         };
-        let column_mapping =
-            ColumnMappingState::from_table_config(self.snapshot.table_configuration());
-        // Encrypting if the table's properties say so; the task's RuntimeEnv is checked
-        // for the KMS factory first, then the global registry.
-        let table_config = self.snapshot.table_configuration();
-        let props = apply_encryption_from_configuration(
-            DeltaWriterProperties::default().apply_table_defaults(table_config),
-            table_config.metadata().configuration(),
-            Some(&context.runtime_env()),
-        )?;
         let (stream, table_schema, physical_partition_columns, random_prefix_length) =
             match &column_mapping {
                 None => (
                     stream,
                     self.snapshot.read_schema(),
-                    logical_partition_columns.to_vec(),
+                    logical_partition_columns.clone(),
                     None,
                 ),
                 Some(state) => {
                     let physical_schema = state.physical_schema(&self.snapshot.read_schema());
                     let physical_partition_columns =
-                        state.physical_partition_columns(logical_partition_columns)?;
+                        state.physical_partition_columns(&logical_partition_columns)?;
                     let prefix_length = state.random_prefix_length();
                     let state = state.clone();
                     let stream: SendableRecordBatchStream =

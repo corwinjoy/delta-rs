@@ -432,8 +432,6 @@ impl<'a> std::future::IntoFuture for OptimizeBuilder<'a> {
                 ));
             }
             PROTOCOL.can_write_to(&snapshot)?;
-            // Optimize reads the files it rewrites, outside `DeltaScan` and its check.
-            PROTOCOL.can_read_from_protocol(snapshot.protocol())?;
 
             let writer_properties = this.writer_properties;
             let (session, _) = resolve_session_state(
@@ -1013,8 +1011,11 @@ pub async fn create_merge_plan(
         writer_properties.apply_parquet_default(|| Ok(OPTIMIZE_PARQUET_PROPERTIES.clone()))?;
     // Table encryption always wins, so optimize can never rewrite an encrypted table's
     // files as plaintext.
-    let writer_properties =
-        apply_encryption(writer_properties, snapshot.table_configuration(), &session)?;
+    let writer_properties = apply_encryption(
+        writer_properties,
+        snapshot.table_configuration(),
+        Some(session.runtime_env()),
+    )?;
     let partitions_keys = snapshot.metadata().partition_columns();
 
     let (operations, metrics, planner_stats) = match optimize_type {
