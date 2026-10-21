@@ -190,9 +190,13 @@ struct KmsKeyRetriever(KeyUnwrapper);
 
 impl KeyRetriever for KmsKeyRetriever {
     fn retrieve_key(&self, key_metadata: &[u8]) -> parquet::errors::Result<Vec<u8>> {
-        self.0
-            .unwrap_key(key_metadata)
-            .map_err(|err| ParquetError::General(err.to_string()))
+        self.0.unwrap_key(key_metadata).map_err(|err| {
+            ParquetError::General(format!(
+                "could not unwrap a data key through the KMS: {err}. The KMS is the one \
+                 registered as delta.encryption.kms_id, configured by \
+                 delta.encryption.kms_configuration; check both if the KMS has moved"
+            ))
+        })
     }
 }
 
