@@ -485,37 +485,36 @@ impl WriteBuilder {
                                 .iter()
                                 .find(|(key, _)| merged.get(*key) != current.get(*key))
                                 .map(|(key, _)| key.as_str());
-                            let changed = match (
-                                differs,
-                                EncryptionConfig::try_from_configuration(current)?,
-                            ) {
-                                (None, _) => None,
-                                // Any key set on an unencrypted table is a change.
-                                (Some(key), None) => Some(key),
-                                (Some(key), Some(old)) => {
-                                    match EncryptionConfig::try_from_configuration(&merged) {
-                                        Ok(new) => {
-                                            let new = new
-                                                .map(|new| {
-                                                    new.with_physical_column_names(
-                                                        &snapshot.schema(),
-                                                        snapshot
-                                                            .table_configuration()
-                                                            .column_mapping_mode(),
-                                                    )
-                                                })
-                                                .transpose()?;
-                                            EncryptionConfig::frozen_change(
-                                                Some(&old),
-                                                new.as_ref(),
-                                            )
+                            let changed =
+                                match (differs, EncryptionConfig::try_from_configuration(current)?)
+                                {
+                                    (None, _) => None,
+                                    // Any key set on an unencrypted table is a change.
+                                    (Some(key), None) => Some(key),
+                                    (Some(key), Some(old)) => {
+                                        match EncryptionConfig::try_from_configuration(&merged) {
+                                            Ok(new) => {
+                                                let new = new
+                                                    .map(|new| {
+                                                        new.with_physical_column_names(
+                                                            &snapshot.schema(),
+                                                            snapshot
+                                                                .table_configuration()
+                                                                .column_mapping_mode(),
+                                                        )
+                                                    })
+                                                    .transpose()?;
+                                                EncryptionConfig::frozen_change(
+                                                    Some(&old),
+                                                    new.as_ref(),
+                                                )
+                                            }
+                                            // The merged configuration is not even valid, e.g.
+                                            // one key unset on its own: it differs.
+                                            Err(_) => Some(key),
                                         }
-                                        // The merged configuration is not even valid, e.g.
-                                        // one key unset on its own: it differs.
-                                        Err(_) => Some(key),
                                     }
-                                }
-                            };
+                                };
                             if let Some(key) = changed {
                                 return Err(DeltaTableError::Generic(format!(
                                     "'{key}' was given in the write configuration with a value \
