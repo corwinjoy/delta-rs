@@ -11,32 +11,29 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use datafusion::execution::parquet_encryption::EncryptionFactory;
+use parquet_key_management::crypto_factory::CryptoFactory;
+use parquet_key_management::errors::{Error, Result};
+use parquet_key_management::kms::{KmsClient, KmsClientRef, KmsConnectionInfo};
 
-use crate::errors::{DeltaResult, DeltaTableError};
-use crate::operations::write::encryption::{KmsClient, KmsEncryptionFactory};
+use crate::operations::write::encryption::KmsEncryptionFactory;
 
 /// A [`KmsClient`] that keeps every wrapped key in memory, like a vault that stores keys
 /// and hands out tokens.
 ///
-/// `wrap_key` stores the data key under a random token and returns the token;
-/// `unwrap_key` looks the token up and checks it was wrapped under the same master key.
-/// Nothing is encrypted, so a wrapped key is only usable in the process that wrapped it,
-/// which is what tests need: a file written by one factory cannot be read through another.
+/// `wrap_key` stores the key under a random token and returns the token; `unwrap_key`
+/// looks the token up and checks it was wrapped under the same master key. Nothing is
+/// encrypted, so a wrapped key is only usable in the process that wrapped it, which is
+/// what tests need: a file written by one factory cannot be read through another.
 #[derive(Debug, Default)]
 pub struct InMemoryKmsClient {
     vault: Mutex<Vault>,
 }
 
-/// token → (master key ID, data key)
+/// token → (master key ID, key)
 type Vault = HashMap<String, (String, Vec<u8>)>;
 
 impl KmsClient for InMemoryKmsClient {
-    fn wrap_key(
-        &self,
-        key: &[u8],
-        master_key_id: &str,
-        _kms_configuration: Option<&str>,
-    ) -> DeltaResult<String> {
+    fn wrap_key(&self, key: &[u8], master_key_id: &str) -> Result<String> {
         let token = uuid::Uuid::new_v4().to_string();
         self.vault
             .lock()
@@ -45,20 +42,15 @@ impl KmsClient for InMemoryKmsClient {
         Ok(token)
     }
 
-    fn unwrap_key(
-        &self,
-        wrapped_key: &str,
-        master_key_id: &str,
-        _kms_configuration: Option<&str>,
-    ) -> DeltaResult<Vec<u8>> {
+    fn unwrap_key(&self, wrapped_key: &str, master_key_id: &str) -> Result<Vec<u8>> {
         let vault = self.vault.lock().unwrap();
         let (wrapped_under, key) = vault.get(wrapped_key).ok_or_else(|| {
-            DeltaTableError::Generic(format!(
+            Error::General(format!(
                 "in-memory KMS: unknown wrapped key for master key '{master_key_id}'"
             ))
         })?;
         if wrapped_under != master_key_id {
-            return Err(DeltaTableError::Generic(format!(
+            return Err(Error::General(format!(
                 "in-memory KMS: key was wrapped under '{wrapped_under}', not '{master_key_id}'"
             )));
         }
@@ -68,7 +60,8 @@ impl KmsClient for InMemoryKmsClient {
 
 /// The reference [`KmsEncryptionFactory`] over a fresh [`InMemoryKmsClient`].
 pub fn mock_kms_factory() -> Arc<dyn EncryptionFactory> {
-    Arc::new(KmsEncryptionFactory::new(Arc::new(
-        InMemoryKmsClient::default(),
+    let client: KmsClientRef = Arc::new(InMemoryKmsClient::default());
+    Arc::new(KmsEncryptionFactory::new(CryptoFactory::new(
+        move |_: &KmsConnectionInfo| Ok(Arc::clone(&client)),
     )))
 }

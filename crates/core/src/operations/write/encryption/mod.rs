@@ -10,8 +10,9 @@
 //! set, since the layer runs after them.
 //!
 //! Encrypting needs the `encryption` cargo feature: `enabled.rs` holds the KMS-backed
-//! layer and the registry, `disabled.rs` refuses encrypted tables instead of writing
-//! plaintext. This module holds what both builds share.
+//! layer and the registry, `kms.rs` the reference factory over the
+//! [`parquet_key_management`] crate, `disabled.rs` refuses encrypted tables instead of
+//! writing plaintext. This module holds what both builds share.
 
 use std::collections::HashMap;
 
@@ -32,7 +33,11 @@ pub mod kms;
 #[cfg(feature = "encryption")]
 pub use backend::{register_encryption_factory, resolve_encryption_factory};
 #[cfg(feature = "encryption")]
-pub use kms::{KmsClient, KmsEncryptionFactory};
+pub use kms::KmsEncryptionFactory;
+/// The Parquet Key Management Tools crate the reference factory is built on: implement its
+/// `kms::KmsClient` (or `kms::AsyncKmsClient`) for your KMS.
+#[cfg(feature = "encryption")]
+pub use parquet_key_management;
 
 /// `props` with the table's encryption, if it has any.
 ///
