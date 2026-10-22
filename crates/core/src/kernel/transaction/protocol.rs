@@ -407,8 +407,10 @@ pub static INSTANCE: LazyLock<ProtocolChecker> = LazyLock::new(|| {
 /// allows these changes, so this is implementation behaviour, to be relaxed later.
 ///
 /// Restore is not exempt: restoring past a replace would re-add plaintext files.
-/// `kms_configuration` is not frozen. Configurations are compared as parsed values, and a
-/// new configuration must be valid.
+/// `kms_configuration` is not frozen, and `column_keys` may lose the columns a schema
+/// change removes, as the RFC requires. Configurations are compared as parsed values, a
+/// new configuration must be valid, and a `delta.encryption.*` key the commit introduces
+/// must be one this version knows.
 fn check_encryption_change(
     snapshot: &dyn TableReference,
     metadata: &Metadata,
@@ -417,22 +419,50 @@ fn check_encryption_change(
     let invalid =
         |err: crate::DeltaTableError| TransactionError::InvalidEncryptionConfig(err.to_string());
     let refuse = |msg: String| Err(TransactionError::InvalidEncryptionConfig(msg));
+    let old_configuration = snapshot.metadata().configuration();
     let new_configuration = metadata.configuration();
     let creates_table = matches!(operation, DeltaOperation::Create { .. });
+
+    EncryptionConfig::check_known_properties(
+        new_configuration
+            .keys()
+            .filter(|key| creates_table || !old_configuration.contains_key(*key)),
+    )
+    .map_err(invalid)?;
+    // `CreateBuilder` validates a Create (and rewrites display names to physical ones)
+    // before this; here is the only check for hand-built commits and schema changes,
+    // which must use physical names.
+    let schema = metadata.parse_schema().map_err(|err| invalid(err.into()))?;
+    let column_mapping_mode = TableProperties::from(new_configuration.iter())
+        .column_mapping_mode
+        .unwrap_or(ColumnMappingMode::None);
 
     let old = if creates_table {
         None
     } else {
-        EncryptionConfig::try_from_configuration(snapshot.metadata().configuration()).map_err(
-            |err| {
+        EncryptionConfig::try_from_configuration(old_configuration)
+            .map_err(|err| {
                 TransactionError::InvalidEncryptionConfig(format!(
                     "the table's existing encryption configuration is invalid; recreate the \
                      table to replace it: {err}"
                 ))
-            },
-        )?
+            })?
+            .map(|old| old.without_columns_missing_from(&schema, column_mapping_mode))
+            .transpose()
+            .map_err(invalid)?
     };
     let new = EncryptionConfig::try_from_configuration(new_configuration).map_err(invalid)?;
+    if let Some(new) = &new {
+        new.validate_columns(&schema, metadata.partition_columns(), column_mapping_mode)
+            .map_err(invalid)?;
+        new.validate_stats_columns(
+            new_configuration,
+            &schema,
+            metadata.partition_columns(),
+            column_mapping_mode,
+        )
+        .map_err(invalid)?;
+    }
 
     let remedy = match operation {
         DeltaOperation::Restore { .. } => {
@@ -468,26 +498,7 @@ fn check_encryption_change(
         }
         _ => {}
     }
-
-    let Some(new) = new else {
-        return Ok(());
-    };
-    // `CreateBuilder` validates a Create (and rewrites display names to physical ones)
-    // before this; here is the only check for hand-built commits and schema changes,
-    // which must use physical names.
-    let schema = metadata.parse_schema().map_err(|err| invalid(err.into()))?;
-    let column_mapping_mode = TableProperties::from(new_configuration.iter())
-        .column_mapping_mode
-        .unwrap_or(ColumnMappingMode::None);
-    new.validate_columns(&schema, metadata.partition_columns(), column_mapping_mode)
-        .map_err(invalid)?;
-    new.validate_stats_columns(
-        new_configuration,
-        &schema,
-        metadata.partition_columns(),
-        column_mapping_mode,
-    )
-    .map_err(invalid)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1104,6 +1115,55 @@ mod tests {
             )
             .unwrap();
         check_encryption_change(snapshot, &reconfigured, &set_properties()).unwrap();
+    }
+
+    /// Dropping an encrypted column drops it from `column_keys`, as the RFC's schema-change
+    /// rule requires; a commit that keeps naming it, or drops the last one, is refused.
+    #[tokio::test]
+    async fn dropping_an_encrypted_column_shrinks_column_keys() {
+        use crate::kernel::{MetadataExt as _, StructType};
+        use crate::table::config::ENCRYPTION_COLUMN_KEYS_PROP;
+
+        let table = encrypted_table().await;
+        let snapshot = table.snapshot().unwrap().snapshot();
+        let without = |dropped: &[&str]| {
+            StructType::try_new(
+                TestSchemas::simple()
+                    .fields()
+                    .filter(|f| !dropped.contains(&f.name().as_str()))
+                    .cloned(),
+            )
+            .unwrap()
+        };
+        let dropped_modified = snapshot
+            .metadata()
+            .clone()
+            .with_schema(&without(&["modified"]))
+            .unwrap();
+        let err = check_encryption_change(snapshot, &dropped_modified, &set_properties())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not in the table"), "{err}");
+
+        let pruned = dropped_modified
+            .add_config_key(
+                ENCRYPTION_COLUMN_KEYS_PROP.to_string(),
+                "pii:value".to_string(),
+            )
+            .unwrap();
+        check_encryption_change(snapshot, &pruned, &set_properties()).unwrap();
+
+        let uniform = snapshot
+            .metadata()
+            .clone()
+            .with_schema(&without(&["value", "modified"]))
+            .unwrap()
+            .remove_config_key(ENCRYPTION_COLUMN_KEYS_PROP)
+            .unwrap();
+        let err = check_encryption_change(snapshot, &uniform, &set_properties())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("uniform encryption"), "{err}");
     }
 
     /// Restore past a replace would re-add plaintext files, so it is refused like any other

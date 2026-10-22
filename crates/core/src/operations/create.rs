@@ -341,6 +341,7 @@ impl CreateBuilder {
 
         let partition_columns = self.partition_columns.unwrap_or_default();
         // Validate the encryption settings, storing column names as physical names (RFC).
+        EncryptionConfig::check_known_properties(configuration.keys())?;
         if let Some(encryption) = EncryptionConfig::try_from_configuration(&configuration)? {
             // Files registered at creation (CONVERT TO DELTA) are plaintext, so they cannot
             // be committed under an encrypted configuration.

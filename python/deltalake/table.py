@@ -1352,9 +1352,8 @@ class DeltaTable:
         # reader_features list, so the feature check alone misses them and the
         # scanner reads logical column names against physical parquet columns,
         # returning all nulls. Check the table configuration directly.
-        column_mapping_mode = self.metadata().configuration.get(
-            "delta.columnMapping.mode", "none"
-        )
+        configuration = self.metadata().configuration
+        column_mapping_mode = configuration.get("delta.columnMapping.mode", "none")
         if column_mapping_mode not in ("none",) or (
             table_protocol.reader_features
             and "columnMapping" in table_protocol.reader_features
@@ -1371,6 +1370,16 @@ class DeltaTable:
             raise DeltaProtocolError(
                 "The table requires reader feature 'deletionVectors' "
                 "but this is not supported using pyarrow Datasets."
+            )
+
+        # Encrypted tables are recognised by their properties until the
+        # parquetEncryption reader feature exists; a pyarrow Dataset has no
+        # decryption keys and would read plaintext-footer files partially.
+        if any(key.startswith("delta.encryption.") for key in configuration):
+            raise DeltaProtocolError(
+                "The table is configured for Parquet encryption "
+                "(delta.encryption.* properties) but this is not supported "
+                "using pyarrow Datasets."
             )
 
         import pyarrow

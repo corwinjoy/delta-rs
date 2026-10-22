@@ -615,21 +615,41 @@ impl EncryptionConfig {
     ///
     /// Fail-closed on purpose, like the RFC's `parquetEncryption` feature: treating a
     /// misconfigured table as plaintext would read ciphertext or write plaintext. A stray
-    /// key another engine wrote on a plaintext table therefore locks it out of delta-rs,
-    /// and since removing the key is itself a refused commit, create-or-replace is the way
-    /// out.
+    /// key without a footer key, which another engine may leave on a plaintext table,
+    /// therefore locks it out of delta-rs, and since the table's configuration is then
+    /// invalid, no commit can remove the key: create-or-replace is the way out.
     pub fn is_configured(configuration: &HashMap<String, String>) -> bool {
         configuration
             .keys()
             .any(|key| key.starts_with(ENCRYPTION_PROP_PREFIX))
     }
 
+    /// Refuse a `delta.encryption.*` key this version does not know. Run on the keys a
+    /// commit introduces, so a typo is caught before it is committed, but not on read or on
+    /// keys already in the table: a property a later RFC revision adds must not lock the
+    /// table out of delta-rs, the `parquetEncryption` feature flag is what guards that.
+    pub fn check_known_properties<'a>(
+        keys: impl IntoIterator<Item = &'a String>,
+    ) -> DeltaResult<()> {
+        match keys.into_iter().find(|key| {
+            key.starts_with(ENCRYPTION_PROP_PREFIX) && !ENCRYPTION_PROPS.contains(&key.as_str())
+        }) {
+            Some(unknown) => Err(invalid_encryption_config(format!(
+                "unknown property '{unknown}'; expected one of {ENCRYPTION_PROPS:?}"
+            ))),
+            None => Ok(()),
+        }
+    }
+
     /// Parse and validate the encryption configuration from a table's raw metadata
     /// `configuration`. `Ok(None)` when no `delta.encryption.*` property is set.
     ///
     /// Per the RFC, `footer_key` turns encryption on, so any other encryption property
-    /// without it is an error, as are a missing `kms_id`, an unknown `delta.encryption.*`
-    /// key, and malformed values.
+    /// without it is an error, as are a missing `kms_id` and malformed values. This is
+    /// stricter than the RFC, which lets a table keep `kms_id` with no footer key after
+    /// encryption was disabled; delta-rs refuses such a table rather than treat it as
+    /// plaintext. Unknown `delta.encryption.*` keys are ignored here; see
+    /// [`check_known_properties`](Self::check_known_properties).
     ///
     /// # Why the footer key is required
     /// Parquet always encrypts the footer with it, or signs the footer with it under
@@ -650,13 +670,6 @@ impl EncryptionConfig {
                 .filter(|v| !v.is_empty())
         };
 
-        if let Some(unknown) = configuration.keys().find(|key| {
-            key.starts_with(ENCRYPTION_PROP_PREFIX) && !ENCRYPTION_PROPS.contains(&key.as_str())
-        }) {
-            return Err(invalid_encryption_config(format!(
-                "unknown property '{unknown}'; expected one of {ENCRYPTION_PROPS:?}"
-            )));
-        }
         let footer_key = get(ENCRYPTION_FOOTER_KEY_PROP).ok_or_else(|| {
             invalid_encryption_config(format!(
                 "'{ENCRYPTION_FOOTER_KEY_PROP}' must be set to enable encryption; Parquet \
@@ -689,6 +702,10 @@ impl EncryptionConfig {
 
     /// Parse `"keyId:col1,col2;keyId2:col3"` into `{keyId: [col1, col2], keyId2: [col3]}`.
     /// A column may appear once, and not alongside an ancestor, which already covers it.
+    /// Names are split on dots to address struct fields; the backtick quoting of the
+    /// protocol's field-path scheme is not supported, so a column whose name contains a
+    /// dot cannot be given its own key (`ColumnName::parse_column_name_list` is the
+    /// upgrade path).
     fn parse_column_keys(value: Option<&str>) -> DeltaResult<HashMap<String, Vec<String>>> {
         let mut map: HashMap<String, Vec<String>> = HashMap::new();
         let mut seen: Vec<(String, String)> = Vec::new();
@@ -761,6 +778,34 @@ impl EncryptionConfig {
             }
         }
         Ok(())
+    }
+
+    /// Drop from [`column_keys`](Self::column_keys) the columns that are no longer in
+    /// `schema`, as the RFC's schema-change rule requires when a column is removed; names
+    /// are physical. Removing the last keyed column is an error: an empty `column_keys`
+    /// means uniform encryption, which would silently encrypt every column.
+    pub fn without_columns_missing_from(
+        mut self,
+        schema: &StructType,
+        column_mapping_mode: ColumnMappingMode,
+    ) -> DeltaResult<Self> {
+        if self.column_keys.is_empty() {
+            return Ok(self);
+        }
+        let by_physical_name =
+            |field: &StructField, name: &str| field.physical_name(column_mapping_mode) == name;
+        for columns in self.column_keys.values_mut() {
+            columns.retain(|column| path_exists(schema, column.split('.'), by_physical_name));
+        }
+        self.column_keys.retain(|_, columns| !columns.is_empty());
+        if self.column_keys.is_empty() {
+            return Err(invalid_encryption_config(format!(
+                "the schema change removes every column named in \
+                 '{ENCRYPTION_COLUMN_KEYS_PROP}', which would switch the table to uniform \
+                 encryption; recreate the table instead"
+            )));
+        }
+        Ok(self)
     }
 
     /// Refuse a `delta.dataSkippingStatsColumns` that names an encrypted column: the Delta
@@ -1010,16 +1055,39 @@ mod encryption_tests {
         assert!(err.contains(ENCRYPTION_KMS_ID_PROP), "{err}");
     }
 
+    /// A misspelt key is caught when introduced; a key a newer engine wrote is tolerated
+    /// when the known ones parse.
     #[test]
-    fn unknown_encryption_property_is_rejected() {
-        // Catches typos and the pre-RFC dotted names (`delta.encryption.footer.key`).
-        let err = try_parse(&[
+    fn unknown_encryption_property_is_refused_on_commit_and_ignored_on_parse() {
+        let props = props_with(&[
             (ENCRYPTION_KMS_ID_PROP, "kms"),
             (ENCRYPTION_FOOTER_KEY_PROP, "fk"),
             ("delta.encryption.footer.key", "fk"),
-        ])
-        .unwrap_err();
+        ]);
+        let err = EncryptionConfig::check_known_properties(props.keys())
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("delta.encryption.footer.key"), "{err}");
+        let enc = EncryptionConfig::try_from_configuration(&props)
+            .unwrap()
+            .unwrap();
+        assert_eq!(enc.footer_key, "fk");
+    }
+
+    /// Dropping a column drops it from `column_keys`; dropping the last keyed column would
+    /// mean uniform encryption, so that is refused.
+    #[test]
+    fn without_columns_missing_from_prunes_dropped_columns() {
+        let enc = config_with_column_keys("pii:ssn,address.street,gone;geo:address.gone")
+            .without_columns_missing_from(&schema(), ColumnMappingMode::None)
+            .unwrap();
+        assert_eq!(enc.column_keys_property(), "pii:address.street,ssn");
+
+        let err = config_with_column_keys("pii:gone")
+            .without_columns_missing_from(&schema(), ColumnMappingMode::None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("uniform encryption"), "{err}");
     }
 
     #[test]

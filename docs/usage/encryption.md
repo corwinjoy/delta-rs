@@ -28,11 +28,15 @@ never keys or credentials. Key material for each data file lives in the file's o
 key metadata.
 
 `footer_key` is always required: Parquet encrypts the footer with it, or signs the footer with
-it under `plaintext_footer`. There is no footer-less mode. An encrypted footer hides the schema,
-row counts and which columns are encrypted.
+it under `plaintext_footer`. There is no footer-less mode. An encrypted footer hides which
+columns are encrypted and the Parquet-level statistics. This is stricter than the RFC, which
+lets a table keep `kms_id` and `kms_configuration` after its footer key was unset, meaning
+encryption was turned off; delta-rs refuses such a table rather than treat it as plaintext.
 
 Column names in `column_keys` may be dot-separated to name a struct field, which encrypts every
-field under it. Fields inside arrays and maps cannot be named. Partition columns cannot be
+field under it. Names are split on dots: the backtick quoting of the protocol's field-path
+scheme is not supported, so a column whose name contains a dot cannot be given its own key.
+Fields inside arrays and maps cannot be named. Partition columns cannot be
 encrypted, since their values appear in the log. With column mapping the stored names are
 physical names, so renaming a column keeps the configuration valid; delta-rs accepts display
 names at creation and stores the physical names.
@@ -50,6 +54,7 @@ Encryption is set when a table is created and is frozen after that. Every commit
 | Set encryption when creating a table                             | Yes                                         |
 | Set or change encryption with create-or-replace                  | Yes, every data file is replaced            |
 | Change `delta.encryption.kms_configuration`                      | Yes                                         |
+| Drop an encrypted column, which drops it from `column_keys`      | Yes, unless it is the last one              |
 | Turn encryption on or off for an existing table                  | No                                          |
 | Change `kms_id`, `footer_key`, `plaintext_footer` or `column_keys` | No                                       |
 | Restore to a version with a different configuration              | No                                          |
@@ -69,7 +74,9 @@ A replace removes every data file in one commit, but the removed files stay in s
 `vacuum` runs, and the old log entries with their statistics until log cleanup.
 
 Adding columns to a table with `column_keys` leaves the new columns unencrypted, as the RFC
-specifies. Under uniform encryption new columns are encrypted with the footer key.
+specifies. Under uniform encryption new columns are encrypted with the footer key. Dropping an
+encrypted column removes it from `column_keys`, as the RFC requires; dropping the last one is
+refused, since an empty `column_keys` would mean uniform encryption.
 
 Passing `delta.encryption.*` properties to a write on an existing table is an error when they
 differ from the table's, since a write does not change the configuration of an existing table.
@@ -85,6 +92,9 @@ delta-rs does not add it and recognises encrypted tables by their properties ins
 the feature can be added, other engines are not protected.
 
 Any `delta.encryption.*` key marks a table as encrypted, valid or not, so a misconfigured
-table is refused rather than read as ciphertext or written as plaintext. A stray key another
-engine wrote on a plaintext table therefore locks it out of delta-rs; removing the key is
-itself a refused commit, so the way out is create-or-replace.
+table is refused rather than read as ciphertext or written as plaintext. A stray key without
+a footer key, which another engine may leave on a plaintext table, therefore locks it out of
+delta-rs; the configuration is then invalid, so no commit can remove the key, and the way out
+is create-or-replace. A commit may only introduce the `delta.encryption.*` keys listed above,
+which catches typos; a key a later RFC revision adds is tolerated once it is in the table, so
+that the feature flag, not the property names, decides whether delta-rs can open a table.

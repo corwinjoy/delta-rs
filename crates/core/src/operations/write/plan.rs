@@ -35,12 +35,14 @@ use crate::errors::{DeltaResult, DeltaTableError};
 use crate::kernel::schema::cast::{merge_arrow_schema, normalize_for_delta};
 use crate::kernel::{
     Action, ActiveAddOptions, Add, AddStatsPolicy, DeletionVectorDescriptor, EagerSnapshot,
-    Metadata, Protocol, ProtocolExt as _, Remove, Snapshot, StructType, StructTypeExt,
+    Metadata, MetadataExt as _, Protocol, ProtocolExt as _, Remove, Snapshot, StructType,
+    StructTypeExt,
 };
 use crate::logstore::LogStoreRef;
 use crate::operations::cdc::{CDC_COLUMN_NAME, should_write_cdc};
 use crate::operations::get_target_file_size;
 use crate::protocol::SaveMode;
+use crate::table::config::{ENCRYPTION_COLUMN_KEYS_PROP, EncryptionConfig};
 
 /// Schema and protocol actions required before the sink executes the write.
 #[derive(Default)]
@@ -807,6 +809,20 @@ fn schema_delta_for_prepared_source(
         &schema_struct,
         partition_columns,
     )?;
+    // A dropped column leaves `delta.encryption.column_keys` too (RFC schema-change rule).
+    let metadata = match EncryptionConfig::try_from_configuration(&configuration)? {
+        Some(encryption) if !encryption.column_keys.is_empty() => {
+            let pruned = encryption.without_columns_missing_from(
+                &schema_struct,
+                snapshot.table_configuration().column_mapping_mode(),
+            )?;
+            metadata.add_config_key(
+                ENCRYPTION_COLUMN_KEYS_PROP.to_string(),
+                pruned.column_keys_property(),
+            )?
+        }
+        _ => metadata,
+    };
 
     Ok(SchemaDelta {
         metadata: Some(metadata),

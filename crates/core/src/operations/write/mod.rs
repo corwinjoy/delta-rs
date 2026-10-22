@@ -469,6 +469,9 @@ impl WriteBuilder {
                             .filter(|(key, _)| key.starts_with(ENCRYPTION_PROP_PREFIX))
                             .collect();
                         if !given.is_empty() {
+                            EncryptionConfig::check_known_properties(
+                                given.iter().map(|(key, _)| *key),
+                            )?;
                             let current = snapshot.metadata().configuration();
                             let mut merged = current.clone();
                             for (key, value) in &given {
