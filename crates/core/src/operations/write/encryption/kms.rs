@@ -22,11 +22,10 @@
 //! refuses the file rather than guessing.
 //!
 //! # Additional authenticated data
-//! The file name, not the table-relative path, is the AAD prefix, so a table can be moved or
-//! renamed and its files still authenticate; a file copied under its own name elsewhere
-//! does too. The prefix is not stored in the file: readers derive it from the path they are
-//! given, which is relative to the table root on both sides (see
-//! [`FileContext`](crate::datafile::FileContext)).
+//! The file name is the AAD prefix, and it is stored in the file, so the file stays
+//! self-describing: any Parquet reader uses the stored prefix without being told it, which
+//! the key-management-tools readers in parquet-mr and PyArrow could not be. Decryption
+//! supplies no prefix of its own, so files other writers encrypted without one read too.
 
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -196,7 +195,7 @@ fn wrapped_data_key(
     Ok((key, material.to_bytes()?))
 }
 
-/// The file name of `file_path`: the AAD prefix on both the write and the read side.
+/// The file name of `file_path`: the AAD prefix, stored in the file for readers.
 fn aad_prefix(file_path: &Path) -> Vec<u8> {
     file_path
         .filename()
@@ -256,7 +255,7 @@ impl EncryptionFactory for KmsEncryptionFactory {
             .with_footer_key_metadata(footer_metadata)
             .with_plaintext_footer(plaintext_footer)
             .with_aad_prefix(aad_prefix(file_path))
-            .with_aad_prefix_storage(false);
+            .with_aad_prefix_storage(true);
         // A configured column covers every parquet leaf under it, all under one data key.
         for ((key, metadata), leaves) in columns {
             for leaf in leaves {
@@ -267,12 +266,13 @@ impl EncryptionFactory for KmsEncryptionFactory {
         Ok(Some(builder.build()?))
     }
 
-    /// Decryption keys for `file_path`, from its own key metadata and the KMS. Of the
-    /// options only `kms_configuration` is read: see the module documentation.
+    /// Decryption keys for a file, from its own key metadata and the KMS. Of the options
+    /// only `kms_configuration` is read, and the AAD prefix comes from the file: see the
+    /// module documentation.
     async fn get_file_decryption_properties(
         &self,
         config: &EncryptionFactoryOptions,
-        file_path: &Path,
+        _file_path: &Path,
     ) -> DataFusionResult<Option<Arc<FileDecryptionProperties>>> {
         let retriever = Arc::new(KmsKeyRetriever {
             kms: Arc::clone(&self.kms),
@@ -283,9 +283,7 @@ impl EncryptionFactory for KmsEncryptionFactory {
             unwrapped: Mutex::new(HashMap::new()),
         });
         Ok(Some(
-            FileDecryptionProperties::with_key_retriever(retriever)
-                .with_aad_prefix(aad_prefix(file_path))
-                .build()?,
+            FileDecryptionProperties::with_key_retriever(retriever).build()?,
         ))
     }
 }
@@ -535,6 +533,10 @@ mod tests {
         assert_eq!(json["masterKeyID"], "footer-master");
         assert_eq!(json["kmsInstanceID"], "my-kms");
         assert!(json["wrappedDEK"].is_string());
+
+        // The AAD prefix is the file name and is stored in the file for other readers.
+        assert_eq!(properties.aad_prefix(), Some(&b"part-0.parquet".to_vec()));
+        assert!(properties.store_aad_prefix());
     }
 
     /// Decryption uses only the file's key metadata and the KMS: the current table
