@@ -14,6 +14,10 @@
 //! [`ENCRYPTION_KMS_CONFIGURATION_PROP`]; the crate's client cache ignores custom options,
 //! so the factory keeps one [`CryptoFactory`] per distinct `kms_configuration`.
 //!
+//! It is plaintext in the Delta log and anyone who can commit to the table can change it, so a
+//! client factory must treat it as untrusted: a client that takes its endpoint from it should
+//! accept only allowlisted endpoints, or key requests and credentials go wherever the table says.
+//!
 //! The file name is the AAD prefix, stored in the file so any reader uses it untold;
 //! decryption supplies none, so files written without one read too.
 
