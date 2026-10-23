@@ -75,12 +75,14 @@ fn create_table(
     uri: &str,
     columns: Vec<StructField>,
     properties: &[(&str, &str)],
-) -> DeltaResult<CreateBuilder> {
-    Ok(deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
-        .build()?
+) -> CreateBuilder {
+    deltalake_core::DeltaTableBuilder::from_url(table_url(uri))
+        .unwrap()
+        .build()
+        .unwrap()
         .create()
         .with_columns(columns)
-        .with_configuration(properties.iter().map(|(k, v)| (*k, Some(*v)))))
+        .with_configuration(properties.iter().map(|(k, v)| (*k, Some(*v))))
 }
 
 async fn load_table(uri: &str) -> DeltaResult<DeltaTable> {
@@ -91,7 +93,7 @@ async fn load_table(uri: &str) -> DeltaResult<DeltaTable> {
 
 /// Create a uniformly encrypted table at `uri` and write two batches to it.
 async fn create_encrypted_table(uri: &str, kms_id: &str) -> DeltaResult<()> {
-    create_table(uri, get_table_columns(), &encryption(kms_id))?.await?;
+    create_table(uri, get_table_columns(), &encryption(kms_id)).await?;
     let batch = get_table_batches();
     let table = load_table(uri).await?.write(vec![batch.clone()]).await?;
     table.write(vec![batch]).await?;
@@ -250,7 +252,7 @@ async fn test_partially_configured_encryption_is_rejected() -> DeltaResult<()> {
     ] {
         let dir = TempDir::new()?;
         let uri = dir.path().to_str().unwrap();
-        let err = create_table(uri, get_table_columns(), &[(prop, value)])?
+        let err = create_table(uri, get_table_columns(), &[(prop, value)])
             .await
             .expect_err("a partial encryption configuration must be rejected")
             .to_string();
@@ -265,7 +267,7 @@ async fn test_unregistered_factory_errors_on_write() -> DeltaResult<()> {
     let unregistered = format!("never-registered-{}", Uuid::new_v4());
     let dir = TempDir::new()?;
     let uri = dir.path().to_str().unwrap();
-    create_table(uri, get_table_columns(), &encryption(&unregistered))?.await?;
+    create_table(uri, get_table_columns(), &encryption(&unregistered)).await?;
 
     let table = load_table(uri).await?;
     let err = table
@@ -401,7 +403,7 @@ async fn test_writers_refuse_tables_whose_encryption_settings_changed() -> Delta
             footer,
             ("delta.encryption.column_keys", "test-key:int"),
         ],
-    )?
+    )
     .await?;
     let mut writer = RecordBatchWriter::for_table(&column_keyed)?;
     writer.write(get_table_batches()).await?;
@@ -473,7 +475,7 @@ async fn test_column_key_on_a_struct_encrypts_its_leaves() -> DeltaResult<()> {
             StructField::new("address", DataType::Struct(Box::new(address)), true),
         ],
         &[kms, footer, ("delta.encryption.column_keys", "pii:address")],
-    )?
+    )
     .await?;
 
     let street: ArrayRef = Arc::new(StringArray::from(vec!["1 Main St", "2 High St"]));
@@ -553,7 +555,7 @@ async fn test_misspelled_property_is_rejected_alongside_encryption() -> DeltaRes
         uri,
         get_table_columns(),
         &[kms, footer, ("delta.enableChangeDataFed", "true")],
-    )?
+    )
     .await;
     assert!(result.is_err(), "a misspelled property must be rejected");
 
@@ -594,7 +596,7 @@ async fn test_no_log_statistics_for_encrypted_columns() -> DeltaResult<()> {
             tmp.path().to_str().unwrap(),
             get_table_columns(),
             &properties,
-        )?
+        )
         .await?;
         table.write(vec![get_table_batches()]).await?;
 
@@ -648,7 +650,7 @@ async fn test_added_columns_on_a_column_keyed_table_are_plaintext() -> DeltaResu
                 footer,
                 ("delta.encryption.column_keys", "test-key:int"),
             ],
-        )?
+        )
         .await?;
         let table = table
             .write(vec![widened.clone()])
