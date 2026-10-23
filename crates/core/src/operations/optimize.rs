@@ -1009,7 +1009,7 @@ pub async fn create_merge_plan(
     let writer_properties =
         writer_properties.apply_parquet_default(|| Ok(OPTIMIZE_PARQUET_PROPERTIES.clone()))?;
     let writer_properties =
-        writer_properties.for_table(snapshot.table_configuration(), Some(session.runtime_env()))?;
+        writer_properties.for_table(snapshot.table_configuration(), session.runtime_env())?;
     let partitions_keys = snapshot.metadata().partition_columns();
 
     let (operations, metrics, planner_stats) = match optimize_type {

@@ -836,10 +836,9 @@ fn schema_delta_for_prepared_source(
 }
 
 /// Columns a write adds to a table encrypted with `column_keys` are written in plaintext,
-/// as the RFC specifies: only the listed columns are encrypted. Say so, naming the leaves,
-/// since a user may not expect new data in an encrypted table to be plaintext. A field added
-/// under a keyed struct is covered by its key and not named. Runs for every schema mode,
-/// since an overwrite can add columns too.
+/// as the RFC specifies, which a user may not expect: warn, naming them. A field added under
+/// a keyed struct is covered by its key and not named. An overwrite can add columns too, so
+/// this runs for every schema mode.
 fn warn_about_plaintext_new_columns(snapshot: &EagerSnapshot, source_schema: &Schema) {
     let configuration = snapshot.metadata().configuration();
     let Ok(Some(enc)) = EncryptionConfig::try_from_configuration(configuration) else {
@@ -873,7 +872,7 @@ fn warn_about_plaintext_new_columns(snapshot: &EagerSnapshot, source_schema: &Sc
     }
 }
 
-/// Leaves of `fields` that `table` lacks, by display path, skipping anything under a column
+/// Fields of `fields` that `table` lacks, by display path, skipping anything under a column
 /// in `keyed` (physical paths, as `column_keys` stores them).
 fn new_plaintext_leaves(
     fields: &arrow_schema::Fields,
@@ -894,7 +893,7 @@ fn new_plaintext_leaves(
     for field in fields {
         let logical = join(logical_prefix, field.name());
         let Some(existing) = table.field(field.name()) else {
-            leaf_paths(field, &logical, added);
+            added.push(logical);
             continue;
         };
         let physical = join(physical_prefix, existing.physical_name(mode));
@@ -916,17 +915,6 @@ fn new_plaintext_leaves(
                 added,
             );
         }
-    }
-}
-
-fn leaf_paths(field: &arrow_schema::Field, path: &str, out: &mut Vec<String>) {
-    match field.data_type() {
-        arrow_schema::DataType::Struct(children) => {
-            for child in children {
-                leaf_paths(child, &format!("{path}.{}", child.name()), out);
-            }
-        }
-        _ => out.push(path.to_string()),
     }
 }
 

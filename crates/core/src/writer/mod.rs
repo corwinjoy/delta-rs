@@ -1,5 +1,7 @@
 //! Abstractions and implementations for writing data to delta tables
 
+use std::collections::HashMap;
+
 use arrow::{datatypes::FieldRef, datatypes::SchemaRef, error::ArrowError};
 use async_trait::async_trait;
 use object_store::Error as ObjectStoreError;
@@ -28,13 +30,14 @@ pub mod test_utils;
 /// Preview cap for validation errors that enumerate offending records/rows.
 pub(crate) const INVALID_PREVIEW_CAP: usize = 10;
 
+/// Refuse a table (by its metadata `configuration`) the legacy writers cannot write: one
+/// with column mapping, or an encrypted one this build cannot encrypt for. `flush` uploads
+/// without a commit check, so this runs before a sink opens.
 pub(crate) fn ensure_legacy_writer_supports_table(
-    table: &DeltaTable,
+    configuration: &HashMap<String, String>,
     operation: &str,
 ) -> Result<(), DeltaTableError> {
-    if table
-        .snapshot()?
-        .table_config()
+    if delta_kernel::table_properties::TableProperties::from(configuration.iter())
         .column_mapping_mode
         .is_some_and(|mode| mode != delta_kernel::table_features::ColumnMappingMode::None)
     {
@@ -43,35 +46,11 @@ pub(crate) fn ensure_legacy_writer_supports_table(
             operation,
         ));
     }
-    // `flush` uploads without a commit check, so refuse before a sink opens.
     crate::kernel::transaction::PROTOCOL.check_encryption(
-        table.snapshot()?.metadata().configuration(),
+        configuration,
         crate::kernel::transaction::WRITES_ENCRYPTED_TABLES,
     )?;
     Ok(())
-}
-
-/// `props` encrypting as `configuration`, an encrypted legacy writer's table configuration,
-/// says. The legacy writers have no DataFusion session, so the KMS factory comes from the
-/// process-wide registry only. An unregistered factory, or a build without `datafusion` +
-/// `encryption`, is an error, never a plaintext write.
-pub(crate) fn apply_legacy_writer_encryption(
-    props: crate::datafile::DeltaWriterProperties,
-    configuration: &std::collections::HashMap<String, String>,
-) -> Result<crate::datafile::DeltaWriterProperties, DeltaTableError> {
-    #[cfg(feature = "datafusion")]
-    {
-        crate::operations::write::encryption::apply_encryption(props, configuration, None)
-    }
-    #[cfg(not(feature = "datafusion"))]
-    {
-        let _ = (props, configuration);
-        Err(DeltaTableError::Generic(
-            "This table's delta.encryption.* properties require the 'datafusion' and \
-             'encryption' features; the legacy writers cannot encrypt without them"
-                .to_string(),
-        ))
-    }
 }
 
 /// Enum representing an error when calling [`DeltaWriter`].

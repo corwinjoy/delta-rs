@@ -1,41 +1,30 @@
 //! The reference [`EncryptionFactory`]: the Parquet Key Management Tools over a pluggable KMS.
 //!
-//! Key generation, wrapping and the key material format are
-//! [`parquet_key_management`]'s, the Rust implementation of the Parquet Key Management
-//! Tools (PKMT) API shared with parquet-java and PyArrow. Each file gets its own random data
-//! encryption keys, wrapped through a [`KmsClient`](parquet_key_management::kms::KmsClient)
-//! under the master key IDs the table properties name, and the wrapped keys are stored in
-//! the file's own Parquet key metadata as `PKMT1` key material. Readers unwrap them through
-//! the same KMS. The KMS only ever wraps and unwraps keys; it never sees the data.
+//! Key generation, wrapping and the key material format are [`parquet_key_management`]'s,
+//! the Rust implementation of the Parquet Key Management Tools (PKMT) API that parquet-java
+//! and PyArrow share. Each file gets its own random data keys, wrapped through a
+//! [`KmsClient`](parquet_key_management::kms::KmsClient) under the master key IDs the table
+//! names, and stored in the file's own key metadata as `PKMT1` key material; readers unwrap
+//! them through the same KMS, which never sees the data.
 //!
-//! This module adapts that crate to DataFusion's [`EncryptionFactory`]: it maps the
-//! `delta.encryption.*` properties to the crate's configuration and builds the parquet
-//! encryption properties from the keys it returns. The crate's own parquet and DataFusion
-//! integrations are not used, so delta-rs can follow arrow and parquet releases without
-//! waiting for it.
+//! This module maps the `delta.encryption.*` properties to the crate's configuration and
+//! builds the parquet encryption properties from the keys it returns. The crate's own
+//! parquet and DataFusion integrations are not used, so delta-rs can follow arrow and
+//! parquet releases without waiting for it.
 //!
-//! # What a reader depends on
-//! Decryption needs only the KMS named by `delta.encryption.kms_id` (via
-//! `delta.encryption.kms_configuration`, if the KMS client reads it) and the key metadata
-//! in the file. The table's current `footer_key` and `column_keys` play no part, as the
-//! Delta protocol RFC requires: they describe how new files are written and may have
-//! changed since a file was written. [`KmsEncryptionFactory::get_file_decryption_properties`]
-//! does not read them even when a caller passes them.
+//! Decryption needs only the KMS named by `kms_id` (configured by `kms_configuration`) and
+//! the file's key metadata, never the table's current `footer_key` or `column_keys`, as the
+//! RFC requires: they may have changed since the file was written.
 //!
-//! # KMS connection
-//! `delta.encryption.kms_id` becomes the KMS instance ID, written into the footer key
-//! material as `kmsInstanceID`. `delta.encryption.kms_configuration`, when set, reaches the
-//! [`KmsClientFactory`](parquet_key_management::kms::KmsClientFactory) as the custom KMS
-//! option named [`ENCRYPTION_KMS_CONFIGURATION_PROP`]. The crate caches KMS clients by
-//! instance ID, URL and access token, not by custom options, so the factory keeps one
-//! [`CryptoFactory`] per distinct `kms_configuration`: tables that differ in it never share
-//! a client, and a changed `kms_configuration` takes effect on the next file.
+//! `kms_id` is the KMS instance ID, stored in the footer key material as `kmsInstanceID`.
+//! `kms_configuration` reaches the [`KmsClientFactory`](parquet_key_management::kms::KmsClientFactory)
+//! as the custom KMS option named [`ENCRYPTION_KMS_CONFIGURATION_PROP`]. The crate caches
+//! clients by instance ID, URL and access token only, so the factory keeps one
+//! [`CryptoFactory`] per distinct `kms_configuration`.
 //!
-//! # Additional authenticated data
-//! The file name is the AAD prefix, and it is stored in the file, so the file stays
-//! self-describing: any Parquet reader uses the stored prefix without being told it, which
-//! the key-management-tools readers in parquet-mr and PyArrow could not be. Decryption
-//! supplies no prefix of its own, so files other writers encrypted without one read too.
+//! The file name is the AAD prefix and is stored in the file, so any Parquet reader uses it
+//! without being told. Decryption supplies no prefix of its own, so files other writers
+//! encrypted without one read too.
 
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -57,7 +46,6 @@ use parquet_key_management::crypto_factory::{
 use parquet_key_management::key_unwrapper::KeyUnwrapper;
 use parquet_key_management::kms::KmsConnectionConfig;
 
-use super::COERCE_TYPES_OPTION;
 use crate::kernel::spawn_blocking_with_span;
 use crate::table::config::{
     ENCRYPTION_FOOTER_KEY_PROP, ENCRYPTION_KMS_CONFIGURATION_PROP, ENCRYPTION_KMS_ID_PROP,
@@ -68,15 +56,16 @@ use crate::table::config::{
 /// `delta.encryption.*` properties. See the module documentation.
 pub struct KmsEncryptionFactory {
     make_crypto: Box<dyn Fn() -> CryptoFactory + Send + Sync>,
-    /// `kms_configuration` → the crypto factory, with its KMS client cache, for it.
-    by_configuration: DashMap<Option<String>, Arc<CryptoFactory>>,
+    // ponytail: one CryptoFactory per `kms_configuration` because the crate's client cache
+    // ignores custom options; collapses to one once parquet-key-management keys on them.
+    /// `kms_configuration` (`""` when unset) → the crypto factory for it.
+    by_configuration: DashMap<String, Arc<CryptoFactory>>,
 }
 
 impl KmsEncryptionFactory {
     /// A factory whose [`CryptoFactory`]s `make_crypto` builds, one per distinct
-    /// `kms_configuration` (see the module documentation): typically
-    /// `|| CryptoFactory::new(my_kms_client_factory.clone())`, or one of the crate's async
-    /// constructors with its runtime features.
+    /// `kms_configuration`: typically `|| CryptoFactory::new(my_kms_client_factory.clone())`,
+    /// or one of the crate's async constructors.
     pub fn new(make_crypto: impl Fn() -> CryptoFactory + Send + Sync + 'static) -> Self {
         Self {
             make_crypto: Box::new(make_crypto),
@@ -85,10 +74,14 @@ impl KmsEncryptionFactory {
     }
 
     fn crypto(&self, kms_configuration: Option<&str>) -> Arc<CryptoFactory> {
+        let key = kms_configuration.unwrap_or_default();
+        if let Some(crypto) = self.by_configuration.get(key) {
+            return Arc::clone(&crypto);
+        }
         Arc::clone(
             &self
                 .by_configuration
-                .entry(kms_configuration.map(str::to_string))
+                .entry(key.to_string())
                 .or_insert_with(|| Arc::new((self.make_crypto)())),
         )
     }
@@ -134,11 +127,11 @@ impl EncryptionFactory for KmsEncryptionFactory {
     async fn get_file_encryption_properties(
         &self,
         config: &EncryptionFactoryOptions,
-        schema: &Arc<ArrowSchema>,
+        _schema: &Arc<ArrowSchema>,
         file_path: &Path,
     ) -> DataFusionResult<Option<Arc<FileEncryptionProperties>>> {
-        // The options are the table's `delta.encryption.*` properties
-        // (`EncryptionConfig::writer_factory_options`).
+        // The options are the table's properties with `column_keys` already resolved to the
+        // file's parquet leaf paths (`EncryptionConfig::writer_factory_options`).
         let enc = EncryptionConfig::try_from_configuration(&config.options)?.ok_or_else(|| {
             DataFusionError::Configuration(format!(
                 "encryption factory option '{ENCRYPTION_FOOTER_KEY_PROP}' is required to encrypt"
@@ -146,13 +139,8 @@ impl EncryptionFactory for KmsEncryptionFactory {
         })?;
         let mut encryption = EncryptionConfiguration::builder(enc.footer_key.clone())
             .set_plaintext_footer(enc.plaintext_footer);
-        // A configured column covers every parquet leaf under it.
-        let coerce_types = config
-            .options
-            .get(COERCE_TYPES_OPTION)
-            .is_some_and(|v| v == "true");
-        for (master_key_id, leaves) in enc.column_key_leaves(schema, coerce_types)? {
-            encryption = encryption.add_column_key(master_key_id, leaves);
+        for (master_key_id, leaves) in &enc.column_keys {
+            encryption = encryption.add_column_key(master_key_id.clone(), leaves.clone());
         }
         let encryption = encryption.build().map_err(external)?;
         let connection = connection(Some(&enc.kms_id), enc.kms_configuration.as_deref());
@@ -180,9 +168,8 @@ impl EncryptionFactory for KmsEncryptionFactory {
         Ok(Some(builder.build()?))
     }
 
-    /// Decryption keys for a file, from its own key metadata and the KMS. Of the options
-    /// only `kms_id` and `kms_configuration` are read, and the AAD prefix comes from the
-    /// file: see the module documentation.
+    /// Decryption keys for a file, from its own key metadata and the KMS; of the options
+    /// only `kms_id` and `kms_configuration` are read.
     async fn get_file_decryption_properties(
         &self,
         config: &EncryptionFactoryOptions,
@@ -221,34 +208,6 @@ impl KeyRetriever for KmsKeyRetriever {
     }
 }
 
-/// Resolve the key metadata of every key in a file's encryption properties, for tests and
-/// diagnostics: the footer key material, then the column key materials by column name.
-#[cfg(test)]
-pub(crate) fn key_materials(
-    properties: &FileEncryptionProperties,
-) -> crate::errors::DeltaResult<(
-    parquet_key_management::key_material::KeyMaterial,
-    std::collections::HashMap<String, parquet_key_management::key_material::KeyMaterial>,
-)> {
-    use crate::errors::DeltaTableError;
-    let parse = |bytes: &[u8]| {
-        serde_json::from_slice(bytes).map_err(|e| {
-            DeltaTableError::Generic(format!("the key metadata is not PKMT key material: {e}"))
-        })
-    };
-    let footer = parse(
-        properties
-            .footer_key_metadata()
-            .ok_or_else(|| DeltaTableError::Generic("no footer key metadata".to_string()))?,
-    )?;
-    let mut columns = std::collections::HashMap::new();
-    let (names, _keys, metadatas) = properties.column_keys();
-    for (name, metadata) in names.into_iter().zip(metadatas) {
-        columns.insert(name, parse(&metadata)?);
-    }
-    Ok((footer, columns))
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -264,6 +223,23 @@ mod tests {
     use super::*;
     use crate::table::config::{ENCRYPTION_COLUMN_KEYS_PROP, ENCRYPTION_KMS_ID_PROP};
     use crate::test_utils::kms_encryption::{InMemoryKmsClient, mock_kms_factory};
+    use parquet_key_management::key_material::KeyMaterial;
+
+    /// The footer key material and the column key materials by column name.
+    fn key_materials(
+        properties: &FileEncryptionProperties,
+    ) -> (KeyMaterial, std::collections::HashMap<String, KeyMaterial>) {
+        let parse =
+            |bytes: &[u8]| KeyMaterial::deserialize(std::str::from_utf8(bytes).unwrap()).unwrap();
+        let footer = parse(properties.footer_key_metadata().unwrap());
+        let (names, _keys, metadatas) = properties.column_keys();
+        let columns = names
+            .into_iter()
+            .zip(metadatas)
+            .map(|(name, metadata)| (name, parse(&metadata)))
+            .collect();
+        (footer, columns)
+    }
 
     fn options(entries: &[(&str, &str)]) -> EncryptionFactoryOptions {
         let mut options = EncryptionFactoryOptions::default();
@@ -384,35 +360,6 @@ mod tests {
         );
     }
 
-    /// Column keys name the leaves the writer will produce: with `coerce_types` a list's
-    /// leaf is `tags.list.element`, otherwise `tags.list.item`.
-    #[tokio::test]
-    async fn column_key_leaves_follow_the_writers_coerce_types() {
-        let schema = Arc::new(Schema::new(vec![Field::new(
-            "tags",
-            DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
-            true,
-        )]));
-        for (coerce, leaf) in [("false", "tags.list.item"), ("true", "tags.list.element")] {
-            let properties = mock_kms_factory()
-                .get_file_encryption_properties(
-                    &options(&[
-                        (ENCRYPTION_KMS_ID_PROP, "kms"),
-                        (ENCRYPTION_FOOTER_KEY_PROP, "fk"),
-                        (ENCRYPTION_COLUMN_KEYS_PROP, "k:tags"),
-                        (COERCE_TYPES_OPTION, coerce),
-                    ]),
-                    &schema,
-                    &Path::from("part-0.parquet"),
-                )
-                .await
-                .unwrap()
-                .unwrap();
-            let (names, _, _) = properties.column_keys();
-            assert_eq!(names, vec![leaf.to_string()]);
-        }
-    }
-
     /// Each key gets its own wrapped data key, stored in the file as PKMT1 key material.
     #[tokio::test]
     async fn key_material_names_the_master_keys() {
@@ -422,6 +369,7 @@ mod tests {
                 &options(&[
                     (ENCRYPTION_KMS_ID_PROP, "my-kms"),
                     (ENCRYPTION_FOOTER_KEY_PROP, "footer-master"),
+                    // Leaf paths, as the encryption layer passes them.
                     (ENCRYPTION_COLUMN_KEYS_PROP, "pii-master:ssn"),
                 ]),
                 &batch().schema(),
@@ -430,8 +378,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let (footer, columns) = key_materials(&properties).unwrap();
-        assert_eq!(footer.key_material_type, "PKMT1");
+        let (footer, columns) = key_materials(&properties);
         assert!(footer.is_footer_key);
         assert_eq!(footer.master_key_id, "footer-master");
         assert_eq!(footer.kms_instance_id.as_deref(), Some("my-kms"));

@@ -1,8 +1,4 @@
 //! Integration tests for Parquet encryption via `delta.encryption.*` table properties.
-//!
-//! Tests are split across branches:
-//!   - enc-write-path: factory registry + physical-encryption verification (no read-back)
-//!   - enc-read-path:  full round-trip read/write, optimize, DML
 
 use arrow::{
     array::{Int32Array, StringArray, TimestampMicrosecondArray},
@@ -10,6 +6,7 @@ use arrow::{
     record_batch::RecordBatch,
 };
 use deltalake_core::kernel::{DataType, PrimitiveType, StructField};
+use deltalake_core::operations::create::CreateBuilder;
 use deltalake_core::operations::write::encryption::register_encryption_factory;
 use deltalake_core::test_utils::kms_encryption::mock_kms_factory;
 use deltalake_core::{DeltaResult, DeltaTable};
@@ -65,21 +62,38 @@ fn table_url(uri: &str) -> Url {
     Url::from_directory_path(uri).unwrap()
 }
 
-async fn create_encrypted_table(uri: &str, kms_id: &str) -> DeltaResult<()> {
-    let table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?.build()?;
-    table
-        .create()
-        .with_columns(get_table_columns())
-        .with_table_name("test")
-        .with_property("delta.encryption.kms_id", kms_id)
-        .with_property("delta.encryption.footer_key", "test-footer-key")
-        .await?;
+/// The two properties that encrypt a table uniformly under `kms_id`.
+fn encryption(kms_id: &str) -> [(&'static str, &str); 2] {
+    [
+        ("delta.encryption.kms_id", kms_id),
+        ("delta.encryption.footer_key", "test-footer-key"),
+    ]
+}
 
-    let table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
+/// A create of a table at `uri` with `columns` and `properties`, to await or configure further.
+fn create_table(
+    uri: &str,
+    columns: Vec<StructField>,
+    properties: &[(&str, &str)],
+) -> DeltaResult<CreateBuilder> {
+    Ok(deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
+        .build()?
+        .create()
+        .with_columns(columns)
+        .with_configuration(properties.iter().map(|(k, v)| (*k, Some(*v)))))
+}
+
+async fn load_table(uri: &str) -> DeltaResult<DeltaTable> {
+    deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
         .load()
-        .await?;
+        .await
+}
+
+/// Create a uniformly encrypted table at `uri` and write two batches to it.
+async fn create_encrypted_table(uri: &str, kms_id: &str) -> DeltaResult<()> {
+    create_table(uri, get_table_columns(), &encryption(kms_id))?.await?;
     let batch = get_table_batches();
-    let table = table.write(vec![batch.clone()]).await?;
+    let table = load_table(uri).await?.write(vec![batch.clone()]).await?;
     table.write(vec![batch]).await?;
     Ok(())
 }
@@ -122,11 +136,6 @@ fn add_stats(dir: &std::path::Path) -> Vec<serde_json::Value> {
     stats
 }
 
-// ---------------------------------------------------------------------------
-// Tests available at the enc-write-path stage
-// (no DataFusion read-back required)
-// ---------------------------------------------------------------------------
-
 /// Critical correctness test: verify files are physically encrypted on disk.
 /// Opens each parquet file with the raw reader (no decryption) and asserts
 /// the read fails, proving the encryption was applied to the footer.
@@ -150,9 +159,7 @@ async fn test_caller_writer_properties_cannot_defeat_encryption() -> DeltaResult
     let uri = dir.path().to_str().unwrap();
     create_encrypted_table(uri, &kms_id).await?;
 
-    let table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
-        .load()
-        .await?;
+    let table = load_table(uri).await?;
     table
         .write(vec![get_table_batches()])
         .with_writer_properties(WriterProperties::builder().build())
@@ -173,9 +180,7 @@ async fn test_legacy_record_batch_writer_is_encrypted() -> DeltaResult<()> {
     let uri = dir.path().to_str().unwrap();
     create_encrypted_table(uri, &kms_id).await?;
 
-    let mut table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
-        .load()
-        .await?;
+    let mut table = load_table(uri).await?;
     let mut writer = RecordBatchWriter::for_table(&table)?;
     writer.write(get_table_batches()).await?;
     writer.flush_and_commit(&mut table).await?;
@@ -195,9 +200,7 @@ async fn test_insert_into_datasink_is_encrypted() -> DeltaResult<()> {
     let uri = dir.path().to_str().unwrap();
     create_encrypted_table(uri, &kms_id).await?;
 
-    let table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
-        .load()
-        .await?;
+    let table = load_table(uri).await?;
     let ctx = SessionContext::new();
     ctx.register_table("t", table.table_provider().await?)?;
     ctx.sql("INSERT INTO t (int, string) VALUES (42, 'Z')")
@@ -251,11 +254,7 @@ async fn test_partially_configured_encryption_is_rejected() -> DeltaResult<()> {
     ] {
         let dir = TempDir::new()?;
         let uri = dir.path().to_str().unwrap();
-        let table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?.build()?;
-        let err = table
-            .create()
-            .with_columns(get_table_columns())
-            .with_property(prop, value)
+        let err = create_table(uri, get_table_columns(), &[(prop, value)])?
             .await
             .expect_err("a partial encryption configuration must be rejected")
             .to_string();
@@ -271,17 +270,9 @@ async fn test_unregistered_factory_errors_on_write() -> DeltaResult<()> {
     let unregistered = format!("never-registered-{}", Uuid::new_v4());
     let dir = TempDir::new()?;
     let uri = dir.path().to_str().unwrap();
-    let table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?.build()?;
-    table
-        .create()
-        .with_columns(get_table_columns())
-        .with_property("delta.encryption.kms_id", unregistered.as_str())
-        .with_property("delta.encryption.footer_key", "test-footer-key")
-        .await?;
+    create_table(uri, get_table_columns(), &encryption(&unregistered))?.await?;
 
-    let table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
-        .load()
-        .await?;
+    let table = load_table(uri).await?;
     let err = table
         .write(vec![get_table_batches()])
         .await
@@ -308,9 +299,7 @@ async fn test_record_batch_writer_try_new_is_encrypted() -> DeltaResult<()> {
     let mut writer =
         RecordBatchWriter::try_new(table_url(uri).as_str(), batch.schema(), None, None)?;
     writer.write(batch).await?;
-    let mut table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
-        .load()
-        .await?;
+    let mut table = load_table(uri).await?;
     writer.flush_and_commit(&mut table).await?;
 
     assert_all_parquets_encrypted(dir.path()).await;
@@ -334,9 +323,7 @@ async fn test_record_batch_writer_refuses_plaintext_for_table_created_encrypted(
         RecordBatchWriter::try_new(table_url(uri).as_str(), batch.schema(), None, None)?;
     writer.write(batch).await?;
     create_encrypted_table(uri, &kms_id).await?;
-    let mut table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
-        .load()
-        .await?;
+    let mut table = load_table(uri).await?;
     let version = table.version();
 
     let err = writer
@@ -388,16 +375,13 @@ async fn test_record_batch_writer_rechecks_the_table_after_a_missing_table_flush
 async fn replace_table(uri: &str, properties: &[(&str, &str)]) -> DeltaResult<DeltaTable> {
     use deltalake_core::protocol::SaveMode;
 
-    let mut create = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
-        .load()
+    load_table(uri)
         .await?
         .create()
         .with_columns(get_table_columns())
-        .with_save_mode(SaveMode::Overwrite);
-    for (key, value) in properties {
-        create = create.with_property(*key, *value);
-    }
-    create.await
+        .with_save_mode(SaveMode::Overwrite)
+        .with_configuration(properties.iter().map(|(k, v)| (*k, Some(*v))))
+        .await
 }
 
 /// A writer's files are refused by a table whose frozen encryption settings differ from
@@ -411,19 +395,19 @@ async fn test_writers_refuse_tables_whose_encryption_settings_changed() -> Delta
     let kms_id = register_fresh_factory();
     let dir = TempDir::new()?;
     let uri = dir.path().to_str().unwrap();
-    let encryption = [
-        ("delta.encryption.kms_id", kms_id.as_str()),
-        ("delta.encryption.footer_key", "test-footer-key"),
-    ];
+    let encryption = encryption(&kms_id);
+    let [kms, footer] = encryption;
 
-    let column_keyed = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
-        .build()?
-        .create()
-        .with_columns(get_table_columns())
-        .with_property("delta.encryption.kms_id", kms_id.as_str())
-        .with_property("delta.encryption.footer_key", "test-footer-key")
-        .with_property("delta.encryption.column_keys", "test-key:int")
-        .await?;
+    let column_keyed = create_table(
+        uri,
+        get_table_columns(),
+        &[
+            kms,
+            footer,
+            ("delta.encryption.column_keys", "test-key:int"),
+        ],
+    )?
+    .await?;
     let mut writer = RecordBatchWriter::for_table(&column_keyed)?;
     writer.write(get_table_batches()).await?;
     let mut uniform = replace_table(uri, &encryption).await?;
@@ -461,9 +445,7 @@ async fn test_record_batch_writer_try_new_commits_an_empty_window() -> DeltaResu
     let dir = TempDir::new()?;
     let uri = dir.path().to_str().unwrap();
     create_encrypted_table(uri, &kms_id).await?;
-    let mut table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
-        .load()
-        .await?;
+    let mut table = load_table(uri).await?;
     let mut writer = RecordBatchWriter::try_new(
         table_url(uri).as_str(),
         get_table_batches().schema(),
@@ -488,17 +470,16 @@ async fn test_column_key_on_a_struct_encrypts_its_leaves() -> DeltaResult<()> {
         StructField::new("street", DataType::Primitive(PrimitiveType::String), true),
         StructField::new("city", DataType::Primitive(PrimitiveType::String), true),
     ])?;
-    let table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
-        .build()?
-        .create()
-        .with_columns([
+    let [kms, footer] = encryption(&kms_id);
+    let table = create_table(
+        uri,
+        vec![
             StructField::new("id", DataType::Primitive(PrimitiveType::Integer), false),
             StructField::new("address", DataType::Struct(Box::new(address)), true),
-        ])
-        .with_property("delta.encryption.kms_id", kms_id.as_str())
-        .with_property("delta.encryption.footer_key", "test-footer-key")
-        .with_property("delta.encryption.column_keys", "pii:address")
-        .await?;
+        ],
+        &[kms, footer, ("delta.encryption.column_keys", "pii:address")],
+    )?
+    .await?;
 
     let street: ArrayRef = Arc::new(StringArray::from(vec!["1 Main St", "2 High St"]));
     let city: ArrayRef = Arc::new(StringArray::from(vec!["Springfield", "Shelbyville"]));
@@ -572,18 +553,17 @@ async fn test_misspelled_property_is_rejected_alongside_encryption() -> DeltaRes
     let kms_id = register_fresh_factory();
     let dir = TempDir::new()?;
     let uri = dir.path().to_str().unwrap();
-    let table = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?.build()?;
-    let result = table
-        .clone()
-        .create()
-        .with_columns(get_table_columns())
-        .with_property("delta.encryption.kms_id", kms_id.as_str())
-        .with_property("delta.encryption.footer_key", "test-footer-key")
-        .with_property("delta.enableChangeDataFed", "true")
-        .await;
+    let [kms, footer] = encryption(&kms_id);
+    let result = create_table(
+        uri,
+        get_table_columns(),
+        &[kms, footer, ("delta.enableChangeDataFed", "true")],
+    )?
+    .await;
     assert!(result.is_err(), "a misspelled property must be rejected");
 
-    let result = table
+    let result = deltalake_core::DeltaTableBuilder::from_url(table_url(uri))?
+        .build()?
         .write(vec![get_table_batches()])
         .with_configuration(vec![
             ("delta.encryption.kms_id".to_string(), Some(kms_id)),
@@ -611,18 +591,16 @@ async fn test_no_log_statistics_for_encrypted_columns() -> DeltaResult<()> {
         [("test-key:int", false, true), ("", false, false)]
     {
         let tmp = TempDir::new().unwrap();
-        let table =
-            deltalake_core::DeltaTableBuilder::from_url(table_url(tmp.path().to_str().unwrap()))?
-                .build()?;
-        let mut create = table
-            .create()
-            .with_columns(get_table_columns())
-            .with_property("delta.encryption.kms_id", &kms_id)
-            .with_property("delta.encryption.footer_key", "test-footer-key");
+        let mut properties = encryption(&kms_id).to_vec();
         if !column_keys.is_empty() {
-            create = create.with_property("delta.encryption.column_keys", column_keys);
+            properties.push(("delta.encryption.column_keys", column_keys));
         }
-        let table = create.await?;
+        let table = create_table(
+            tmp.path().to_str().unwrap(),
+            get_table_columns(),
+            &properties,
+        )?
+        .await?;
         table.write(vec![get_table_batches()]).await?;
 
         for stats in add_stats(tmp.path()) {
@@ -645,63 +623,16 @@ async fn test_no_log_statistics_for_encrypted_columns() -> DeltaResult<()> {
     Ok(())
 }
 
-/// Adding a column to a table with `column_keys` is allowed; the new column is plaintext
-/// (and so keeps its statistics) while the keyed column stays encrypted.
+/// Adding a column to a table with `column_keys`, by schema merge or overwrite, is allowed;
+/// the new column is plaintext (and so keeps its statistics) while the keyed column stays
+/// encrypted.
 #[tokio::test]
-async fn test_schema_evolution_adds_plaintext_columns_to_column_keyed_table() -> DeltaResult<()> {
-    use deltalake_core::operations::write::SchemaMode;
-
-    let kms_id = register_fresh_factory();
-    let tmp = TempDir::new().unwrap();
-    let table =
-        deltalake_core::DeltaTableBuilder::from_url(table_url(tmp.path().to_str().unwrap()))?
-            .build()?
-            .create()
-            .with_columns(get_table_columns())
-            .with_property("delta.encryption.kms_id", &kms_id)
-            .with_property("delta.encryption.footer_key", "test-footer-key")
-            .with_property("delta.encryption.column_keys", "test-key:int")
-            .await?;
-
-    let batch = get_table_batches();
-    let mut fields = batch.schema().fields().to_vec();
-    fields.push(Arc::new(Field::new("extra", ArrowDataType::Int32, true)));
-    let mut columns = batch.columns().to_vec();
-    columns.push(Arc::new(Int32Array::from(vec![Some(1); batch.num_rows()])));
-    let widened = RecordBatch::try_new(Arc::new(ArrowSchema::new(fields)), columns).unwrap();
-
-    let table = table
-        .write(vec![widened])
-        .with_schema_mode(SchemaMode::Merge)
-        .await?;
-    assert!(table.snapshot()?.schema().field("extra").is_some());
-
-    let stats = &add_stats(tmp.path())[0];
-    assert!(stats["minValues"].get("extra").is_some(), "{stats}");
-    assert!(stats["minValues"].get("int").is_none(), "{stats}");
-    assert_all_parquets_encrypted(tmp.path()).await;
-    Ok(())
-}
-
-/// An overwrite with `SchemaMode::Overwrite` can add columns too; they are plaintext (with
-/// statistics) while the keyed column stays encrypted, as for a merge.
-#[tokio::test]
-async fn test_schema_overwrite_adds_plaintext_columns_to_column_keyed_table() -> DeltaResult<()> {
+async fn test_added_columns_on_a_column_keyed_table_are_plaintext() -> DeltaResult<()> {
     use deltalake_core::operations::write::SchemaMode;
     use deltalake_core::protocol::SaveMode;
 
     let kms_id = register_fresh_factory();
-    let tmp = TempDir::new().unwrap();
-    let table =
-        deltalake_core::DeltaTableBuilder::from_url(table_url(tmp.path().to_str().unwrap()))?
-            .build()?
-            .create()
-            .with_columns(get_table_columns())
-            .with_property("delta.encryption.kms_id", &kms_id)
-            .with_property("delta.encryption.footer_key", "test-footer-key")
-            .with_property("delta.encryption.column_keys", "test-key:int")
-            .await?;
-
+    let [kms, footer] = encryption(&kms_id);
     let batch = get_table_batches();
     let mut fields = batch.schema().fields().to_vec();
     fields.push(Arc::new(Field::new("extra", ArrowDataType::Int32, true)));
@@ -709,17 +640,33 @@ async fn test_schema_overwrite_adds_plaintext_columns_to_column_keyed_table() ->
     columns.push(Arc::new(Int32Array::from(vec![Some(1); batch.num_rows()])));
     let widened = RecordBatch::try_new(Arc::new(ArrowSchema::new(fields)), columns).unwrap();
 
-    let table = table
-        .write(vec![widened])
-        .with_save_mode(SaveMode::Overwrite)
-        .with_schema_mode(SchemaMode::Overwrite)
+    for (save_mode, schema_mode) in [
+        (SaveMode::Append, SchemaMode::Merge),
+        (SaveMode::Overwrite, SchemaMode::Overwrite),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let table = create_table(
+            tmp.path().to_str().unwrap(),
+            get_table_columns(),
+            &[
+                kms,
+                footer,
+                ("delta.encryption.column_keys", "test-key:int"),
+            ],
+        )?
         .await?;
-    assert!(table.snapshot()?.schema().field("extra").is_some());
+        let table = table
+            .write(vec![widened.clone()])
+            .with_save_mode(save_mode)
+            .with_schema_mode(schema_mode)
+            .await?;
+        assert!(table.snapshot()?.schema().field("extra").is_some());
 
-    let stats = &add_stats(tmp.path())[0];
-    assert!(stats["minValues"].get("extra").is_some(), "{stats}");
-    assert!(stats["minValues"].get("int").is_none(), "{stats}");
-    assert_all_parquets_encrypted(tmp.path()).await;
+        let stats = &add_stats(tmp.path())[0];
+        assert!(stats["minValues"].get("extra").is_some(), "{stats}");
+        assert!(stats["minValues"].get("int").is_none(), "{stats}");
+        assert_all_parquets_encrypted(tmp.path()).await;
+    }
     Ok(())
 }
 
