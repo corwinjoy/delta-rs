@@ -27,6 +27,11 @@ The properties are plaintext in the Delta log, so they hold only key IDs and KMS
 never keys or credentials. Key material for each data file lives in the file's own Parquet
 key metadata.
 
+`kms_configuration` is also writable by anyone who can commit to the table, so a KMS client
+must treat it as untrusted input. A client that takes its endpoint from it should connect only
+to allowlisted endpoints; otherwise whoever edits the table can redirect key requests, and the
+credentials sent with them, to a server of their choosing.
+
 `footer_key` is always required: Parquet encrypts the footer with it, or signs the footer with
 it under `plaintext_footer`. There is no footer-less mode. An encrypted footer hides which
 columns are encrypted and the Parquet-level statistics. This is stricter than the RFC, which
@@ -84,6 +89,16 @@ differ from the table's, since a write does not change the configuration of an e
 Matching values pass, so a pipeline can resend the same configuration on every run, with
 column names as stored or as displayed. A different `kms_configuration` also passes, since
 it is not frozen, but is not applied either: change it with the table-property operations.
+
+## What stays plaintext
+
+Encryption covers the Parquet data files only. The Delta log still shows the schema, partition
+values, each file's row count and size, and the encryption properties, including `kms_id` and
+the master key IDs; each file's key metadata repeats those IDs. Deletion vectors, which record
+the positions of deleted rows, are not encrypted. With `plaintext_footer` the footer shows which
+columns are encrypted, but the Parquet-level statistics of encrypted columns stay encrypted
+either way. Keys are held in process memory while a file is written or read, so the design does
+not protect against an attacker who can read the memory of the writing or reading process.
 
 ## Protocol
 
