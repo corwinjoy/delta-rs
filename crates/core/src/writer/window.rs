@@ -132,11 +132,10 @@ impl WriteWindow {
         self.factory.props.arrow = Some(arrow_options);
     }
 
-    /// Write the files of sinks opened from now on as `configuration`, the table's metadata
-    /// configuration, says: its stats settings and, if it has any, its encryption. The
-    /// legacy writers have no DataFusion session, so the KMS factory comes from the global
-    /// registry only. On an error (an unregistered KMS, say) the properties are left as
-    /// they were.
+    /// Write the files of sinks opened from now on as `configuration` (the table's) says:
+    /// its stats settings and encryption. The KMS factory comes from the global registry,
+    /// the legacy writers having no DataFusion session. On an error the properties are left
+    /// as they were.
     pub(crate) fn apply_table_config(
         &mut self,
         configuration: &HashMap<String, String>,
@@ -165,9 +164,8 @@ impl WriteWindow {
         Ok(())
     }
 
-    /// Refuse to hand this window's files to a table whose frozen encryption settings
-    /// differ, in either direction, from what they were written under: the table was
-    /// created or replaced after the writer read its configuration.
+    /// Refuse to hand this window's files to a table whose frozen encryption settings differ
+    /// from what they were written under.
     pub(crate) fn check_target(&self, configuration: &HashMap<String, String>) -> DeltaResult<()> {
         let target = EncryptionConfig::try_from_configuration(configuration)?;
         match EncryptionConfig::frozen_change(self.encryption.as_ref(), target.as_ref()) {

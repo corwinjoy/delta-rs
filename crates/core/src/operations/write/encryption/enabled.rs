@@ -1,4 +1,4 @@
-//! The KMS-backed [`WriterPropertiesLayer`] and the process-wide [`EncryptionFactory`]
+//! The encrypting [`WriterPropertiesLayer`] and the process-wide [`EncryptionFactory`]
 //! registry.
 
 use std::sync::{Arc, LazyLock};
@@ -13,8 +13,8 @@ use crate::datafile::{DeltaWriterProperties, FileContext, WriterPropertiesLayer}
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::table::config::EncryptionConfig;
 
-/// `props` with a layer that encrypts every file through the [`EncryptionFactory`] named
-/// by the table's `kms_id` (see [`resolve_encryption_factory`]).
+/// `props` with a layer that encrypts every file through the factory registered as
+/// `enc.kms_id`.
 pub(super) fn apply(
     props: DeltaWriterProperties,
     enc: EncryptionConfig,
@@ -27,12 +27,9 @@ pub(super) fn apply(
     }))
 }
 
-/// A [`WriterPropertiesLayer`] that gets each file's encryption keys from the
-/// [`EncryptionFactory`] registered for the table's KMS. The factory gets the table's
-/// properties as options (see [`EncryptionConfig::writer_factory_options`]), with
-/// `column_keys` resolved to the file's parquet leaf paths, so a factory keys the paths
-/// as listed. The layer only adds the file encryption properties: the codec and row-group
-/// bounds the file was planned with stay.
+/// Asks the table's [`EncryptionFactory`] for each file's keys, passing the table's
+/// properties with `column_keys` resolved to the file's parquet leaf paths (see
+/// [`EncryptionConfig::writer_factory_options`]). Adds only the encryption properties.
 #[derive(Debug)]
 struct KmsEncryptionLayer {
     encryption_factory: Arc<dyn EncryptionFactory>,
@@ -46,8 +43,7 @@ impl WriterPropertiesLayer for KmsEncryptionLayer {
         builder: WriterPropertiesBuilder,
         file: FileContext<'_>,
     ) -> DeltaResult<WriterPropertiesBuilder> {
-        // Leaf names depend on the writer's `coerce_types`, which only the built properties
-        // expose.
+        // Leaf names depend on `coerce_types`, which only the built properties expose.
         let props = builder.build();
         let file_enc = EncryptionConfig {
             column_keys: self
@@ -77,17 +73,14 @@ impl WriterPropertiesLayer for KmsEncryptionLayer {
     }
 }
 
-/// Process-wide registry of [`EncryptionFactory`]s by `kms_id`, for the operations that
-/// create their own DataFusion sessions and so cannot see a user's `SessionContext`.
+/// [`EncryptionFactory`]s by `kms_id`, for operations whose own DataFusion sessions cannot
+/// see the user's.
 static GLOBAL_FACTORY_REGISTRY: LazyLock<DashMap<String, Arc<dyn EncryptionFactory>>> =
     LazyLock::new(DashMap::new);
 
-/// Register an [`EncryptionFactory`] under `id`, the `delta.encryption.kms_id` of the tables
-/// that should use it, for the rest of the process.
-///
-/// The registry is last-write-wins: any code in the process can re-register an id and then
-/// receives every key request for its tables (key IDs and KMS configuration, never key
-/// material). Re-registering logs a warning. Treat registration as privileged setup code.
+/// Register `factory` under `id`, the `delta.encryption.kms_id` of the tables it serves, for
+/// the rest of the process. Last write wins (with a warning), and the factory receives every
+/// key request for those tables, so treat registration as privileged setup.
 pub fn register_encryption_factory(id: impl Into<String>, factory: Arc<dyn EncryptionFactory>) {
     let id = id.into();
     if GLOBAL_FACTORY_REGISTRY
@@ -101,8 +94,8 @@ pub fn register_encryption_factory(id: impl Into<String>, factory: Arc<dyn Encry
     }
 }
 
-/// The [`EncryptionFactory`] registered as `kms_id`: `runtime_env`'s, if any, else the
-/// global registry's. Errors when neither has it.
+/// The factory registered as `kms_id` in `runtime_env`, else in the global registry; an
+/// error if neither.
 pub fn resolve_encryption_factory(
     kms_id: &str,
     runtime_env: Option<&RuntimeEnv>,

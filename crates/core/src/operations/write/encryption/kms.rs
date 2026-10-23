@@ -1,30 +1,21 @@
-//! The reference [`EncryptionFactory`]: the Parquet Key Management Tools over a pluggable KMS.
+//! The reference [`EncryptionFactory`], built on [`parquet_key_management`]: the Rust
+//! implementation of the Parquet Key Management Tools (PKMT) that parquet-java and PyArrow
+//! share. Each file gets random data keys, wrapped through a
+//! [`KmsClient`](parquet_key_management::kms::KmsClient) under the table's master key IDs
+//! and stored in the file's key metadata as `PKMT1` key material; readers unwrap them
+//! through the same KMS, which never sees the data. The crate's own parquet and DataFusion
+//! integrations are not used, so delta-rs can follow arrow and parquet releases.
 //!
-//! Key generation, wrapping and the key material format are [`parquet_key_management`]'s,
-//! the Rust implementation of the Parquet Key Management Tools (PKMT) API that parquet-java
-//! and PyArrow share. Each file gets its own random data keys, wrapped through a
-//! [`KmsClient`](parquet_key_management::kms::KmsClient) under the master key IDs the table
-//! names, and stored in the file's own key metadata as `PKMT1` key material; readers unwrap
-//! them through the same KMS, which never sees the data.
+//! Decryption uses only `kms_id`, `kms_configuration` and the file's key metadata, never
+//! the table's current `footer_key` or `column_keys`, as the RFC requires.
 //!
-//! This module maps the `delta.encryption.*` properties to the crate's configuration and
-//! builds the parquet encryption properties from the keys it returns. The crate's own
-//! parquet and DataFusion integrations are not used, so delta-rs can follow arrow and
-//! parquet releases without waiting for it.
+//! `kms_id` is the KMS instance ID (`kmsInstanceID` in the footer key material).
+//! `kms_configuration` reaches the client factory as the custom option named
+//! [`ENCRYPTION_KMS_CONFIGURATION_PROP`]; the crate's client cache ignores custom options,
+//! so the factory keeps one [`CryptoFactory`] per distinct `kms_configuration`.
 //!
-//! Decryption needs only the KMS named by `kms_id` (configured by `kms_configuration`) and
-//! the file's key metadata, never the table's current `footer_key` or `column_keys`, as the
-//! RFC requires: they may have changed since the file was written.
-//!
-//! `kms_id` is the KMS instance ID, stored in the footer key material as `kmsInstanceID`.
-//! `kms_configuration` reaches the [`KmsClientFactory`](parquet_key_management::kms::KmsClientFactory)
-//! as the custom KMS option named [`ENCRYPTION_KMS_CONFIGURATION_PROP`]. The crate caches
-//! clients by instance ID, URL and access token only, so the factory keeps one
-//! [`CryptoFactory`] per distinct `kms_configuration`.
-//!
-//! The file name is the AAD prefix and is stored in the file, so any Parquet reader uses it
-//! without being told. Decryption supplies no prefix of its own, so files other writers
-//! encrypted without one read too.
+//! The file name is the AAD prefix, stored in the file so any reader uses it untold;
+//! decryption supplies none, so files written without one read too.
 
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -52,20 +43,18 @@ use crate::table::config::{
     EncryptionConfig,
 };
 
-/// The reference [`EncryptionFactory`]: [`CryptoFactory`]s driven by the table's
-/// `delta.encryption.*` properties. See the module documentation.
+/// The reference [`EncryptionFactory`]; see the module documentation.
 pub struct KmsEncryptionFactory {
     make_crypto: Box<dyn Fn() -> CryptoFactory + Send + Sync>,
     // ponytail: one CryptoFactory per `kms_configuration` because the crate's client cache
     // ignores custom options; collapses to one once parquet-key-management keys on them.
-    /// `kms_configuration` (`""` when unset) → the crypto factory for it.
+    /// `kms_configuration` (`""` when unset) → its crypto factory.
     by_configuration: DashMap<String, Arc<CryptoFactory>>,
 }
 
 impl KmsEncryptionFactory {
-    /// A factory whose [`CryptoFactory`]s `make_crypto` builds, one per distinct
-    /// `kms_configuration`: typically `|| CryptoFactory::new(my_kms_client_factory.clone())`,
-    /// or one of the crate's async constructors.
+    /// `make_crypto` builds a [`CryptoFactory`] per distinct `kms_configuration`, e.g.
+    /// `|| CryptoFactory::new(my_kms_client_factory.clone())`.
     pub fn new(make_crypto: impl Fn() -> CryptoFactory + Send + Sync + 'static) -> Self {
         Self {
             make_crypto: Box::new(make_crypto),
@@ -113,7 +102,7 @@ fn connection(kms_id: Option<&str>, kms_configuration: Option<&str>) -> Arc<KmsC
     Arc::new(builder.build())
 }
 
-/// The file name of `file_path`: the AAD prefix, stored in the file for readers.
+/// The AAD prefix: the file name.
 fn aad_prefix(file_path: &Path) -> Vec<u8> {
     file_path
         .filename()
@@ -130,8 +119,7 @@ impl EncryptionFactory for KmsEncryptionFactory {
         _schema: &Arc<ArrowSchema>,
         file_path: &Path,
     ) -> DataFusionResult<Option<Arc<FileEncryptionProperties>>> {
-        // The options are the table's properties with `column_keys` already resolved to the
-        // file's parquet leaf paths (`EncryptionConfig::writer_factory_options`).
+        // The table's properties, `column_keys` resolved to leaf paths by the layer.
         let enc = EncryptionConfig::try_from_configuration(&config.options)?.ok_or_else(|| {
             DataFusionError::Configuration(format!(
                 "encryption factory option '{ENCRYPTION_FOOTER_KEY_PROP}' is required to encrypt"
@@ -173,8 +161,8 @@ impl EncryptionFactory for KmsEncryptionFactory {
         Ok(Some(builder.build()?))
     }
 
-    /// Decryption keys for a file, from its own key metadata and the KMS; of the options
-    /// only `kms_id` and `kms_configuration` are read.
+    /// Decryption keys from the file's key metadata; reads only `kms_id` and
+    /// `kms_configuration`.
     async fn get_file_decryption_properties(
         &self,
         config: &EncryptionFactoryOptions,
@@ -310,9 +298,8 @@ mod tests {
             .map_err(|e| ParquetError::ArrowError(e.to_string()))
     }
 
-    /// The table's `kms_id` and `kms_configuration` reach the KMS client factory, and
-    /// tables with the same `kms_id` but different configurations get their own clients
-    /// rather than the first one's from the crate's cache.
+    /// `kms_id` and `kms_configuration` reach the client factory, and each configuration
+    /// gets its own client.
     #[tokio::test]
     async fn kms_configuration_reaches_the_client_factory_and_isolates_clients() {
         let seen = Arc::new(Mutex::new(Vec::new()));

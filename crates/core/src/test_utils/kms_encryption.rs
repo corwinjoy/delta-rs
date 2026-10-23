@@ -1,11 +1,7 @@
-//! An in-memory KMS for testing encryption via `delta.encryption.*` table properties.
-//!
-//! Not part of the stable public API: `test_utils` is compiled for this crate's tests and,
-//! with the `integration_test` feature, for downstream crates' tests. Register
-//! [`mock_kms_factory`] with
+//! An in-memory KMS for encryption tests. Register [`mock_kms_factory`] with
 //! [`register_encryption_factory`](crate::operations::write::encryption::register_encryption_factory)
-//! under the `kms_id` of the tables under test; operations that create their own DataFusion
-//! sessions only find factories registered there.
+//! under the tables' `kms_id`; operations with their own DataFusion sessions only look there.
+//! Not part of the stable API.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -17,13 +13,8 @@ use parquet_key_management::kms::{KmsClient, KmsClientRef, KmsConnectionInfo};
 
 use crate::operations::write::encryption::KmsEncryptionFactory;
 
-/// A [`KmsClient`] that keeps every wrapped key in memory, like a vault that stores keys
-/// and hands out tokens.
-///
-/// `wrap_key` stores the key under a random token and returns the token; `unwrap_key`
-/// looks the token up and checks it was wrapped under the same master key. Nothing is
-/// encrypted, so a wrapped key is only usable in the process that wrapped it, which is
-/// what tests need: a file written by one factory cannot be read through another.
+/// A [`KmsClient`] that stores each key under a random token and returns the token. Nothing
+/// is encrypted, so a wrapped key is only usable through the client that wrapped it.
 #[derive(Debug, Default)]
 pub struct InMemoryKmsClient {
     vault: Mutex<Vault>,

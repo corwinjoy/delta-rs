@@ -30,9 +30,9 @@ pub mod test_utils;
 /// Preview cap for validation errors that enumerate offending records/rows.
 pub(crate) const INVALID_PREVIEW_CAP: usize = 10;
 
-/// Refuse a table (by its metadata `configuration` and `protocol`) the legacy writers
-/// cannot write: one with column mapping, or one whose features this build cannot write,
-/// e.g. encryption. `flush` uploads without a commit check, so this runs before a sink opens.
+/// Refuse a table the legacy writers cannot write: column mapping, or a protocol feature
+/// this build cannot write, e.g. encryption. Runs before a sink opens, since `flush`
+/// uploads without a commit check.
 pub(crate) fn ensure_legacy_writer_supports_table(
     configuration: &HashMap<String, String>,
     protocol: &Protocol,

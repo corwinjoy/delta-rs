@@ -136,9 +136,7 @@ fn add_stats(dir: &std::path::Path) -> Vec<serde_json::Value> {
     stats
 }
 
-/// Critical correctness test: verify files are physically encrypted on disk.
-/// Opens each parquet file with the raw reader (no decryption) and asserts
-/// the read fails, proving the encryption was applied to the footer.
+/// Every data file is encrypted on disk: opening one without keys fails.
 #[tokio::test]
 async fn test_parquet_files_are_physically_encrypted() -> DeltaResult<()> {
     let kms_id = register_fresh_factory();
@@ -148,8 +146,7 @@ async fn test_parquet_files_are_physically_encrypted() -> DeltaResult<()> {
     Ok(())
 }
 
-/// The advertised precedence guarantee: caller-supplied `WriterProperties`
-/// must not defeat table encryption.
+/// Caller-supplied `WriterProperties` cannot defeat table encryption.
 #[tokio::test]
 async fn test_caller_writer_properties_cannot_defeat_encryption() -> DeltaResult<()> {
     use parquet::file::properties::WriterProperties;
@@ -169,8 +166,8 @@ async fn test_caller_writer_properties_cannot_defeat_encryption() -> DeltaResult
     Ok(())
 }
 
-/// The legacy `RecordBatchWriter` must resolve encryption from the table
-/// configuration (via the global registry) rather than writing plaintext.
+/// The legacy `RecordBatchWriter` encrypts from the table configuration via the global
+/// registry.
 #[tokio::test]
 async fn test_legacy_record_batch_writer_is_encrypted() -> DeltaResult<()> {
     use deltalake_core::writer::{DeltaWriter as _, RecordBatchWriter};
@@ -189,8 +186,7 @@ async fn test_legacy_record_batch_writer_is_encrypted() -> DeltaResult<()> {
     Ok(())
 }
 
-/// A DataFusion `INSERT INTO` through the table provider's DataSink must
-/// encrypt like every other write path.
+/// A DataFusion `INSERT INTO` through the DataSink encrypts like every other write path.
 #[tokio::test]
 async fn test_insert_into_datasink_is_encrypted() -> DeltaResult<()> {
     use datafusion::prelude::SessionContext;
@@ -212,8 +208,8 @@ async fn test_insert_into_datasink_is_encrypted() -> DeltaResult<()> {
     Ok(())
 }
 
-/// A single operation that creates the table (with encryption in its
-/// configuration) and writes data must encrypt that first commit's files too.
+/// Creating an encrypted table and writing data in one operation encrypts that first
+/// commit's files.
 #[tokio::test]
 async fn test_create_with_data_in_one_call_is_encrypted() -> DeltaResult<()> {
     let kms_id = register_fresh_factory();
@@ -236,8 +232,8 @@ async fn test_create_with_data_in_one_call_is_encrypted() -> DeltaResult<()> {
     Ok(())
 }
 
-/// A partially-configured table (either encryption property alone) is rejected when
-/// it is created, so no write can treat it as unencrypted.
+/// Either encryption property alone is rejected at create, so no write can treat the table
+/// as unencrypted.
 #[tokio::test]
 async fn test_partially_configured_encryption_is_rejected() -> DeltaResult<()> {
     for (prop, value, missing) in [
@@ -263,8 +259,7 @@ async fn test_partially_configured_encryption_is_rejected() -> DeltaResult<()> {
     Ok(())
 }
 
-/// The descriptive unregistered-factory error must surface through an actual
-/// write, not just the registry lookup.
+/// The unregistered-factory error surfaces through a write, not just the registry lookup.
 #[tokio::test]
 async fn test_unregistered_factory_errors_on_write() -> DeltaResult<()> {
     let unregistered = format!("never-registered-{}", Uuid::new_v4());
@@ -284,8 +279,8 @@ async fn test_unregistered_factory_errors_on_write() -> DeltaResult<()> {
     Ok(())
 }
 
-/// `RecordBatchWriter::try_new` cannot load the table, so it resolves the table's
-/// encryption on the first write; it must not write plaintext files.
+/// A `try_new` writer resolves the table's encryption on the first write and never writes
+/// plaintext.
 #[tokio::test]
 async fn test_record_batch_writer_try_new_is_encrypted() -> DeltaResult<()> {
     use deltalake_core::writer::{DeltaWriter as _, RecordBatchWriter};

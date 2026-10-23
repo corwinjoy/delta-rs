@@ -1,14 +1,10 @@
 //! Writer-side encryption, driven by a table's `delta.encryption.*` properties.
 //!
-//! [`apply_encryption`] finds the `EncryptionFactory` registered as `delta.encryption.kms_id`
-//! (in the session's `RuntimeEnv`, else the process-wide registry) and adds a
-//! [`WriterPropertiesLayer`](crate::datafile::WriterPropertiesLayer) that asks it for each
-//! file's keys. The layer runs after the caller's, so once a table is created encrypted
-//! every write encrypts, whatever parquet properties the caller set.
+//! [`apply_encryption`] adds a [`WriterPropertiesLayer`](crate::datafile::WriterPropertiesLayer)
+//! that asks the `EncryptionFactory` registered as `delta.encryption.kms_id` for each file's
+//! keys. It runs after the caller's layers, so table encryption cannot be turned off.
 //!
-//! Encrypting needs the `encryption` cargo feature: `enabled.rs` holds the layer and the
-//! registry, `kms.rs` the reference factory over [`parquet_key_management`]. Without the
-//! feature, encrypted tables are refused rather than written as plaintext.
+//! Needs the `encryption` cargo feature; without it, encrypted tables are refused.
 
 use std::collections::HashMap;
 
@@ -27,18 +23,14 @@ pub mod kms;
 pub use enabled::{register_encryption_factory, resolve_encryption_factory};
 #[cfg(feature = "encryption")]
 pub use kms::KmsEncryptionFactory;
-/// The Parquet Key Management Tools crate the reference factory is built on: implement its
+/// The Parquet Key Management Tools crate behind the reference factory; implement its
 /// `kms::KmsClient` (or `kms::AsyncKmsClient`) for your KMS.
 #[cfg(feature = "encryption")]
 pub use parquet_key_management;
 
-/// `props` with the table's encryption, if `configuration` (the table's metadata
-/// configuration) has any; `props` unchanged otherwise. An invalid configuration or an
-/// unregistered KMS factory is an error, never a plaintext write.
-///
-/// The factory is looked up in `runtime_env` first, then in the global registry, which is
-/// all the legacy writers have. The DataFusion write paths call this through
-/// [`DeltaWriterProperties::for_table`].
+/// `props` with the table's encryption, if `configuration` (its metadata configuration) has
+/// any. An invalid configuration or an unregistered factory is an error, never a plaintext
+/// write. The factory is looked up in `runtime_env`, then in the global registry.
 pub fn apply_encryption(
     props: DeltaWriterProperties,
     configuration: &HashMap<String, String>,

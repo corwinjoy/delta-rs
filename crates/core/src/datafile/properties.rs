@@ -286,9 +286,8 @@ impl DeltaWriterProperties {
         self
     }
 
-    /// Fill the target file size from the table's where unset. Operations call this; the
-    /// stats configuration and encryption are filled by [`for_table`](Self::for_table) where
-    /// every DataFusion write path meets the table.
+    /// Fill the target file size from the table's where unset. Stats and encryption are
+    /// filled by [`for_table`](Self::for_table).
     // Only the DataFusion write paths call this.
     #[cfg_attr(not(feature = "datafusion"), allow(dead_code))]
     pub(crate) fn apply_table_defaults(mut self, table_config: &TableConfiguration) -> Self {
@@ -299,9 +298,8 @@ impl DeltaWriterProperties {
     }
 
     /// `self` as the DataFusion write paths write `table_config`'s files: the table's stats
-    /// configuration where unset, plus its encryption, which no caller's properties can
-    /// remove (see [`apply_encryption`](crate::operations::write::encryption::apply_encryption)).
-    /// The target file size is not filled, since `None` disables rolling for a writer.
+    /// configuration where unset, plus its encryption, which no caller can remove. The
+    /// target file size is not filled, since `None` means never roll.
     #[cfg(feature = "datafusion")]
     pub(crate) fn for_table(
         self,
