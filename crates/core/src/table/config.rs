@@ -936,7 +936,7 @@ impl EncryptionConfig {
         &self,
         schema: &arrow_schema::Schema,
         coerce_types: bool,
-    ) -> DeltaResult<Vec<(String, Vec<String>)>> {
+    ) -> DeltaResult<HashMap<String, Vec<String>>> {
         let leaves: Vec<String> = parquet::arrow::ArrowSchemaConverter::new()
             .with_coerce_types(coerce_types)
             .convert(schema)?
@@ -944,7 +944,7 @@ impl EncryptionConfig {
             .iter()
             .map(|column| column.path().string())
             .collect();
-        let mut keyed = Vec::new();
+        let mut keyed: HashMap<String, Vec<String>> = HashMap::new();
         for (key_id, columns) in &self.column_keys {
             for column in columns {
                 let nested = format!("{column}.");
@@ -958,7 +958,7 @@ impl EncryptionConfig {
                         "key '{key_id}' names column '{column}', which is not in the file schema"
                     )));
                 }
-                keyed.push((key_id.clone(), covered));
+                keyed.entry(key_id.clone()).or_default().extend(covered);
             }
         }
         Ok(keyed)
@@ -1285,8 +1285,35 @@ mod encryption_tests {
         .unwrap();
         for (coerce, leaf) in [(false, "tags.list.item"), (true, "tags.list.element")] {
             let leaves = enc.column_key_leaves(&schema, coerce).unwrap();
-            assert_eq!(leaves, vec![("k".to_string(), vec![leaf.to_string()])]);
+            assert_eq!(leaves["k"], vec![leaf.to_string()]);
         }
+    }
+
+    /// Every column sharing a key ID is covered, not only the last one listed.
+    #[test]
+    fn column_key_leaves_keep_every_column_of_a_key() {
+        use arrow_schema::{DataType as ArrowType, Field, Schema};
+        let schema = Schema::new(vec![
+            Field::new("int", ArrowType::Int32, true),
+            Field::new("string", ArrowType::Utf8, true),
+        ]);
+        let enc = EncryptionConfig::try_from_configuration(&HashMap::from([
+            (ENCRYPTION_KMS_ID_PROP.to_string(), "kms".to_string()),
+            (ENCRYPTION_FOOTER_KEY_PROP.to_string(), "fk".to_string()),
+            (
+                ENCRYPTION_COLUMN_KEYS_PROP.to_string(),
+                "k:int,string".to_string(),
+            ),
+        ]))
+        .unwrap()
+        .unwrap();
+        let mut leaves = enc
+            .column_key_leaves(&schema, false)
+            .unwrap()
+            .remove("k")
+            .unwrap();
+        leaves.sort();
+        assert_eq!(leaves, vec!["int".to_string(), "string".to_string()]);
     }
 
     #[test]

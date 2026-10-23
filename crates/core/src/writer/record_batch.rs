@@ -126,6 +126,16 @@ impl RecordBatchWriter {
         )
     }
 
+    /// Add the [CommitProperties] to the [RecordBatchWriter] to be used when the writer flushes
+    /// the write into storage.
+    ///
+    /// This can be useful for situations where slight modifications to the commit behavior are
+    /// required.
+    pub fn with_commit_properties(mut self, properties: CommitProperties) -> Self {
+        self.commit_properties = Some(properties);
+        self
+    }
+
     /// Creates a [`RecordBatchWriter`] to write data to provided Delta Table
     pub fn for_table(table: &DeltaTable) -> Result<Self, DeltaTableError> {
         let metadata = table.snapshot()?.metadata();

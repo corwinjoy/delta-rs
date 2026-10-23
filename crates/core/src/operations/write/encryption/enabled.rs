@@ -34,9 +34,7 @@ impl WriterPropertiesLayer for KmsEncryptionLayer {
         let file_enc = EncryptionConfig {
             column_keys: self
                 .enc
-                .column_key_leaves(file.schema, props.coerce_types())?
-                .into_iter()
-                .collect(),
+                .column_key_leaves(file.schema, props.coerce_types())?,
             ..self.enc.clone()
         };
         let encryption_props = self
