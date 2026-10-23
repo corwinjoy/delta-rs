@@ -300,6 +300,24 @@ impl DeltaWriterProperties {
         self.apply_table_stats(table_config)
     }
 
+    /// `self` as the DataFusion write paths write `table_config`'s files: the table's stats
+    /// configuration where unset, plus the table's encryption, which every path must
+    /// apply and no caller's properties can remove (see
+    /// [`apply_encryption`](crate::operations::write::encryption::apply_encryption)).
+    /// The target file size is not filled, since `None` disables rolling for a writer.
+    #[cfg(feature = "datafusion")]
+    pub(crate) fn for_table(
+        self,
+        table_config: &TableConfiguration,
+        runtime_env: Option<&datafusion::execution::runtime_env::RuntimeEnv>,
+    ) -> DeltaResult<Self> {
+        crate::operations::write::encryption::apply_encryption(
+            self.apply_table_stats(table_config),
+            table_config.metadata().configuration(),
+            runtime_env,
+        )
+    }
+
     /// Run `layer` on every file's parquet properties, after the layers added before it.
     pub fn with_layer(mut self, layer: impl WriterPropertiesLayer + 'static) -> Self {
         self.layers.push(Arc::new(layer));

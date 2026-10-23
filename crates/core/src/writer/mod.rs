@@ -51,21 +51,21 @@ pub(crate) fn ensure_legacy_writer_supports_table(
     Ok(())
 }
 
-/// `props` encrypting as `enc`, a legacy writer's table configuration says. The legacy
-/// writers have no DataFusion session, so the KMS factory comes from the process-wide
-/// registry only. An unregistered factory, or a build without `datafusion` + `encryption`,
-/// is an error, never a plaintext write.
+/// `props` encrypting as `configuration`, an encrypted legacy writer's table configuration,
+/// says. The legacy writers have no DataFusion session, so the KMS factory comes from the
+/// process-wide registry only. An unregistered factory, or a build without `datafusion` +
+/// `encryption`, is an error, never a plaintext write.
 pub(crate) fn apply_legacy_writer_encryption(
     props: crate::datafile::DeltaWriterProperties,
-    enc: &crate::table::config::EncryptionConfig,
+    configuration: &std::collections::HashMap<String, String>,
 ) -> Result<crate::datafile::DeltaWriterProperties, DeltaTableError> {
     #[cfg(feature = "datafusion")]
     {
-        crate::operations::write::encryption::apply_encryption_config(props, enc.clone(), None)
+        crate::operations::write::encryption::apply_encryption(props, configuration, None)
     }
     #[cfg(not(feature = "datafusion"))]
     {
-        let _ = (props, enc);
+        let _ = (props, configuration);
         Err(DeltaTableError::Generic(
             "This table's delta.encryption.* properties require the 'datafusion' and \
              'encryption' features; the legacy writers cannot encrypt without them"

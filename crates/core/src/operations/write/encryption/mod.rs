@@ -17,7 +17,6 @@
 use std::collections::HashMap;
 
 use datafusion::execution::runtime_env::RuntimeEnv;
-use delta_kernel::table_configuration::TableConfiguration;
 
 use crate::datafile::DeltaWriterProperties;
 use crate::errors::DeltaResult;
@@ -45,7 +44,8 @@ pub use parquet_key_management;
 /// with the same setting, or its column keys silently miss the renamed leaves.
 pub const COERCE_TYPES_OPTION: &str = "delta.writer.coerce_types";
 
-/// `props` with the table's encryption, if it has any.
+/// `props` with the table's encryption, if `configuration` (the table's metadata
+/// configuration) has any.
 ///
 /// For a table with `delta.encryption.*` properties, a layer that encrypts every file is
 /// added after the layers `props` already has, so the caller's parquet properties still
@@ -55,32 +55,15 @@ pub const COERCE_TYPES_OPTION: &str = "delta.writer.coerce_types";
 ///
 /// `runtime_env` (a session's or a `TaskContext`'s) is checked for the KMS factory first;
 /// without one (e.g. the legacy writers, which have no DataFusion context), only the global
-/// registry is.
+/// registry is. The DataFusion write paths call this through
+/// [`DeltaWriterProperties::for_table`].
 pub fn apply_encryption(
-    props: DeltaWriterProperties,
-    config: &TableConfiguration,
-    runtime_env: Option<&RuntimeEnv>,
-) -> DeltaResult<DeltaWriterProperties> {
-    apply_encryption_from_configuration(props, config.metadata().configuration(), runtime_env)
-}
-
-/// [`apply_encryption`] for a table's raw metadata `configuration`.
-pub fn apply_encryption_from_configuration(
     props: DeltaWriterProperties,
     configuration: &HashMap<String, String>,
     runtime_env: Option<&RuntimeEnv>,
 ) -> DeltaResult<DeltaWriterProperties> {
     match EncryptionConfig::try_from_configuration(configuration)? {
-        Some(enc) => apply_encryption_config(props, enc, runtime_env),
+        Some(enc) => backend::apply(props, enc, runtime_env),
         None => Ok(props),
     }
-}
-
-/// [`apply_encryption`] for an already parsed configuration.
-pub(crate) fn apply_encryption_config(
-    props: DeltaWriterProperties,
-    enc: EncryptionConfig,
-    runtime_env: Option<&RuntimeEnv>,
-) -> DeltaResult<DeltaWriterProperties> {
-    backend::apply(props, enc, runtime_env)
 }
