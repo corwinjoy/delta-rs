@@ -992,12 +992,8 @@ impl EncryptionConfig {
     }
 
     /// The options a registered encryption factory gets when decrypting a file: `kms_id`
-    /// and `kms_configuration` only.
-    ///
-    /// The RFC requires readers to derive decryption keys from the key metadata stored
-    /// with each file, never from the table's current `footer_key` or `column_keys`,
-    /// since those may have changed after the file was written. Keeping them out of the
-    /// reader options makes that impossible to get wrong.
+    /// and `kms_configuration` only, so keys can only come from each file's key metadata,
+    /// as the RFC requires.
     #[cfg(all(feature = "datafusion", feature = "encryption"))]
     pub fn reader_factory_options(&self) -> EncryptionFactoryOptions {
         let mut opts = EncryptionFactoryOptions::default();

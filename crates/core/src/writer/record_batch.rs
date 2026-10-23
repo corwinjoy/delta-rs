@@ -49,9 +49,9 @@ pub struct RecordBatchWriter {
     table_config: TableConfigState,
 }
 
-/// What the writer knows about its table's configuration. [`RecordBatchWriter::try_new`]
-/// does not load the table, so it is read before the first upload; a table missing then is
-/// read again before files are handed out, since the caller may create it meanwhile.
+/// What the writer knows about its table. [`RecordBatchWriter::try_new`] does not load it,
+/// so it is read before the first upload and, if missing then, again before files are
+/// handed out.
 enum TableConfigState {
     /// The configuration has been applied to the writer.
     Applied,
@@ -70,10 +70,9 @@ impl std::fmt::Debug for RecordBatchWriter {
 impl RecordBatchWriter {
     /// Create a new [`RecordBatchWriter`] instance.
     ///
-    /// The table is read on the first write, before anything is uploaded, so an encrypted
-    /// table gets encrypted files; callers holding a loaded table should use
-    /// [`for_table`](Self::for_table). A table missing then is read again when files are
-    /// handed out, and refuses them if it was created encrypted meanwhile.
+    /// The table is read on the first write, so an encrypted table gets encrypted files; a
+    /// table missing then is checked again when files are handed out. Callers holding a
+    /// loaded table should use [`for_table`](Self::for_table).
     pub fn try_new(
         table_uri: impl AsRef<str>,
         schema: ArrowSchemaRef,
@@ -88,7 +87,6 @@ impl RecordBatchWriter {
         // Initialize writer properties for the underlying arrow writer
         let writer_properties = default_writer_properties(parquet::basic::Compression::SNAPPY);
 
-        // The configuration is applied on the first write, once the table is read.
         let mut writer = Self::from_parts(
             delta_table.object_store(),
             normalize_for_delta(&schema),
@@ -211,9 +209,8 @@ impl RecordBatchWriter {
         Ok(())
     }
 
-    /// Read the configuration of the table [`try_new`](Self::try_new) was given, before the
-    /// first upload. A table missing then is read again `at_flush` if there are files to
-    /// hand out, which must match its settings.
+    /// Read the table before the first upload and, if it was missing, again `at_flush` when
+    /// there are files to hand out, which must match it.
     async fn sync_table_config(&mut self, at_flush: bool) -> Result<(), DeltaTableError> {
         let (log_store, must_match) = match &self.table_config {
             TableConfigState::Unloaded(log_store) => (Arc::clone(log_store), false),
@@ -422,8 +419,7 @@ impl DeltaWriter<RecordBatch> for RecordBatchWriter {
             // Nothing was written yet, so the table's settings are simply adopted.
             self.adopt_table_config(configuration)?;
         }
-        // The caller's table may have been replaced since the writer read its configuration,
-        // or not have existed then.
+        // The table may have been replaced since the writer read it, or not have existed.
         self.window.check_target(configuration)?;
         if matches!(self.table_config, TableConfigState::Missing(_)) {
             self.adopt_table_config(configuration)?;

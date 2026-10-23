@@ -625,8 +625,8 @@ impl DeltaScan {
         // Keep protocol checks on read entry points.
         Self::validate_supported_reader_features(&self.snapshot)
             .map_err(crate::DeltaTableError::from)?;
-        // Checked here rather than in `DeltaScan::new`, so a provider can still be built
-        // for writes (e.g. INSERT INTO) to a table this build cannot read.
+        // Not in `DeltaScan::new`, so a write-only provider (INSERT INTO) to a table this
+        // build cannot read still works.
         PROTOCOL
             .check_encryption(
                 self.snapshot.snapshot().metadata().configuration(),

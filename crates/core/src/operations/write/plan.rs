@@ -835,10 +835,9 @@ fn schema_delta_for_prepared_source(
     })
 }
 
-/// Columns a write adds to a table encrypted with `column_keys` are written in plaintext,
-/// as the RFC specifies, which a user may not expect: warn, naming them. A field added under
-/// a keyed struct is covered by its key and not named. An overwrite can add columns too, so
-/// this runs for every schema mode.
+/// Warn, naming them, about columns a write adds to a table with `column_keys`: they are
+/// plaintext, as the RFC specifies. Fields added under a keyed struct are covered and not
+/// named. Runs for every schema mode, since an overwrite can add columns too.
 fn warn_about_plaintext_new_columns(snapshot: &EagerSnapshot, source_schema: &Schema) {
     let configuration = snapshot.metadata().configuration();
     let Ok(Some(enc)) = EncryptionConfig::try_from_configuration(configuration) else {

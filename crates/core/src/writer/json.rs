@@ -66,8 +66,7 @@ impl JsonWriter {
         Self::from_parts(table, schema, partition_columns)
     }
 
-    /// Build a writer over `table` with a fixed `schema` and partitioning, refusing a table
-    /// the legacy writers cannot write.
+    /// A writer over `table` with a fixed `schema` and partitioning.
     fn from_parts(
         table: &DeltaTable,
         schema: ArrowSchemaRef,
@@ -241,7 +240,7 @@ impl DeltaWriter<Vec<Value>> for JsonWriter {
         &mut self,
         table: &mut DeltaTable,
     ) -> Result<Version, DeltaTableError> {
-        // The caller's table may have been replaced since the writer read its configuration.
+        // The table may have been replaced since the writer read its configuration.
         self.window
             .check_target(table.snapshot()?.metadata().configuration())?;
         let adds: Vec<_> = self.flush().await?.drain(..).map(Action::Add).collect();
