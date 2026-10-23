@@ -374,28 +374,25 @@ impl EncryptionConfig {
 
     /// The parquet leaf columns each column key covers in a file with `schema`, by key ID:
     /// a configured column covers every leaf under it (`address` covers `address.street`
-    /// and `address.city`). A configured column with no leaf in the schema is an error.
-    /// `coerce_types` must match the writer's parquet setting, which renames list and map
-    /// leaves.
+    /// and `address.city`); one with no leaf in the schema is an error. `coerce_types` is
+    /// the writer's parquet setting, which renames list and map leaves.
     pub fn column_key_leaves(
         &self,
         schema: &arrow_schema::Schema,
         coerce_types: bool,
-    ) -> DeltaResult<Vec<(String, Vec<String>)>> {
-        let leaves: Vec<String> = parquet::arrow::ArrowSchemaConverter::new()
+    ) -> DeltaResult<Vec<EncryptionColumnKey>> {
+        let leaves: Vec<ColumnName> = parquet::arrow::ArrowSchemaConverter::new()
             .with_coerce_types(coerce_types)
             .convert(schema)?
             .columns()
             .iter()
-            .map(|column| column.path().string())
+            .map(|column| ColumnName::new(column.path().parts()))
             .collect();
-        let mut keyed = Vec::new();
+        let mut keyed: Vec<EncryptionColumnKey> = Vec::new();
         for (key_id, column) in self.keyed_columns() {
-            let column = column.path().join(".");
-            let nested = format!("{column}.");
-            let covered: Vec<String> = leaves
+            let covered: Vec<ColumnName> = leaves
                 .iter()
-                .filter(|leaf| **leaf == column || leaf.starts_with(&nested))
+                .filter(|leaf| leaf.path().starts_with(column.path()))
                 .cloned()
                 .collect();
             if covered.is_empty() {
@@ -403,7 +400,13 @@ impl EncryptionConfig {
                     "key '{key_id}' names column '{column}', which is not in the file schema"
                 )));
             }
-            keyed.push((key_id.to_string(), covered));
+            match keyed.iter_mut().find(|key| key.key_id == key_id) {
+                Some(key) => key.columns.extend(covered),
+                None => keyed.push(EncryptionColumnKey {
+                    key_id: key_id.to_string(),
+                    columns: covered,
+                }),
+            }
         }
         Ok(keyed)
     }
@@ -464,7 +467,8 @@ impl EncryptionConfig {
 
     /// The options a registered encryption factory gets when encrypting a file: the
     /// [reader options](Self::reader_factory_options) plus `footer_key`,
-    /// `plaintext_footer` and, when set, `column_keys`.
+    /// `plaintext_footer` and, when set, `column_keys`, which the encryption layer has
+    /// resolved to the file's parquet leaf paths.
     #[cfg(all(feature = "datafusion", feature = "encryption"))]
     pub fn writer_factory_options(&self) -> EncryptionFactoryOptions {
         let mut opts = self.reader_factory_options();
@@ -691,6 +695,36 @@ mod tests {
     fn column_keys_property_round_trips_sorted() {
         let enc = config_with_column_keys("k2:c;k1:b,a");
         assert_eq!(enc.column_keys_property(), "k1:a,b;k2:c");
+    }
+
+    /// Leaf paths follow the writer's `coerce_types`: a list's leaf is `tags.list.element`
+    /// with it and `tags.list.item` without.
+    #[test]
+    fn column_key_leaves_follow_coerce_types() {
+        use arrow_schema::{DataType as ArrowType, Field, Schema};
+        let schema = Schema::new(vec![Field::new(
+            "tags",
+            ArrowType::List(std::sync::Arc::new(Field::new(
+                "item",
+                ArrowType::Int32,
+                true,
+            ))),
+            true,
+        )]);
+        let enc = EncryptionConfig::try_from_configuration(&HashMap::from([
+            (ENCRYPTION_KMS_ID_PROP.to_string(), "kms".to_string()),
+            (ENCRYPTION_FOOTER_KEY_PROP.to_string(), "fk".to_string()),
+            (
+                ENCRYPTION_COLUMN_KEYS_PROP.to_string(),
+                "k:tags".to_string(),
+            ),
+        ]))
+        .unwrap()
+        .unwrap();
+        for (coerce, leaf) in [(false, "tags.list.item"), (true, "tags.list.element")] {
+            let leaves = enc.column_key_leaves(&schema, coerce).unwrap();
+            assert_eq!(leaves, vec![("k".to_string(), vec![leaf.to_string()])]);
+        }
     }
 
     #[test]

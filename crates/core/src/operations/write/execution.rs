@@ -294,7 +294,7 @@ impl WriteSinkConfig {
     /// for it.
     pub(crate) fn new(
         table_config: &TableConfiguration,
-        runtime_env: Option<&RuntimeEnv>,
+        runtime_env: &RuntimeEnv,
         object_store: ObjectStoreRef,
         props: DeltaWriterProperties,
     ) -> DeltaResult<Self> {
@@ -397,13 +397,9 @@ pub(crate) async fn write_execution_plan_cdc(
     props: DeltaWriterProperties,
 ) -> DeltaResult<Vec<Action>> {
     let plan = validated_plan(table_config, session, plan, None, false, None)?;
-    let sink_config = WriteSinkConfig::new(
-        table_config,
-        Some(session.runtime_env()),
-        object_store,
-        props,
-    )?
-    .with_path_prefix(CHANGE_DATA_DIR);
+    let sink_config =
+        WriteSinkConfig::new(table_config, session.runtime_env(), object_store, props)?
+            .with_path_prefix(CHANGE_DATA_DIR);
     let (actions, _) = write_data_plan(session, plan, sink_config).await?;
     Ok(actions
         .into_iter()
@@ -454,12 +450,8 @@ pub(crate) async fn write_execution_plan_v2(
         contains_cdc,
         insert_marker_column.as_deref(),
     )?;
-    let sink_config = WriteSinkConfig::new(
-        table_config,
-        Some(session.runtime_env()),
-        object_store,
-        props,
-    )?;
+    let sink_config =
+        WriteSinkConfig::new(table_config, session.runtime_env(), object_store, props)?;
 
     if !contains_cdc {
         write_data_plan(session, plan, sink_config).await
@@ -501,7 +493,7 @@ pub(crate) async fn write_exec_plan(
 ) -> DeltaResult<(Vec<Action>, WriteExecutionPlanMetrics)> {
     let sink_config = WriteSinkConfig::new(
         table_config,
-        Some(session.runtime_env()),
+        session.runtime_env(),
         log_store.object_store(),
         props,
     )?;

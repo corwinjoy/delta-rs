@@ -230,11 +230,16 @@ impl ProtocolChecker {
 
     /// Check if delta-rs can write to the given delta table.
     pub fn can_write_to(&self, snapshot: &dyn TableReference) -> Result<(), TransactionError> {
+        self.can_write_protocol(snapshot.protocol())
+    }
+
+    /// [`can_write_to`](Self::can_write_to) for a table known by its protocol alone.
+    pub fn can_write_protocol(&self, protocol: &Protocol) -> Result<(), TransactionError> {
         // NOTE: writers must always support all required reader features. Encryption is
         // the exception: writing an encrypted table needs write support only, and an
         // operation that also reads data files fails on them without read support.
-        self.ignoring_write_only_features(self.can_read_from_protocol(snapshot.protocol()))?;
-        self.can_write_to_protocol(snapshot.protocol())
+        self.ignoring_write_only_features(self.can_read_from_protocol(protocol))?;
+        self.can_write_to_protocol(protocol)
     }
 
     /// Drop from an unsupported-features error the reader features a writer need not read:

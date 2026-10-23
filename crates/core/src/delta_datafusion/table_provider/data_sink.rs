@@ -134,7 +134,7 @@ impl DeltaDataSink {
             ..
         } = WriteSinkConfig::new(
             table_config,
-            Some(&context.runtime_env()),
+            &context.runtime_env(),
             log_store.object_store(),
             DeltaWriterProperties::default().apply_table_defaults(table_config),
         )?;

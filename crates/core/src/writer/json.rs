@@ -13,7 +13,7 @@ use super::utils::record_batch_from_message;
 use super::window::{SinkFactory, WriteWindow};
 use super::{DeltaWriter, DeltaWriterError, WriteMode, ensure_legacy_writer_supports_table};
 use crate::DeltaTable;
-use crate::datafile::{DeltaWriterProperties, WriterStatsConfig};
+use crate::datafile::DeltaWriterProperties;
 use crate::errors::DeltaTableError;
 use crate::kernel::{Action, Add, Version};
 use crate::table::builder::DeltaTableBuilder;
@@ -52,13 +52,11 @@ impl JsonWriter {
             .with_storage_options(storage_options.unwrap_or_default())
             .load()
             .await?;
-        ensure_legacy_writer_supports_table(&table, "JsonWriter")?;
         Self::from_parts(&table, schema_ref, partition_columns.unwrap_or_default())
     }
 
     /// Creates a JsonWriter to write to the given table, using the table's schema.
     pub fn for_table(table: &DeltaTable) -> Result<JsonWriter, DeltaTableError> {
-        ensure_legacy_writer_supports_table(table, "JsonWriter")?;
         let (schema, partition_columns) = {
             let snapshot = table.snapshot()?;
             let partition_columns = snapshot.metadata().partition_columns().to_vec();
@@ -68,22 +66,26 @@ impl JsonWriter {
         Self::from_parts(table, schema, partition_columns)
     }
 
-    /// Build a writer over `table` with a fixed `schema` and partitioning. The
-    /// stats configuration is resolved once here (mirroring `RecordBatchWriter`).
+    /// Build a writer over `table` with a fixed `schema` and partitioning, refusing a table
+    /// the legacy writers cannot write.
     fn from_parts(
         table: &DeltaTable,
         schema: ArrowSchemaRef,
         partition_columns: Vec<String>,
     ) -> Result<Self, DeltaTableError> {
+        let snapshot = table.snapshot()?;
+        ensure_legacy_writer_supports_table(
+            snapshot.metadata().configuration(),
+            snapshot.protocol(),
+            "JsonWriter",
+        )?;
         let factory = SinkFactory {
             storage: table.object_store(),
             partition_columns,
-            props: DeltaWriterProperties::default().with_stats_config(
-                WriterStatsConfig::from_properties(table.snapshot()?.table_config()),
-            ),
+            props: DeltaWriterProperties::default(),
         };
         let mut window = WriteWindow::new(factory, schema);
-        window.apply_encryption(table.snapshot()?.metadata().configuration())?;
+        window.apply_table_config(snapshot.metadata().configuration())?;
         Ok(Self { window })
     }
 

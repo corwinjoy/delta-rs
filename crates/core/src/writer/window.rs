@@ -132,30 +132,42 @@ impl WriteWindow {
         self.factory.props.arrow = Some(arrow_options);
     }
 
-    /// Set the statistics settings used for sinks opened from now on.
-    pub(crate) fn set_stats_config(&mut self, stats: WriterStatsConfig) {
-        self.factory.props.stats = Some(stats);
-    }
-
-    /// Encrypt the files of sinks opened from now on as `configuration` (the table's
-    /// `delta.encryption.*` properties) says; a no-op for an unencrypted table. On an
-    /// error (an unregistered KMS, say) the properties are left as they were.
-    pub(crate) fn apply_encryption(
+    /// Write the files of sinks opened from now on as `configuration`, the table's metadata
+    /// configuration, says: its stats settings and, if it has any, its encryption. The
+    /// legacy writers have no DataFusion session, so the KMS factory comes from the global
+    /// registry only. On an error (an unregistered KMS, say) the properties are left as
+    /// they were.
+    pub(crate) fn apply_table_config(
         &mut self,
         configuration: &HashMap<String, String>,
     ) -> DeltaResult<()> {
+        self.factory.props.stats = Some(WriterStatsConfig::from_properties(
+            &delta_kernel::table_properties::TableProperties::from(configuration.iter()),
+        ));
         let encryption = EncryptionConfig::try_from_configuration(configuration)?;
         if encryption.is_some() {
-            self.factory.props =
-                super::apply_legacy_writer_encryption(self.factory.props.clone(), configuration)?;
+            #[cfg(feature = "datafusion")]
+            {
+                self.factory.props = crate::operations::write::encryption::apply_encryption(
+                    self.factory.props.clone(),
+                    configuration,
+                    None,
+                )?;
+            }
+            #[cfg(not(feature = "datafusion"))]
+            return Err(DeltaTableError::Generic(
+                "This table's delta.encryption.* properties require the 'datafusion' and \
+                 'encryption' features; the legacy writers cannot encrypt without them"
+                    .to_string(),
+            ));
         }
         self.encryption = encryption;
         Ok(())
     }
 
-    /// Refuse to hand this window's files to a table whose encryption differs from what
-    /// they were written under, in any frozen setting and in either direction: the table
-    /// was created or replaced after the writer read its configuration.
+    /// Refuse to hand this window's files to a table whose frozen encryption settings
+    /// differ, in either direction, from what they were written under: the table was
+    /// created or replaced after the writer read its configuration.
     pub(crate) fn check_target(&self, configuration: &HashMap<String, String>) -> DeltaResult<()> {
         let target = EncryptionConfig::try_from_configuration(configuration)?;
         match EncryptionConfig::frozen_change(self.encryption.as_ref(), target.as_ref()) {

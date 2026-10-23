@@ -277,44 +277,41 @@ impl DeltaWriterProperties {
         Ok(self.with_parquet_properties(parquet))
     }
 
-    /// Fill the stats configuration from the table configuration if it is not already set.
-    /// Unlike the `with_` setters, this never overrides a value already set.
-    // Only the DataFusion write paths call this.
+    /// Fill the stats configuration from the table's where unset.
     #[cfg_attr(not(feature = "datafusion"), allow(dead_code))]
-    pub(crate) fn apply_table_stats(mut self, table_config: &TableConfiguration) -> Self {
+    fn apply_table_stats(mut self, table_config: &TableConfiguration) -> Self {
         if self.stats.is_none() {
             self.stats = Some(WriterStatsConfig::from_config(table_config));
         }
         self
     }
 
-    /// Fill the target file size and stats configuration from the table configuration
-    /// where they are not already set. Unlike the `with_` setters, this never overrides
-    /// a value already set.
+    /// Fill the target file size from the table's where unset. Operations call this; the
+    /// stats configuration and encryption are filled by [`for_table`](Self::for_table) where
+    /// every DataFusion write path meets the table.
     // Only the DataFusion write paths call this.
     #[cfg_attr(not(feature = "datafusion"), allow(dead_code))]
     pub(crate) fn apply_table_defaults(mut self, table_config: &TableConfiguration) -> Self {
         if self.target_file_size.is_none() {
             self.target_file_size = Some(table_config.table_properties().target_file_size());
         }
-        self.apply_table_stats(table_config)
+        self
     }
 
     /// `self` as the DataFusion write paths write `table_config`'s files: the table's stats
-    /// configuration where unset, plus the table's encryption, which every path must
-    /// apply and no caller's properties can remove (see
-    /// [`apply_encryption`](crate::operations::write::encryption::apply_encryption)).
+    /// configuration where unset, plus its encryption, which no caller's properties can
+    /// remove (see [`apply_encryption`](crate::operations::write::encryption::apply_encryption)).
     /// The target file size is not filled, since `None` disables rolling for a writer.
     #[cfg(feature = "datafusion")]
     pub(crate) fn for_table(
         self,
         table_config: &TableConfiguration,
-        runtime_env: Option<&datafusion::execution::runtime_env::RuntimeEnv>,
+        runtime_env: &datafusion::execution::runtime_env::RuntimeEnv,
     ) -> DeltaResult<Self> {
         crate::operations::write::encryption::apply_encryption(
             self.apply_table_stats(table_config),
             table_config.metadata().configuration(),
-            runtime_env,
+            Some(runtime_env),
         )
     }
 
@@ -519,7 +516,9 @@ mod tests {
             ]),
         );
 
-        let filled = DeltaWriterProperties::default().apply_table_defaults(&table_config);
+        let filled = DeltaWriterProperties::default()
+            .apply_table_defaults(&table_config)
+            .apply_table_stats(&table_config);
         assert_eq!(filled.target_file_size(), NonZeroU64::new(1024));
         assert_eq!(filled.stats().stats_columns, Some(vec!["a".to_string()]));
 
@@ -529,7 +528,8 @@ mod tests {
                 DataSkippingNumIndexedCols::AllColumns,
                 None,
             ))
-            .apply_table_defaults(&table_config);
+            .apply_table_defaults(&table_config)
+            .apply_table_stats(&table_config);
         assert_eq!(kept.target_file_size(), NonZeroU64::new(7));
         assert_eq!(
             kept.stats().num_indexed_cols,
