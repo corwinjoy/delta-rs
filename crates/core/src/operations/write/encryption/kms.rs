@@ -27,8 +27,9 @@
 //! material as `kmsInstanceID`. `delta.encryption.kms_configuration`, when set, reaches the
 //! [`KmsClientFactory`](parquet_key_management::kms::KmsClientFactory) as the custom KMS
 //! option named [`ENCRYPTION_KMS_CONFIGURATION_PROP`]. The crate caches KMS clients by
-//! instance ID, URL and access token, not by custom options, so tables that share a
-//! `kms_id` but differ in `kms_configuration` share a client until its cache entry expires.
+//! instance ID, URL and access token, not by custom options, so the factory keeps one
+//! [`CryptoFactory`] per distinct `kms_configuration`: tables that differ in it never share
+//! a client, and a changed `kms_configuration` takes effect on the next file.
 //!
 //! # Additional authenticated data
 //! The file name is the AAD prefix, and it is stored in the file, so the file stays
@@ -38,6 +39,8 @@
 
 use std::fmt::Debug;
 use std::sync::Arc;
+
+use dashmap::DashMap;
 
 use arrow_schema::Schema as ArrowSchema;
 use async_trait::async_trait;
@@ -54,25 +57,40 @@ use parquet_key_management::crypto_factory::{
 use parquet_key_management::key_unwrapper::KeyUnwrapper;
 use parquet_key_management::kms::KmsConnectionConfig;
 
+use super::COERCE_TYPES_OPTION;
 use crate::kernel::spawn_blocking_with_span;
 use crate::table::config::{
     ENCRYPTION_FOOTER_KEY_PROP, ENCRYPTION_KMS_CONFIGURATION_PROP, ENCRYPTION_KMS_ID_PROP,
     EncryptionConfig,
 };
 
-/// The reference [`EncryptionFactory`]: a [`CryptoFactory`] driven by the table's
+/// The reference [`EncryptionFactory`]: [`CryptoFactory`]s driven by the table's
 /// `delta.encryption.*` properties. See the module documentation.
 pub struct KmsEncryptionFactory {
-    crypto: Arc<CryptoFactory>,
+    make_crypto: Box<dyn Fn() -> CryptoFactory + Send + Sync>,
+    /// `kms_configuration` → the crypto factory, with its KMS client cache, for it.
+    by_configuration: DashMap<Option<String>, Arc<CryptoFactory>>,
 }
 
 impl KmsEncryptionFactory {
-    /// A factory over `crypto`, built with [`CryptoFactory::new`] from a `KmsClientFactory`
-    /// (or one of its async constructors, with the crate's runtime features).
-    pub fn new(crypto: CryptoFactory) -> Self {
+    /// A factory whose [`CryptoFactory`]s `make_crypto` builds, one per distinct
+    /// `kms_configuration` (see the module documentation): typically
+    /// `|| CryptoFactory::new(my_kms_client_factory.clone())`, or one of the crate's async
+    /// constructors with its runtime features.
+    pub fn new(make_crypto: impl Fn() -> CryptoFactory + Send + Sync + 'static) -> Self {
         Self {
-            crypto: Arc::new(crypto),
+            make_crypto: Box::new(make_crypto),
+            by_configuration: DashMap::new(),
         }
+    }
+
+    fn crypto(&self, kms_configuration: Option<&str>) -> Arc<CryptoFactory> {
+        Arc::clone(
+            &self
+                .by_configuration
+                .entry(kms_configuration.map(str::to_string))
+                .or_insert_with(|| Arc::new((self.make_crypto)())),
+        )
     }
 }
 
@@ -129,13 +147,17 @@ impl EncryptionFactory for KmsEncryptionFactory {
         let mut encryption = EncryptionConfiguration::builder(enc.footer_key.clone())
             .set_plaintext_footer(enc.plaintext_footer);
         // A configured column covers every parquet leaf under it.
-        for (master_key_id, leaves) in enc.column_key_leaves(schema)? {
+        let coerce_types = config
+            .options
+            .get(COERCE_TYPES_OPTION)
+            .is_some_and(|v| v == "true");
+        for (master_key_id, leaves) in enc.column_key_leaves(schema, coerce_types)? {
             encryption = encryption.add_column_key(master_key_id, leaves);
         }
         let encryption = encryption.build().map_err(external)?;
         let connection = connection(Some(&enc.kms_id), enc.kms_configuration.as_deref());
         // The KMS client is synchronous, so its round trips run off the async executor.
-        let crypto = Arc::clone(&self.crypto);
+        let crypto = self.crypto(enc.kms_configuration.as_deref());
         let keys =
             spawn_blocking_with_span(move || crypto.file_encryption_keys(connection, &encryption))
                 .await
@@ -166,18 +188,19 @@ impl EncryptionFactory for KmsEncryptionFactory {
         config: &EncryptionFactoryOptions,
         _file_path: &Path,
     ) -> DataFusionResult<Option<Arc<FileDecryptionProperties>>> {
+        let kms_configuration = config
+            .options
+            .get(ENCRYPTION_KMS_CONFIGURATION_PROP)
+            .map(String::as_str);
         let connection = connection(
             config
                 .options
                 .get(ENCRYPTION_KMS_ID_PROP)
                 .map(String::as_str),
-            config
-                .options
-                .get(ENCRYPTION_KMS_CONFIGURATION_PROP)
-                .map(String::as_str),
+            kms_configuration,
         );
         let unwrapper = self
-            .crypto
+            .crypto(kms_configuration)
             .key_unwrapper(connection, DecryptionConfiguration::default())
             .map_err(external)?;
         Ok(Some(
@@ -306,49 +329,88 @@ mod tests {
             .map_err(|e| ParquetError::ArrowError(e.to_string()))
     }
 
-    /// The table's `kms_id` and `kms_configuration` reach the KMS client factory.
+    /// The table's `kms_id` and `kms_configuration` reach the KMS client factory, and
+    /// tables with the same `kms_id` but different configurations get their own clients
+    /// rather than the first one's from the crate's cache.
     #[tokio::test]
-    async fn kms_configuration_reaches_the_client_factory() {
+    async fn kms_configuration_reaches_the_client_factory_and_isolates_clients() {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let client: KmsClientRef = Arc::new(InMemoryKmsClient::default());
-        let factory = KmsEncryptionFactory::new(CryptoFactory::new({
+        let factory = KmsEncryptionFactory::new({
             let seen = Arc::clone(&seen);
-            move |info: &KmsConnectionInfo| {
-                seen.lock().unwrap().push((
-                    info.kms_instance_id().to_string(),
-                    info.custom_kms_conf()
-                        .get(ENCRYPTION_KMS_CONFIGURATION_PROP)
-                        .cloned(),
-                ));
-                Ok(Arc::clone(&client))
+            move || {
+                let seen = Arc::clone(&seen);
+                let client = Arc::clone(&client);
+                CryptoFactory::new(move |info: &KmsConnectionInfo| {
+                    seen.lock().unwrap().push((
+                        info.kms_instance_id().to_string(),
+                        info.custom_kms_conf()
+                            .get(ENCRYPTION_KMS_CONFIGURATION_PROP)
+                            .cloned(),
+                    ));
+                    Ok(Arc::clone(&client))
+                })
             }
-        }));
-        let file = encrypt(
-            &factory,
-            &options(&[
-                (ENCRYPTION_KMS_ID_PROP, "kms"),
-                (ENCRYPTION_KMS_CONFIGURATION_PROP, "vault-a"),
-                (ENCRYPTION_FOOTER_KEY_PROP, "fk"),
-            ]),
-        )
-        .await;
-        decrypt(
-            &factory,
-            &options(&[
-                (ENCRYPTION_KMS_ID_PROP, "kms"),
-                (ENCRYPTION_KMS_CONFIGURATION_PROP, "vault-a"),
-            ]),
-            file,
-        )
-        .await
-        .unwrap();
+        });
+        for vault in ["vault-a", "vault-b"] {
+            let file = encrypt(
+                &factory,
+                &options(&[
+                    (ENCRYPTION_KMS_ID_PROP, "kms"),
+                    (ENCRYPTION_KMS_CONFIGURATION_PROP, vault),
+                    (ENCRYPTION_FOOTER_KEY_PROP, "fk"),
+                ]),
+            )
+            .await;
+            decrypt(
+                &factory,
+                &options(&[
+                    (ENCRYPTION_KMS_ID_PROP, "kms"),
+                    (ENCRYPTION_KMS_CONFIGURATION_PROP, vault),
+                ]),
+                file,
+            )
+            .await
+            .unwrap();
+        }
         let seen = seen.lock().unwrap();
-        assert!(!seen.is_empty());
-        assert!(
-            seen.iter()
-                .all(|(id, cfg)| id == "kms" && cfg.as_deref() == Some("vault-a")),
+        assert!(seen.iter().all(|(id, _)| id == "kms"), "{seen:?}");
+        let vaults: std::collections::HashSet<_> =
+            seen.iter().map(|(_, cfg)| cfg.clone()).collect();
+        assert_eq!(
+            vaults,
+            [Some("vault-a".to_string()), Some("vault-b".to_string())].into(),
             "{seen:?}"
         );
+    }
+
+    /// Column keys name the leaves the writer will produce: with `coerce_types` a list's
+    /// leaf is `tags.list.element`, otherwise `tags.list.item`.
+    #[tokio::test]
+    async fn column_key_leaves_follow_the_writers_coerce_types() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "tags",
+            DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+            true,
+        )]));
+        for (coerce, leaf) in [("false", "tags.list.item"), ("true", "tags.list.element")] {
+            let properties = mock_kms_factory()
+                .get_file_encryption_properties(
+                    &options(&[
+                        (ENCRYPTION_KMS_ID_PROP, "kms"),
+                        (ENCRYPTION_FOOTER_KEY_PROP, "fk"),
+                        (ENCRYPTION_COLUMN_KEYS_PROP, "k:tags"),
+                        (COERCE_TYPES_OPTION, coerce),
+                    ]),
+                    &schema,
+                    &Path::from("part-0.parquet"),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            let (names, _, _) = properties.column_keys();
+            assert_eq!(names, vec![leaf.to_string()]);
+        }
     }
 
     /// Each key gets its own wrapped data key, stored in the file as PKMT1 key material.

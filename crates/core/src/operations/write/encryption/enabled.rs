@@ -31,8 +31,9 @@ pub(super) fn apply(
 /// A [`WriterPropertiesLayer`] that gets each file's encryption keys from the
 /// [`EncryptionFactory`] registered for the table's KMS, passing it the table's
 /// `footer_key`, `column_keys` and `plaintext_footer` as options (see
-/// [`EncryptionConfig::writer_factory_options`]). It only adds the file encryption
-/// properties, so the codec and row-group bounds the file was planned with stay.
+/// [`EncryptionConfig::writer_factory_options`]) plus [`COERCE_TYPES_OPTION`](super::COERCE_TYPES_OPTION).
+/// It only adds the file encryption properties, so the codec and row-group bounds the file
+/// was planned with stay.
 #[derive(Debug)]
 struct KmsEncryptionLayer {
     encryption_factory: Arc<dyn EncryptionFactory>,
@@ -46,10 +47,19 @@ impl WriterPropertiesLayer for KmsEncryptionLayer {
         builder: WriterPropertiesBuilder,
         file: FileContext<'_>,
     ) -> DeltaResult<WriterPropertiesBuilder> {
+        // The factory needs the writer's `coerce_types` to name the leaves it keys; the
+        // builder has no getters, so read it from the built properties.
+        let props = builder.build();
+        let mut options = self.factory_options.clone();
+        options.options.insert(
+            super::COERCE_TYPES_OPTION.to_string(),
+            props.coerce_types().to_string(),
+        );
         let encryption_props = self
             .encryption_factory
-            .get_file_encryption_properties(&self.factory_options, file.schema, file.path)
+            .get_file_encryption_properties(&options, file.schema, file.path)
             .await?;
+        let builder = props.into_builder();
 
         // The table's properties require encryption, so a factory that returns none is
         // misconfigured; erroring here keeps plaintext files out of an encrypted table.

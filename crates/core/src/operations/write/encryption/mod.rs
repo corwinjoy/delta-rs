@@ -39,6 +39,12 @@ pub use kms::KmsEncryptionFactory;
 #[cfg(feature = "encryption")]
 pub use parquet_key_management;
 
+/// Option the encryption layer adds to the factory options: `"true"` when the file is
+/// written with parquet's `coerce_types`, which renames list and map leaves (`tags.list.item`
+/// becomes `tags.list.element`). A factory that names column leaves must convert the schema
+/// with the same setting, or its column keys silently miss the renamed leaves.
+pub const COERCE_TYPES_OPTION: &str = "delta.writer.coerce_types";
+
 /// `props` with the table's encryption, if it has any.
 ///
 /// For a table with `delta.encryption.*` properties, a layer that encrypts every file is
