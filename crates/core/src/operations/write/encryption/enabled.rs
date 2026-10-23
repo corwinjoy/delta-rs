@@ -9,31 +9,17 @@ use datafusion::execution::parquet_encryption::EncryptionFactory;
 use datafusion::execution::runtime_env::RuntimeEnv;
 use parquet::file::properties::WriterPropertiesBuilder;
 
-use crate::datafile::{DeltaWriterProperties, FileContext, WriterPropertiesLayer};
+use crate::datafile::{FileContext, WriterPropertiesLayer};
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::table::config::EncryptionConfig;
-
-/// `props` with a layer that encrypts every file through the factory registered as
-/// `enc.kms_id`.
-pub(super) fn apply(
-    props: DeltaWriterProperties,
-    enc: EncryptionConfig,
-    runtime_env: Option<&RuntimeEnv>,
-) -> DeltaResult<DeltaWriterProperties> {
-    let encryption_factory = resolve_encryption_factory(&enc.kms_id, runtime_env)?;
-    Ok(props.with_layer(KmsEncryptionLayer {
-        encryption_factory,
-        enc,
-    }))
-}
 
 /// Asks the table's [`EncryptionFactory`] for each file's keys, passing the table's
 /// properties with `column_keys` resolved to the file's parquet leaf paths (see
 /// [`EncryptionConfig::writer_factory_options`]). Adds only the encryption properties.
 #[derive(Debug)]
-struct KmsEncryptionLayer {
-    encryption_factory: Arc<dyn EncryptionFactory>,
-    enc: EncryptionConfig,
+pub(super) struct KmsEncryptionLayer {
+    pub(super) encryption_factory: Arc<dyn EncryptionFactory>,
+    pub(super) enc: EncryptionConfig,
 }
 
 #[async_trait]

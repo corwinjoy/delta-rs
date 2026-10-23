@@ -144,16 +144,16 @@ impl WriteWindow {
             &delta_kernel::table_properties::TableProperties::from(configuration.iter()),
         ));
         let encryption = EncryptionConfig::try_from_configuration(configuration)?;
+        #[cfg(feature = "datafusion")]
+        {
+            self.factory.props = crate::operations::write::encryption::apply_encryption(
+                self.factory.props.clone(),
+                configuration,
+                None,
+            )?;
+        }
+        #[cfg(not(feature = "datafusion"))]
         if encryption.is_some() {
-            #[cfg(feature = "datafusion")]
-            {
-                self.factory.props = crate::operations::write::encryption::apply_encryption(
-                    self.factory.props.clone(),
-                    configuration,
-                    None,
-                )?;
-            }
-            #[cfg(not(feature = "datafusion"))]
             return Err(DeltaTableError::Generic(
                 "This table's delta.encryption.* properties require the 'datafusion' and \
                  'encryption' features; the legacy writers cannot encrypt without them"

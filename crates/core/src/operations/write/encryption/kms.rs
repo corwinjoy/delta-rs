@@ -88,11 +88,8 @@ fn external(err: parquet_key_management::errors::Error) -> DataFusionError {
 }
 
 /// The KMS connection for `kms_id` and the table's `kms_configuration`.
-fn connection(kms_id: Option<&str>, kms_configuration: Option<&str>) -> Arc<KmsConnectionConfig> {
-    let mut builder = KmsConnectionConfig::builder();
-    if let Some(id) = kms_id {
-        builder = builder.set_kms_instance_id(id.to_string());
-    }
+fn connection(kms_id: &str, kms_configuration: Option<&str>) -> Arc<KmsConnectionConfig> {
+    let mut builder = KmsConnectionConfig::builder().set_kms_instance_id(kms_id.to_string());
     if let Some(cfg) = kms_configuration {
         builder = builder.set_custom_kms_conf_option(
             ENCRYPTION_KMS_CONFIGURATION_PROP.to_string(),
@@ -100,15 +97,6 @@ fn connection(kms_id: Option<&str>, kms_configuration: Option<&str>) -> Arc<KmsC
         );
     }
     Arc::new(builder.build())
-}
-
-/// The AAD prefix: the file name.
-fn aad_prefix(file_path: &Path) -> Vec<u8> {
-    file_path
-        .filename()
-        .unwrap_or(file_path.as_ref())
-        .as_bytes()
-        .to_vec()
 }
 
 #[async_trait]
@@ -136,7 +124,7 @@ impl EncryptionFactory for KmsEncryptionFactory {
             encryption = encryption.add_column_key(key.key_id.clone(), leaves);
         }
         let encryption = encryption.build().map_err(external)?;
-        let connection = connection(Some(&enc.kms_id), enc.kms_configuration.as_deref());
+        let connection = connection(&enc.kms_id, enc.kms_configuration.as_deref());
         // The KMS client is synchronous, so its round trips run off the async executor.
         let crypto = self.crypto(enc.kms_configuration.as_deref());
         let keys =
@@ -149,7 +137,14 @@ impl EncryptionFactory for KmsEncryptionFactory {
         let mut builder = FileEncryptionProperties::builder(footer.key().to_vec())
             .with_footer_key_metadata(footer.metadata().to_vec())
             .with_plaintext_footer(keys.plaintext_footer())
-            .with_aad_prefix(aad_prefix(file_path))
+            // The AAD prefix is the file name.
+            .with_aad_prefix(
+                file_path
+                    .filename()
+                    .unwrap_or(file_path.as_ref())
+                    .as_bytes()
+                    .to_vec(),
+            )
             .with_aad_prefix_storage(true);
         for (leaf, key) in keys.column_keys() {
             builder = builder.with_column_key_and_metadata(
@@ -176,7 +171,8 @@ impl EncryptionFactory for KmsEncryptionFactory {
             config
                 .options
                 .get(ENCRYPTION_KMS_ID_PROP)
-                .map(String::as_str),
+                .map(String::as_str)
+                .unwrap_or_default(),
             kms_configuration,
         );
         let unwrapper = self
@@ -235,11 +231,12 @@ mod tests {
     }
 
     fn options(entries: &[(&str, &str)]) -> EncryptionFactoryOptions {
-        let mut options = EncryptionFactoryOptions::default();
-        for (key, value) in entries {
-            options.options.insert(key.to_string(), value.to_string());
+        EncryptionFactoryOptions {
+            options: entries
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
         }
-        options
     }
 
     fn batch() -> RecordBatch {

@@ -41,7 +41,11 @@ pub fn apply_encryption(
     };
     #[cfg(feature = "encryption")]
     {
-        enabled::apply(props, enc, runtime_env)
+        let encryption_factory = resolve_encryption_factory(&enc.kms_id, runtime_env)?;
+        Ok(props.with_layer(enabled::KmsEncryptionLayer {
+            encryption_factory,
+            enc,
+        }))
     }
     #[cfg(not(feature = "encryption"))]
     {

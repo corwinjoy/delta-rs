@@ -883,11 +883,10 @@ fn new_plaintext_leaves(
     added: &mut Vec<String>,
 ) {
     let join = |prefix: &str, name: &str| {
-        if prefix.is_empty() {
-            name.to_string()
-        } else {
-            format!("{prefix}.{name}")
-        }
+        [prefix, name]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .join(".")
     };
     for field in fields {
         let logical = join(logical_prefix, field.name());
