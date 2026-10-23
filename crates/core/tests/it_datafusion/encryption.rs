@@ -584,9 +584,11 @@ async fn test_misspelled_property_is_rejected_alongside_encryption() -> DeltaRes
 #[tokio::test]
 async fn test_no_log_statistics_for_encrypted_columns() -> DeltaResult<()> {
     let kms_id = register_fresh_factory();
-    for (column_keys, expect_int, expect_string) in
-        [("test-key:int", false, true), ("", false, false)]
-    {
+    for (column_keys, expect_int, expect_string) in [
+        ("test-key:int", false, true),
+        ("test-key:int,string", false, false),
+        ("", false, false),
+    ] {
         let tmp = TempDir::new().unwrap();
         let mut properties = encryption(&kms_id).to_vec();
         if !column_keys.is_empty() {

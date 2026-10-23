@@ -719,8 +719,32 @@ mod tests {
         .unwrap();
         for (coerce, leaf) in [(false, "tags.list.item"), (true, "tags.list.element")] {
             let leaves = enc.column_key_leaves(&schema, coerce).unwrap();
-            assert_eq!(leaves, vec![("k".to_string(), vec![leaf.to_string()])]);
+            assert_eq!(leaves.len(), 1);
+            assert_eq!(leaves[0].to_string(), format!("k:{leaf}"));
         }
+    }
+
+    /// Every column sharing a key ID is covered, not only the last one listed.
+    #[test]
+    fn column_key_leaves_keep_every_column_of_a_key() {
+        use arrow_schema::{DataType as ArrowType, Field, Schema};
+        let schema = Schema::new(vec![
+            Field::new("int", ArrowType::Int32, true),
+            Field::new("string", ArrowType::Utf8, true),
+        ]);
+        let enc = EncryptionConfig::try_from_configuration(&HashMap::from([
+            (ENCRYPTION_KMS_ID_PROP.to_string(), "kms".to_string()),
+            (ENCRYPTION_FOOTER_KEY_PROP.to_string(), "fk".to_string()),
+            (
+                ENCRYPTION_COLUMN_KEYS_PROP.to_string(),
+                "k:int,string".to_string(),
+            ),
+        ]))
+        .unwrap()
+        .unwrap();
+        let leaves = enc.column_key_leaves(&schema, false).unwrap();
+        assert_eq!(leaves.len(), 1);
+        assert_eq!(leaves[0].to_string(), "k:int,string");
     }
 
     #[test]
