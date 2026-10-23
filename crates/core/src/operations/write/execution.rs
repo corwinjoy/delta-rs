@@ -21,7 +21,6 @@ use tokio::task::JoinSet;
 
 use datafusion::execution::runtime_env::RuntimeEnv;
 
-use super::encryption::apply_encryption;
 use crate::DeltaTableError;
 use crate::datafile::DeltaWriterProperties;
 use crate::datafile::writer::{DeltaWriter, UploadBudget, WriterConfig, write_batches_timed};
@@ -299,13 +298,7 @@ impl WriteSinkConfig {
         object_store: ObjectStoreRef,
         props: DeltaWriterProperties,
     ) -> DeltaResult<Self> {
-        // Table encryption always wins, so no write path can put plaintext files into an
-        // encrypted table.
-        let props = apply_encryption(
-            props.apply_table_stats(table_config),
-            table_config,
-            runtime_env,
-        )?;
+        let props = props.for_table(table_config, runtime_env)?;
         Ok(Self {
             partition_columns: table_config.metadata().partition_columns().to_vec(),
             object_store,

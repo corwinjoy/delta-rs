@@ -145,9 +145,9 @@ impl WriteWindow {
         configuration: &HashMap<String, String>,
     ) -> DeltaResult<()> {
         let encryption = EncryptionConfig::try_from_configuration(configuration)?;
-        if let Some(enc) = &encryption {
+        if encryption.is_some() {
             self.factory.props =
-                super::apply_legacy_writer_encryption(self.factory.props.clone(), enc)?;
+                super::apply_legacy_writer_encryption(self.factory.props.clone(), configuration)?;
         }
         self.encryption = encryption;
         Ok(())

@@ -534,7 +534,7 @@ async fn test_column_key_on_a_struct_encrypts_its_leaves() -> DeltaResult<()> {
 #[tokio::test]
 async fn test_caller_properties_keep_encryption() -> DeltaResult<()> {
     use deltalake_core::datafile::DeltaWriterProperties;
-    use deltalake_core::operations::write::encryption::apply_encryption_from_configuration;
+    use deltalake_core::operations::write::encryption::apply_encryption;
     use parquet::basic::{Compression, ZstdLevel};
     use parquet::file::properties::WriterProperties;
     use parquet::schema::types::ColumnPath;
@@ -548,7 +548,7 @@ async fn test_caller_properties_keep_encryption() -> DeltaResult<()> {
         ),
     ]);
     let zstd = Compression::ZSTD(ZstdLevel::try_new(3).unwrap());
-    let props = apply_encryption_from_configuration(
+    let props = apply_encryption(
         DeltaWriterProperties::default()
             .with_parquet_properties(WriterProperties::builder().set_compression(zstd).build()),
         &configuration,
