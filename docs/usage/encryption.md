@@ -87,8 +87,10 @@ it is not frozen, but is not applied either: change it with the table-property o
 ## Protocol
 
 The RFC guards encrypted tables with a `parquetEncryption` table feature so that engines
-without encryption support refuse them. delta-kernel does not accept that feature yet, so
-delta-rs does not add it and recognises encrypted tables by their properties instead. Until
+without encryption support refuse them. While the RFC is a draft the name carries the `-dev`
+suffix the RFC process asks of experimental implementations, `parquetEncryption-dev`; once it
+is standardised, delta-rs will accept both names. delta-kernel does not accept the feature yet,
+so delta-rs does not add it and recognises encrypted tables by their properties instead. Until
 the feature can be added, other engines are not protected.
 
 Any `delta.encryption.*` key marks a table as encrypted, valid or not, so a misconfigured

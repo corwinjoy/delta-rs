@@ -16,8 +16,10 @@ use crate::table::config::{EncryptionConfig, TablePropertiesExt as _};
 
 use tracing::log::*;
 
-/// The table feature for Parquet modular encryption of data files.
-const PARQUET_ENCRYPTION_FEATURE: &str = "parquetEncryption";
+/// The table feature for Parquet modular encryption of data files. The `-dev` suffix marks
+/// the RFC as a draft, as the RFC process asks; once it is standardised, both names are
+/// accepted.
+const PARQUET_ENCRYPTION_FEATURE: &str = "parquetEncryption-dev";
 
 /// Whether this build can read and write tables with `delta.encryption.*` properties.
 /// Until the read and write paths land, both are refused.
@@ -304,8 +306,9 @@ impl ProtocolChecker {
             check_encryption_change(snapshot, metadata, operation)?;
         }
         if matches!(operation, DeltaOperation::Create { .. }) {
-            // A replace removes every data file without reading one, so the old table's
-            // encryption does not constrain it; only its protocol does.
+            // Create-or-replace removes every existing data file and never reads one, so
+            // the old table's encryption properties do not matter here. Its protocol
+            // versions and features still must be ones delta-rs supports.
             self.can_read_from_protocol(snapshot.protocol())?;
             self.can_write_to_protocol(snapshot.protocol())?;
         } else {
