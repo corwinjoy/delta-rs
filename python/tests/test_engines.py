@@ -127,6 +127,25 @@ def test_datafusion_reads_deletion_vector_table():
     assert sorted(table["value"].to_pylist()) == [1, 2, 3, 4, 5, 6, 7, 8]
 
 
+def test_pyarrow_engine_refuses_encrypted_table(tmp_path: pathlib.Path):
+    # Encrypted tables are recognised by their delta.encryption.* properties; a
+    # pyarrow Dataset has no decryption keys, so it must not be handed the files.
+    import pyarrow as pa
+
+    dt = DeltaTable.create(
+        tmp_path,
+        schema=pa.schema([pa.field("v", pa.int64())]),
+        configuration={
+            "delta.encryption.kms_id": "kms",
+            "delta.encryption.footer_key": "fk",
+        },
+    )
+    with pytest.raises(DeltaProtocolError, match="encryption"):
+        dt.to_pyarrow_table(engine="pyarrow")
+    with pytest.raises(DeltaError, match="parquetEncryption"):
+        dt.to_pyarrow_table(engine="datafusion")
+
+
 def test_datafusion_rejects_pyarrow_only_arguments(edge_table):
     import pyarrow.dataset as ds
     import pyarrow.fs as pa_fs
