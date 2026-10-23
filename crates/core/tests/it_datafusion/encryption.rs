@@ -353,6 +353,37 @@ async fn test_record_batch_writer_refuses_plaintext_for_table_created_encrypted(
     Ok(())
 }
 
+/// A writer that flushed while its table did not exist keeps checking the table at every
+/// later flush, so a table created encrypted in between still refuses its plaintext files.
+#[tokio::test]
+async fn test_record_batch_writer_rechecks_the_table_after_a_missing_table_flush() -> DeltaResult<()>
+{
+    use deltalake_core::writer::{DeltaWriter as _, RecordBatchWriter};
+
+    let kms_id = register_fresh_factory();
+    let dir = TempDir::new()?;
+    let uri = dir.path().to_str().unwrap();
+
+    let batch = get_table_batches();
+    let mut writer =
+        RecordBatchWriter::try_new(table_url(uri).as_str(), batch.schema(), None, None)?;
+    writer.write(batch.clone()).await?;
+    assert!(
+        !writer.flush().await?.is_empty(),
+        "plaintext files for a missing table"
+    );
+    writer.flush().await?; // a second flush with nothing written, table still missing
+
+    create_encrypted_table(uri, &kms_id).await?;
+    writer.write(batch).await?;
+    let err = writer
+        .flush()
+        .await
+        .expect_err("flush must refuse plaintext files for a table created encrypted");
+    assert!(err.to_string().contains("differs"), "{err}");
+    Ok(())
+}
+
 /// Replace `uri` with a table of the same schema and the given encryption properties.
 async fn replace_table(uri: &str, properties: &[(&str, &str)]) -> DeltaResult<DeltaTable> {
     use deltalake_core::protocol::SaveMode;
@@ -642,6 +673,46 @@ async fn test_schema_evolution_adds_plaintext_columns_to_column_keyed_table() ->
     let table = table
         .write(vec![widened])
         .with_schema_mode(SchemaMode::Merge)
+        .await?;
+    assert!(table.snapshot()?.schema().field("extra").is_some());
+
+    let stats = &add_stats(tmp.path())[0];
+    assert!(stats["minValues"].get("extra").is_some(), "{stats}");
+    assert!(stats["minValues"].get("int").is_none(), "{stats}");
+    assert_all_parquets_encrypted(tmp.path()).await;
+    Ok(())
+}
+
+/// An overwrite with `SchemaMode::Overwrite` can add columns too; they are plaintext (with
+/// statistics) while the keyed column stays encrypted, as for a merge.
+#[tokio::test]
+async fn test_schema_overwrite_adds_plaintext_columns_to_column_keyed_table() -> DeltaResult<()> {
+    use deltalake_core::operations::write::SchemaMode;
+    use deltalake_core::protocol::SaveMode;
+
+    let kms_id = register_fresh_factory();
+    let tmp = TempDir::new().unwrap();
+    let table =
+        deltalake_core::DeltaTableBuilder::from_url(table_url(tmp.path().to_str().unwrap()))?
+            .build()?
+            .create()
+            .with_columns(get_table_columns())
+            .with_property("delta.encryption.kms_id", &kms_id)
+            .with_property("delta.encryption.footer_key", "test-footer-key")
+            .with_property("delta.encryption.column_keys", "test-key:int")
+            .await?;
+
+    let batch = get_table_batches();
+    let mut fields = batch.schema().fields().to_vec();
+    fields.push(Arc::new(Field::new("extra", ArrowDataType::Int32, true)));
+    let mut columns = batch.columns().to_vec();
+    columns.push(Arc::new(Int32Array::from(vec![Some(1); batch.num_rows()])));
+    let widened = RecordBatch::try_new(Arc::new(ArrowSchema::new(fields)), columns).unwrap();
+
+    let table = table
+        .write(vec![widened])
+        .with_save_mode(SaveMode::Overwrite)
+        .with_schema_mode(SchemaMode::Overwrite)
         .await?;
     assert!(table.snapshot()?.schema().field("extra").is_some());
 

@@ -61,7 +61,8 @@ impl KmsClient for InMemoryKmsClient {
 /// The reference [`KmsEncryptionFactory`] over a fresh [`InMemoryKmsClient`].
 pub fn mock_kms_factory() -> Arc<dyn EncryptionFactory> {
     let client: KmsClientRef = Arc::new(InMemoryKmsClient::default());
-    Arc::new(KmsEncryptionFactory::new(CryptoFactory::new(
-        move |_: &KmsConnectionInfo| Ok(Arc::clone(&client)),
-    )))
+    Arc::new(KmsEncryptionFactory::new(move || {
+        let client = Arc::clone(&client);
+        CryptoFactory::new(move |_: &KmsConnectionInfo| Ok(Arc::clone(&client)))
+    }))
 }

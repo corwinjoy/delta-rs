@@ -256,8 +256,8 @@ impl RecordBatchWriter {
     /// settings must match what they were written under.
     async fn sync_table_config(&mut self, at_flush: bool) -> Result<(), DeltaTableError> {
         let (log_store, must_match) = match &self.table_config {
-            TableConfigState::Unloaded(log_store) => (log_store, false),
-            TableConfigState::Missing(log_store) if at_flush => (log_store, true),
+            TableConfigState::Unloaded(log_store) => (Arc::clone(log_store), false),
+            TableConfigState::Missing(log_store) if at_flush => (Arc::clone(log_store), true),
             _ => return Ok(()),
         };
         match Snapshot::try_new(log_store.as_ref(), None).await {
@@ -269,12 +269,9 @@ impl RecordBatchWriter {
                 self.apply_table_config(&configuration)?;
                 self.table_config = TableConfigState::Applied;
             }
+            // Still missing: keep checking at every flush until the table exists.
             Err(DeltaTableError::NotATable(_)) => {
-                if let TableConfigState::Unloaded(log_store) =
-                    std::mem::replace(&mut self.table_config, TableConfigState::Applied)
-                {
-                    self.table_config = TableConfigState::Missing(log_store);
-                }
+                self.table_config = TableConfigState::Missing(log_store);
             }
             Err(err) => return Err(err),
         }

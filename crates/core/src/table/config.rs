@@ -931,11 +931,15 @@ impl EncryptionConfig {
     /// The parquet leaf columns each column key covers in a file with `schema`, by key ID:
     /// a configured column covers every leaf under it (`address` covers `address.street`
     /// and `address.city`). A configured column with no leaf in the schema is an error.
+    /// `coerce_types` must match the writer's parquet setting, which renames list and map
+    /// leaves.
     pub fn column_key_leaves(
         &self,
         schema: &arrow_schema::Schema,
+        coerce_types: bool,
     ) -> DeltaResult<Vec<(String, Vec<String>)>> {
         let leaves: Vec<String> = parquet::arrow::ArrowSchemaConverter::new()
+            .with_coerce_types(coerce_types)
             .convert(schema)?
             .columns()
             .iter()
