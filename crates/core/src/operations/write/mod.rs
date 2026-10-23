@@ -72,6 +72,7 @@ use crate::logstore::with_operation;
 use crate::protocol::{DeltaOperation, SaveMode};
 use uuid::Uuid;
 
+pub mod encryption;
 pub(crate) mod execution;
 pub(crate) mod generated_columns;
 pub(crate) mod metrics;

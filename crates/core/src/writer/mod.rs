@@ -1,5 +1,7 @@
 //! Abstractions and implementations for writing data to delta tables
 
+use std::collections::HashMap;
+
 use arrow::{datatypes::FieldRef, datatypes::SchemaRef, error::ArrowError};
 use async_trait::async_trait;
 use object_store::Error as ObjectStoreError;
@@ -28,13 +30,13 @@ pub mod test_utils;
 /// Preview cap for validation errors that enumerate offending records/rows.
 pub(crate) const INVALID_PREVIEW_CAP: usize = 10;
 
+/// Refuse a table the legacy writers cannot write: column mapping, or encryption this build
+/// cannot provide. Runs before a sink opens, since `flush` uploads without a commit check.
 pub(crate) fn ensure_legacy_writer_supports_table(
-    table: &DeltaTable,
+    configuration: &HashMap<String, String>,
     operation: &str,
 ) -> Result<(), DeltaTableError> {
-    if table
-        .snapshot()?
-        .table_config()
+    if delta_kernel::table_properties::TableProperties::from(configuration.iter())
         .column_mapping_mode
         .is_some_and(|mode| mode != delta_kernel::table_features::ColumnMappingMode::None)
     {
@@ -43,9 +45,8 @@ pub(crate) fn ensure_legacy_writer_supports_table(
             operation,
         ));
     }
-    // `flush` uploads without a commit check, so refuse before a sink opens.
     crate::kernel::transaction::PROTOCOL.check_encryption(
-        table.snapshot()?.metadata().configuration(),
+        configuration,
         crate::kernel::transaction::WRITES_ENCRYPTED_TABLES,
     )?;
     Ok(())
