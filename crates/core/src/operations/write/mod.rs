@@ -414,6 +414,71 @@ impl WriteBuilder {
         }
     }
 
+    /// Refuse `delta.encryption.*` keys in the write configuration that differ from the
+    /// table's: `configuration` only applies when the write creates the table, so a
+    /// differing key is an error rather than dropped silently. Compared as parsed values,
+    /// so a pipeline can resend the same configuration in any order and with display or
+    /// physical names. `kms_configuration` is not frozen: a different value passes, and
+    /// is not applied either.
+    fn verify_encryption_configuration_unchanged(
+        &self,
+        snapshot: &EagerSnapshot,
+    ) -> DeltaResult<()> {
+        let given: Vec<_> = self
+            .configuration
+            .iter()
+            .filter(|(key, _)| key.starts_with(ENCRYPTION_PROP_PREFIX))
+            .collect();
+        if given.is_empty() {
+            return Ok(());
+        }
+        EncryptionConfig::check_known_properties(given.iter().map(|(key, _)| *key))?;
+        let current = snapshot.metadata().configuration();
+        let mut merged = current.clone();
+        for (key, value) in &given {
+            match value.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+                Some(value) => merged.insert((*key).clone(), value.to_string()),
+                None => merged.remove(*key),
+            };
+        }
+        // Differs as text; the parsed comparison may still find it equal.
+        let differs = given
+            .iter()
+            .find(|(key, _)| merged.get(*key) != current.get(*key))
+            .map(|(key, _)| key.as_str());
+        let changed = match (differs, EncryptionConfig::try_from_configuration(current)?) {
+            (None, _) => None,
+            // Any key set on an unencrypted table is a change.
+            (Some(key), None) => Some(key),
+            (Some(key), Some(old)) => {
+                match EncryptionConfig::try_from_configuration(&merged) {
+                    Ok(new) => {
+                        let new = new
+                            .map(|new| {
+                                new.with_physical_column_names(
+                                    &snapshot.schema(),
+                                    snapshot.table_configuration().column_mapping_mode(),
+                                )
+                            })
+                            .transpose()?;
+                        EncryptionConfig::frozen_change(Some(&old), new.as_ref())
+                    }
+                    // Not even valid (e.g. one key unset alone): differs.
+                    Err(_) => Some(key),
+                }
+            }
+        };
+        if let Some(key) = changed {
+            return Err(DeltaTableError::Generic(format!(
+                "'{key}' was given in the write configuration with a value that differs \
+                 from the table's, but a write does not change the configuration of an \
+                 existing table; to change its encryption, recreate it with \
+                 create-or-replace, or write to a new table"
+            )));
+        }
+        Ok(())
+    }
+
     /// Returns the actions that create the table when it does not exist yet, and the table
     /// configuration this write starts from.
     async fn check_preconditions(&self) -> DeltaResult<(Vec<Action>, TableConfiguration)> {
@@ -457,73 +522,7 @@ impl WriteBuilder {
                         Err(WriteError::AlreadyExists(self.log_store.root_url().clone()).into())
                     }
                     _ => {
-                        // `configuration` only applies when the write creates the table,
-                        // so encryption keys that differ from the table's are refused
-                        // rather than dropped silently. Compared as parsed values, so a
-                        // pipeline can resend the same configuration in any order and with
-                        // display or physical names. `kms_configuration` is not frozen: a
-                        // different value passes, and is not applied either.
-                        let given: Vec<_> = self
-                            .configuration
-                            .iter()
-                            .filter(|(key, _)| key.starts_with(ENCRYPTION_PROP_PREFIX))
-                            .collect();
-                        if !given.is_empty() {
-                            EncryptionConfig::check_known_properties(
-                                given.iter().map(|(key, _)| *key),
-                            )?;
-                            let current = snapshot.metadata().configuration();
-                            let mut merged = current.clone();
-                            for (key, value) in &given {
-                                match value.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
-                                    Some(value) => merged.insert((*key).clone(), value.to_string()),
-                                    None => merged.remove(*key),
-                                };
-                            }
-                            // Differs as text; the parsed comparison may still find it equal.
-                            let differs = given
-                                .iter()
-                                .find(|(key, _)| merged.get(*key) != current.get(*key))
-                                .map(|(key, _)| key.as_str());
-                            let changed =
-                                match (differs, EncryptionConfig::try_from_configuration(current)?)
-                                {
-                                    (None, _) => None,
-                                    // Any key set on an unencrypted table is a change.
-                                    (Some(key), None) => Some(key),
-                                    (Some(key), Some(old)) => {
-                                        match EncryptionConfig::try_from_configuration(&merged) {
-                                            Ok(new) => {
-                                                let new = new
-                                                    .map(|new| {
-                                                        new.with_physical_column_names(
-                                                            &snapshot.schema(),
-                                                            snapshot
-                                                                .table_configuration()
-                                                                .column_mapping_mode(),
-                                                        )
-                                                    })
-                                                    .transpose()?;
-                                                EncryptionConfig::frozen_change(
-                                                    Some(&old),
-                                                    new.as_ref(),
-                                                )
-                                            }
-                                            // Not even valid (e.g. one key unset alone): differs.
-                                            Err(_) => Some(key),
-                                        }
-                                    }
-                                };
-                            if let Some(key) = changed {
-                                return Err(DeltaTableError::Generic(format!(
-                                    "'{key}' was given in the write configuration with a value \
-                                 that differs from the table's, but a write does not change \
-                                 the configuration of an existing table; to change its \
-                                 encryption, recreate it with create-or-replace, or write to \
-                                 a new table"
-                                )));
-                            }
-                        }
+                        self.verify_encryption_configuration_unchanged(snapshot)?;
                         Ok((vec![], snapshot.table_configuration().clone()))
                     }
                 }
