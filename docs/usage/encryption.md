@@ -42,7 +42,7 @@ physical names, so renaming a column keeps the configuration valid; delta-rs acc
 names at creation and stores the physical names.
 
 The log holds no statistics for encrypted columns, so `delta.dataSkippingStatsColumns` must not
-name one, and data skipping is not available on them. Under uniform encryption no column
+include encrypted columns, and data skipping is not available on them. Under uniform encryption no column
 statistics are written at all.
 
 ## Changing the configuration
