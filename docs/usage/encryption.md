@@ -6,12 +6,11 @@ following the Delta protocol RFC for
 [Parquet encryption](https://github.com/delta-io/delta/issues/6195).
 Encryption is configured with table properties when the table is created.
 
-!!! warning "Experimental and not yet usable"
+!!! warning "Experimental"
     Parquet encryption follows a draft RFC that is not yet part of the Delta protocol. The
     properties, the feature name and the behaviour described here may change or be removed.
-    This release only defines and validates the properties: writing and reading encrypted
-    tables is not supported yet, and every build refuses encrypted tables until that support
-    lands.
+    This release writes encrypted tables but cannot read them yet: every build refuses to
+    read an encrypted table until that support lands.
 
 Support is an opt-in cargo feature (`encryption`) of the Rust crates. Builds without it refuse
 to read or write encrypted tables, so they never return ciphertext or add plaintext files.
