@@ -9,8 +9,6 @@ Encryption is configured with table properties when the table is created.
 !!! warning "Experimental"
     Parquet encryption follows a draft RFC that is not yet part of the Delta protocol. The
     properties, the feature name and the behaviour described here may change or be removed.
-    This release writes encrypted tables but cannot read them yet: every build refuses to
-    read an encrypted table until that support lands.
 
 Support is an opt-in cargo feature (`encryption`) of the Rust crates. Builds without it refuse
 to read or write encrypted tables, so they never return ciphertext or add plaintext files.
@@ -51,6 +49,48 @@ names at creation and stores the physical names.
 The log holds no statistics for encrypted columns, so `delta.dataSkippingStatsColumns` must not
 include encrypted columns, and data skipping is not available on them. Under uniform encryption no column
 statistics are written at all.
+
+## Registering a KMS
+
+delta-rs never holds master keys. It ships a reference `KmsEncryptionFactory` built on the
+[parquet-key-management](https://crates.io/crates/parquet-key-management) crate, the Rust
+implementation of the Parquet Key Management Tools used by parquet-java and PyArrow. The crate
+generates fresh data keys for every file, asks a key management system (KMS) to wrap them under
+the master key IDs named in the table properties, and stores the wrapped keys in the file's own
+Parquet key metadata. Readers ask the same KMS to unwrap them. The KMS is the crate's two-method
+trait `KmsClient` (or `AsyncKmsClient`), with `wrap_key` and `unwrap_key`; implement it for your
+service, give the factory a function that builds a `CryptoFactory` from it, and register the
+factory under the table's `kms_id` before using the table:
+
+```rust
+use deltalake::operations::write::encryption::parquet_key_management::crypto_factory::CryptoFactory;
+use deltalake::operations::write::encryption::{KmsEncryptionFactory, register_encryption_factory};
+
+let factory = KmsEncryptionFactory::new(|| {
+    CryptoFactory::new(|info| Ok(Arc::new(MyKms::connect(info)?)))
+});
+register_encryption_factory("my-kms", Arc::new(factory));
+```
+
+The crate is re-exported, so no separate dependency is needed. The client factory receives the
+KMS instance ID, which is the table's `kms_id`, and the table's `kms_configuration` as the custom
+option `delta.encryption.kms_configuration`. The crate caches clients by instance ID, URL and
+access token, so delta-rs builds one `CryptoFactory` per distinct `kms_configuration`: tables
+that differ in it never share a client, and a changed `kms_configuration` takes effect on the
+next file.
+
+The key metadata is the crate's PKMT1 key material with double wrapping, so files written by
+delta-rs can be read by parquet-java and PyArrow through an equivalent KMS client, and the other
+way round. Decryption depends only on the KMS and the key metadata in each file, never on the
+table's current `footer_key` or `column_keys`, so files written under earlier key settings stay
+readable.
+
+The `basic_operations_encryption` example in the `deltalake` crate shows a complete round trip
+with an in-memory stand-in for a KMS:
+
+```shell
+cargo run --example basic_operations_encryption -p deltalake --features "datafusion encryption"
+```
 
 ## Changing the configuration
 

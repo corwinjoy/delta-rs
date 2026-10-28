@@ -2,7 +2,7 @@
 use std::collections::HashMap;
 
 #[cfg(all(feature = "datafusion", feature = "encryption"))]
-use datafusion::config::{EncryptionFactoryOptions, TableParquetOptions};
+use datafusion::config::EncryptionFactoryOptions;
 use delta_kernel::expressions::ColumnName;
 use delta_kernel::schema::{DataType, StructType};
 use delta_kernel::table_features::ColumnMappingMode;
@@ -433,17 +433,6 @@ impl EncryptionConfig {
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join(";")
-    }
-
-    /// [`TableParquetOptions`] telling a DataFusion Parquet scan to decrypt with the
-    /// factory registered as [`kms_id`](EncryptionConfig::kms_id), carrying the
-    /// [reader options](Self::reader_factory_options) only.
-    #[cfg(all(feature = "datafusion", feature = "encryption"))]
-    pub fn to_table_parquet_options(&self) -> TableParquetOptions {
-        let mut opts = TableParquetOptions::default();
-        opts.crypto.factory_id = Some(self.kms_id.clone());
-        opts.crypto.factory_options = self.reader_factory_options();
-        opts
     }
 
     /// The options a registered encryption factory gets when decrypting a file: `kms_id`
@@ -1283,12 +1272,17 @@ mod tests {
         }
     }
 
-    /// Until the encryption read path lands, delta-rs refuses to read encrypted tables
-    /// rather than hand out ciphertext.
+    /// Reading an encrypted table needs the KMS-backed decryption, so builds without it
+    /// refuse rather than hand out ciphertext.
     #[tokio::test]
-    async fn protocol_checker_refuses_reading_encrypted_tables() {
+    async fn protocol_checker_reads_encrypted_tables_only_with_encryption_support() {
         let table = create_encrypted_table("pii-key:ssn", &[]).await.unwrap();
-        assert_refused(PROTOCOL.can_read_from(table.snapshot().unwrap().snapshot()));
+        let result = PROTOCOL.can_read_from(table.snapshot().unwrap().snapshot());
+        if cfg!(all(feature = "datafusion", feature = "encryption")) {
+            result.unwrap();
+        } else {
+            assert_refused(result);
+        }
     }
 
     /// Writing an encrypted table needs the KMS-backed writer, so builds without it
