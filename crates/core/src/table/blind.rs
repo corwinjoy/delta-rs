@@ -200,6 +200,10 @@ impl BlindDeltaTable {
                 .with_engine_info(format!("delta-rs:{}", env!("CARGO_PKG_VERSION")))
                 .with_data_change(true);
 
+            // Files for an encrypted table come from `RecordBatchWriter::for_blind_appends`,
+            // which encrypts them in this build and writes no statistics for encrypted columns.
+            #[cfg(all(feature = "datafusion", feature = "encryption"))]
+            txn.ack_parquet_encryption();
             txn.add_files(Box::new(ArrowEngineData::new(add_files_batch)));
 
             let mut retries = 0;

@@ -188,6 +188,31 @@ async fn test_legacy_record_batch_writer_is_encrypted() -> DeltaResult<()> {
     Ok(())
 }
 
+/// A blind append encrypts its files and kernel accepts the commit, since delta-rs
+/// acknowledges the encryption on the transaction.
+#[tokio::test]
+async fn test_blind_append_is_encrypted() -> DeltaResult<()> {
+    use deltalake_core::table::BlindDeltaTable;
+    use deltalake_core::writer::{DeltaWriter as _, RecordBatchWriter};
+
+    let kms_id = register_fresh_factory();
+    let dir = TempDir::new()?;
+    let uri = dir.path().to_str().unwrap();
+    create_encrypted_table(uri, &kms_id).await?;
+
+    let table = load_table(uri).await?;
+    let before = table.version();
+    let mut blind = BlindDeltaTable::try_new_with_log_store(table.log_store()).await?;
+    let mut writer = RecordBatchWriter::for_blind_appends(&blind)?;
+    writer.write(get_table_batches()).await?;
+    let adds = writer.flush().await?;
+    let version = blind.commit(adds).await?;
+    assert_eq!(Some(version), before.map(|v| v + 1));
+
+    assert_all_parquets_encrypted(dir.path()).await;
+    Ok(())
+}
+
 /// A DataFusion `INSERT INTO` through the DataSink encrypts like every other write path.
 #[tokio::test]
 async fn test_insert_into_datasink_is_encrypted() -> DeltaResult<()> {
