@@ -1372,16 +1372,6 @@ class DeltaTable:
                 "but this is not supported using pyarrow Datasets."
             )
 
-        # Encrypted tables are recognised by their properties until the
-        # parquetEncryption reader feature exists; a pyarrow Dataset has no
-        # decryption keys and would read plaintext-footer files partially.
-        if any(key.startswith("delta.encryption.") for key in configuration):
-            raise DeltaProtocolError(
-                "The table is configured for Parquet encryption "
-                "(delta.encryption.* properties) but this is not supported "
-                "using pyarrow Datasets."
-            )
-
         import pyarrow
         import pyarrow.fs as pa_fs
 

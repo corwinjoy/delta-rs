@@ -1,11 +1,12 @@
-//! Parquet Modular Encryption table properties: parsing, validation and change rules.
+//! Parquet Modular Encryption table properties: delta-rs's rules on top of kernel's parsing.
 use std::collections::HashMap;
 
 #[cfg(all(feature = "datafusion", feature = "encryption"))]
 use datafusion::config::{EncryptionFactoryOptions, TableParquetOptions};
 use delta_kernel::expressions::ColumnName;
-use delta_kernel::schema::{DataType, StructField, StructType};
+use delta_kernel::schema::{DataType, StructType};
 use delta_kernel::table_features::ColumnMappingMode;
+use delta_kernel::table_properties::{EncryptionColumnKey, TableProperties};
 
 use super::TableProperty;
 use crate::errors::{DeltaResult, DeltaTableError};
@@ -32,27 +33,16 @@ const ENCRYPTION_PROPS: [&str; 5] = [
     ENCRYPTION_COLUMN_KEYS_PROP,
 ];
 
-/// Whether two dot-separated column paths are the same or one contains the other.
-fn column_paths_overlap(a: &str, b: &str) -> bool {
-    let (shorter, longer) = if a.len() <= b.len() { (a, b) } else { (b, a) };
-    longer
-        .strip_prefix(shorter)
-        .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
-}
-
 fn invalid_encryption_config(msg: String) -> DeltaTableError {
     DeltaTableError::Generic(format!("Invalid table encryption configuration: {msg}"))
 }
 
-/// Whether `path` resolves through the schema, each part by `matches(field, name)`.
-fn path_exists<'p>(
-    schema: &StructType,
-    path: impl IntoIterator<Item = &'p str>,
-    matches: impl Fn(&StructField, &str) -> bool,
-) -> bool {
+/// Whether a path of physical names resolves through the schema.
+fn physical_path_exists(schema: &StructType, path: &[String], mode: ColumnMappingMode) -> bool {
     let mut fields = Some(schema);
     for part in path {
-        let Some(field) = fields.and_then(|s| s.fields().find(|f| matches(f, part))) else {
+        let Some(field) = fields.and_then(|s| s.fields().find(|f| f.physical_name(mode) == part))
+        else {
             return false;
         };
         fields = match field.data_type() {
@@ -60,31 +50,22 @@ fn path_exists<'p>(
             _ => None,
         };
     }
-    true
+    !path.is_empty()
 }
 
-/// Whether a stats column (physical path components) is an encrypted column (RFC
-/// dot-separated path) or nested in one. Whole components, so `a.b` is not `a`'s child.
-fn stats_column_is_encrypted(physical: &[String], encrypted: &str) -> bool {
-    let encrypted: Vec<&str> = encrypted.split('.').collect();
-    let physical: Vec<&str> = physical.iter().map(String::as_str).collect();
-    physical.starts_with(&encrypted) || encrypted.starts_with(&physical)
+/// Whether one column path is the other or an ancestor of it.
+fn paths_overlap(a: &[String], b: &[String]) -> bool {
+    a.starts_with(b) || b.starts_with(a)
 }
 
 /// Parquet Modular Encryption settings from a table's `delta.encryption.*` properties, with
 /// the names and semantics of the [protocol RFC](https://github.com/delta-io/delta/issues/6195).
 ///
 /// The properties are plaintext in the Delta log, so they hold only key IDs and KMS
-/// settings, never keys or credentials. Every build can parse them; encrypting or
-/// decrypting needs the `encryption` cargo feature. They are read from the raw metadata
-/// `configuration` map, not kernel's `TableProperties`, which keeps only the keys it does
-/// not recognise: once kernel types these keys, an encrypted table would look plaintext.
-///
-/// # Protocol
-/// The RFC guards encrypted tables with a `parquetEncryption` reader/writer feature.
-/// delta-kernel rejects that feature until it supports it, so delta-rs does not add it yet
-/// and recognises encrypted tables by their properties instead. Other engines are not
-/// protected until then.
+/// settings, never keys or credentials. Kernel parses them into
+/// [`TableProperties::encryption_kms_id`] and friends and carries the RFC's
+/// `parquetEncryption-dev` table feature; this type adds the rules delta-rs applies on top.
+/// Every build can parse them; encrypting or decrypting needs the `encryption` cargo feature.
 #[derive(Debug, Clone)]
 pub struct EncryptionConfig {
     /// The KMS client to use (`delta.encryption.kms_id`).
@@ -92,24 +73,19 @@ pub struct EncryptionConfig {
     /// Opaque KMS-specific configuration, e.g. JSON (`delta.encryption.kms_configuration`).
     pub kms_configuration: Option<String>,
     /// Master key ID for the footer (`delta.encryption.footer_key`). Always required: see
-    /// [`try_from_configuration`](Self::try_from_configuration).
+    /// [`try_from_properties`](Self::try_from_properties).
     pub footer_key: String,
     /// Leave the footer unencrypted; defaults to `false` (`delta.encryption.plaintext_footer`).
     pub plaintext_footer: bool,
-    /// Master key ID → columns it encrypts (`delta.encryption.column_keys`). Empty means
-    /// uniform encryption: every column is encrypted with the footer key.
-    pub column_keys: HashMap<String, Vec<String>>,
+    /// Master keys and the columns they encrypt (`delta.encryption.column_keys`), as physical
+    /// column paths. Empty means uniform encryption: every column is encrypted with the
+    /// footer key.
+    pub column_keys: Vec<EncryptionColumnKey>,
 }
 
 impl EncryptionConfig {
-    /// Whether any `delta.encryption.*` property is set, valid or not: an invalid
-    /// configuration must still not be read or written as plaintext.
-    ///
-    /// Fail-closed on purpose, like the RFC's `parquetEncryption` feature: treating a
-    /// misconfigured table as plaintext would read ciphertext or write plaintext. A stray
-    /// key without a footer key, which another engine may leave on a plaintext table,
-    /// therefore locks it out of delta-rs, and since the table's configuration is then
-    /// invalid, no commit can remove the key: create-or-replace is the way out.
+    /// Whether any `delta.encryption.*` property is set, valid or not. Per the RFC such a
+    /// table must list the `parquetEncryption-dev` feature in its protocol.
     pub fn is_configured(configuration: &HashMap<String, String>) -> bool {
         configuration
             .keys()
@@ -119,7 +95,7 @@ impl EncryptionConfig {
     /// Refuse a `delta.encryption.*` key this version does not know. Run on the keys a
     /// commit introduces, so a typo is caught before it is committed, but not on read or on
     /// keys already in the table: a property a later RFC revision adds must not lock the
-    /// table out of delta-rs, the `parquetEncryption` feature flag is what guards that.
+    /// table out of delta-rs, the `parquetEncryption-dev` feature is what guards that.
     pub fn check_known_properties<'a>(
         keys: impl IntoIterator<Item = &'a String>,
     ) -> DeltaResult<()> {
@@ -133,13 +109,20 @@ impl EncryptionConfig {
         }
     }
 
-    /// Parse and validate the encryption configuration from a table's raw metadata
-    /// `configuration`. `Ok(None)` when no `delta.encryption.*` property is set.
+    /// [`try_from_properties`](Self::try_from_properties) on a raw metadata `configuration`.
+    pub fn try_from_configuration(
+        configuration: &HashMap<String, String>,
+    ) -> DeltaResult<Option<Self>> {
+        Self::try_from_properties(&TableProperties::from(configuration.iter()))
+    }
+
+    /// The encryption configuration kernel parsed from a table's properties, validated.
+    /// `Ok(None)` when no `delta.encryption.*` property is set.
     ///
     /// Per the RFC, `footer_key` turns encryption on, so any other encryption property
-    /// without it is an error, as are a missing `kms_id` and malformed values. This is
-    /// stricter than the RFC, which lets a table keep `kms_id` with no footer key after
-    /// encryption was disabled; delta-rs refuses such a table rather than treat it as
+    /// without it is an error, as are a missing `kms_id` and a value kernel could not parse.
+    /// This is stricter than the RFC, which lets a table keep `kms_id` with no footer key
+    /// after encryption was disabled; delta-rs refuses such a table rather than treat it as
     /// plaintext. Unknown `delta.encryption.*` keys are ignored here; see
     /// [`check_known_properties`](Self::check_known_properties).
     ///
@@ -149,95 +132,74 @@ impl EncryptionConfig {
     /// key protects, they never replace it. See the [Parquet specification].
     ///
     /// [Parquet specification]: https://parquet.apache.org/docs/file-format/data-pages/encryption/
-    pub fn try_from_configuration(
-        configuration: &HashMap<String, String>,
-    ) -> DeltaResult<Option<Self>> {
-        if !Self::is_configured(configuration) {
+    pub fn try_from_properties(properties: &TableProperties) -> DeltaResult<Option<Self>> {
+        // Kernel leaves a known key whose value does not parse in `unknown_properties`.
+        if let Some(key) = ENCRYPTION_PROPS
+            .iter()
+            .find(|key| properties.unknown_properties.contains_key(**key))
+        {
+            return Err(invalid_encryption_config(format!(
+                "'{key}' has an invalid value: '{}'",
+                properties.unknown_properties[*key]
+            )));
+        }
+        let unknown_set = properties
+            .unknown_properties
+            .keys()
+            .any(|key| key.starts_with(ENCRYPTION_PROP_PREFIX));
+        if !unknown_set
+            && properties.encryption_kms_id.is_none()
+            && properties.encryption_kms_configuration.is_none()
+            && properties.encryption_footer_key.is_none()
+            && properties.encryption_plaintext_footer.is_none()
+            && properties.encryption_column_keys.is_none()
+        {
             return Ok(None);
         }
-        let get = |key: &str| {
-            configuration
-                .get(key)
-                .map(|v| v.trim())
+        // Like every other property, a blank value means unset.
+        let set = |value: &Option<String>| {
+            value
+                .as_deref()
+                .map(str::trim)
                 .filter(|v| !v.is_empty())
+                .map(str::to_string)
         };
 
-        let footer_key = get(ENCRYPTION_FOOTER_KEY_PROP).ok_or_else(|| {
+        let footer_key = set(&properties.encryption_footer_key).ok_or_else(|| {
             invalid_encryption_config(format!(
                 "'{ENCRYPTION_FOOTER_KEY_PROP}' must be set to enable encryption; Parquet \
                  Modular Encryption always encrypts (or, with \
                  '{ENCRYPTION_PLAINTEXT_FOOTER_PROP}', signs) the footer with it"
             ))
         })?;
-        let kms_id = get(ENCRYPTION_KMS_ID_PROP).ok_or_else(|| {
+        let kms_id = set(&properties.encryption_kms_id).ok_or_else(|| {
             invalid_encryption_config(format!(
                 "'{ENCRYPTION_KMS_ID_PROP}' must be set when '{ENCRYPTION_FOOTER_KEY_PROP}' is set"
             ))
         })?;
-        let plaintext_footer = match get(ENCRYPTION_PLAINTEXT_FOOTER_PROP) {
-            None => false,
-            Some(value) => value.parse::<bool>().map_err(|_| {
-                invalid_encryption_config(format!(
-                    "'{ENCRYPTION_PLAINTEXT_FOOTER_PROP}' must be 'true' or 'false', got '{value}'"
-                ))
-            })?,
-        };
-
         Ok(Some(Self {
-            kms_id: kms_id.to_string(),
-            kms_configuration: get(ENCRYPTION_KMS_CONFIGURATION_PROP).map(str::to_string),
-            footer_key: footer_key.to_string(),
-            plaintext_footer,
-            column_keys: Self::parse_column_keys(get(ENCRYPTION_COLUMN_KEYS_PROP))?,
+            kms_id,
+            kms_configuration: set(&properties.encryption_kms_configuration),
+            footer_key,
+            plaintext_footer: properties.encryption_plaintext_footer.unwrap_or(false),
+            column_keys: properties
+                .encryption_column_keys
+                .clone()
+                .unwrap_or_default(),
         }))
     }
 
-    /// Parse `"keyId:col1,col2;keyId2:col3"` into `{keyId: [col1, col2], keyId2: [col3]}`.
-    /// A column may appear once, and not alongside an ancestor, which already covers it.
-    /// Names are split on dots to address struct fields; the backtick quoting of the
-    /// protocol's field-path scheme is not supported, so a column whose name contains a
-    /// dot cannot be given its own key (`ColumnName::parse_column_name_list` is the
-    /// upgrade path).
-    fn parse_column_keys(value: Option<&str>) -> DeltaResult<HashMap<String, Vec<String>>> {
-        let mut map: HashMap<String, Vec<String>> = HashMap::new();
-        let mut seen: Vec<(String, String)> = Vec::new();
-        let Some(value) = value else { return Ok(map) };
-        for segment in value.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-            let malformed = || {
-                invalid_encryption_config(format!(
-                    "'{ENCRYPTION_COLUMN_KEYS_PROP}' segment '{segment}' must have the form \
-                     'keyId:col1,col2'"
-                ))
-            };
-            let (key_id, cols) = segment.split_once(':').ok_or_else(malformed)?;
-            let key_id = key_id.trim();
-            let cols: Vec<String> = cols
-                .split(',')
-                .map(|c| c.trim().to_string())
-                .filter(|c| !c.is_empty())
-                .collect();
-            if key_id.is_empty() || cols.is_empty() {
-                return Err(malformed());
-            }
-            for col in &cols {
-                if let Some((other, other_key)) = seen
-                    .iter()
-                    .find(|(other, _)| column_paths_overlap(col, other))
-                {
-                    return Err(invalid_encryption_config(format!(
-                        "column '{col}' (key '{key_id}') overlaps column '{other}' \
-                         (key '{other_key}'); each column may be covered by only one key"
-                    )));
-                }
-                seen.push((col.clone(), key_id.to_string()));
-            }
-            map.entry(key_id.to_string()).or_default().extend(cols);
-        }
-        Ok(map)
+    /// Every keyed column with its master key ID.
+    fn keyed_columns(&self) -> impl Iterator<Item = (&str, &ColumnName)> {
+        self.column_keys
+            .iter()
+            .flat_map(|key| key.columns.iter().map(move |c| (key.key_id.as_str(), c)))
     }
 
-    /// Check [`column_keys`](Self::column_keys) against the schema: every column must exist
-    /// and none may be a partition column. Names are physical and dot-separated.
+    /// Check [`column_keys`](Self::column_keys), as stored (physical names), against the
+    /// schema: every column must exist and none may be a partition column. CREATE TABLE
+    /// applies the RFC's full rule set through kernel; this is the check for commits that
+    /// carry an already-stored configuration.
     pub fn validate_columns(
         &self,
         schema: &StructType,
@@ -249,24 +211,21 @@ impl EncryptionConfig {
             .filter_map(|name| schema.field(name))
             .map(|field| field.physical_name(column_mapping_mode))
             .collect();
-
-        for (key_id, columns) in &self.column_keys {
-            for column in columns {
-                let by_physical_name = |field: &StructField, name: &str| {
-                    field.physical_name(column_mapping_mode) == name
-                };
-                if !path_exists(schema, column.split('.'), by_physical_name) {
-                    return Err(invalid_encryption_config(format!(
-                        "key '{key_id}' names column '{column}', which is not in the table"
-                    )));
-                }
-                let top_level = column.split('.').next().unwrap_or_default();
-                if physical_partition_columns.contains(&top_level) {
-                    return Err(invalid_encryption_config(format!(
-                        "key '{key_id}' names partition column '{column}'; partition columns \
-                         cannot be encrypted"
-                    )));
-                }
+        for (key_id, column) in self.keyed_columns() {
+            if !physical_path_exists(schema, column.path(), column_mapping_mode) {
+                return Err(invalid_encryption_config(format!(
+                    "key '{key_id}' names column '{column}', which is not in the table"
+                )));
+            }
+            if column
+                .path()
+                .first()
+                .is_some_and(|top| physical_partition_columns.contains(&top.as_str()))
+            {
+                return Err(invalid_encryption_config(format!(
+                    "key '{key_id}' names partition column '{column}'; partition columns \
+                     cannot be encrypted"
+                )));
             }
         }
         Ok(())
@@ -284,12 +243,11 @@ impl EncryptionConfig {
         if self.column_keys.is_empty() {
             return Ok(self);
         }
-        let by_physical_name =
-            |field: &StructField, name: &str| field.physical_name(column_mapping_mode) == name;
-        for columns in self.column_keys.values_mut() {
-            columns.retain(|column| path_exists(schema, column.split('.'), by_physical_name));
+        for key in &mut self.column_keys {
+            key.columns
+                .retain(|column| physical_path_exists(schema, column.path(), column_mapping_mode));
         }
-        self.column_keys.retain(|_, columns| !columns.is_empty());
+        self.column_keys.retain(|key| !key.columns.is_empty());
         if self.column_keys.is_empty() {
             return Err(invalid_encryption_config(format!(
                 "the schema change removes every column named in \
@@ -322,17 +280,15 @@ impl EncryptionConfig {
         };
         let stats_columns = ColumnName::parse_column_name_list(value)
             .map_err(|e| invalid_encryption_config(format!("'{stats_prop}' is malformed: {e}")))?;
-        for stats_column in stats_columns {
-            let display = &stats_column;
-            if stats_column
+        for display in stats_columns {
+            if display
                 .path()
                 .first()
                 .is_some_and(|top_level| partition_columns.contains(top_level))
             {
                 continue;
             }
-            let Some(physical) = physical_column_name(schema, &stats_column, column_mapping_mode)
-            else {
+            let Some(physical) = physical_column_name(schema, &display, column_mapping_mode) else {
                 continue;
             };
             if self.column_keys.is_empty() {
@@ -343,10 +299,8 @@ impl EncryptionConfig {
                 )));
             }
             if let Some((key_id, encrypted)) = self
-                .column_keys
-                .iter()
-                .flat_map(|(key_id, cols)| cols.iter().map(move |c| (key_id, c)))
-                .find(|(_, encrypted)| stats_column_is_encrypted(physical.path(), encrypted))
+                .keyed_columns()
+                .find(|(_, encrypted)| paths_overlap(physical.path(), encrypted.path()))
             {
                 return Err(invalid_encryption_config(format!(
                     "'{stats_prop}' names column '{display}', which is encrypted with key \
@@ -388,8 +342,8 @@ impl EncryptionConfig {
     }
 
     /// Rewrite [`column_keys`](Self::column_keys) from display names to the physical names
-    /// the RFC stores, so renaming a column does not invalidate the configuration. A name
-    /// that is already physical is kept, so a stored configuration can be passed back.
+    /// the RFC stores, for comparing a configuration a user resends against the stored one.
+    /// A name that is already physical is kept. CREATE TABLE does this through kernel.
     pub fn with_physical_column_names(
         mut self,
         schema: &StructType,
@@ -398,17 +352,15 @@ impl EncryptionConfig {
         if column_mapping_mode == ColumnMappingMode::None {
             return Ok(self);
         }
-        let by_physical_name =
-            |field: &StructField, name: &str| field.physical_name(column_mapping_mode) == name;
-        for (key_id, columns) in self.column_keys.iter_mut() {
-            for column in columns.iter_mut() {
-                let logical = ColumnName::new(column.split('.'));
-                match physical_column_name(schema, &logical, column_mapping_mode) {
-                    Some(physical) => *column = physical.path().join("."),
-                    None if path_exists(schema, column.split('.'), by_physical_name) => {}
+        for key in &mut self.column_keys {
+            for column in &mut key.columns {
+                match physical_column_name(schema, column, column_mapping_mode) {
+                    Some(physical) => *column = physical,
+                    None if physical_path_exists(schema, column.path(), column_mapping_mode) => {}
                     None => {
                         return Err(invalid_encryption_config(format!(
-                            "key '{key_id}' names column '{column}', which is not in the table"
+                            "key '{}' names column '{column}', which is not in the table",
+                            key.key_id
                         )));
                     }
                 }
@@ -418,17 +370,25 @@ impl EncryptionConfig {
     }
 
     /// [`column_keys`](Self::column_keys) in the `delta.encryption.column_keys` format,
-    /// sorted so the result is deterministic.
+    /// one segment per master key, sorted so the result is deterministic.
     pub fn column_keys_property(&self) -> String {
-        let mut sorted_keys: Vec<(&String, &Vec<String>)> = self.column_keys.iter().collect();
-        sorted_keys.sort_unstable_by_key(|(k, _)| *k);
-        sorted_keys
+        let mut by_key: Vec<EncryptionColumnKey> = Vec::new();
+        for (key_id, column) in self.keyed_columns() {
+            match by_key.iter_mut().find(|k| k.key_id == key_id) {
+                Some(key) => key.columns.push(column.clone()),
+                None => by_key.push(EncryptionColumnKey {
+                    key_id: key_id.to_string(),
+                    columns: vec![column.clone()],
+                }),
+            }
+        }
+        by_key.sort_by(|a, b| a.key_id.cmp(&b.key_id));
+        for key in &mut by_key {
+            key.columns.sort_by(|a, b| a.path().cmp(b.path()));
+        }
+        by_key
             .iter()
-            .map(|(key_id, cols)| {
-                let mut sorted_cols: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
-                sorted_cols.sort_unstable();
-                format!("{}:{}", key_id, sorted_cols.join(","))
-            })
+            .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join(";")
     }
@@ -476,7 +436,7 @@ mod tests {
     use std::collections::HashMap;
 
     use delta_kernel::schema::{DataType, StructField, StructType};
-    use delta_kernel::table_features::ColumnMappingMode;
+    use delta_kernel::table_features::{ColumnMappingMode, TableFeature};
 
     use super::{
         ENCRYPTION_COLUMN_KEYS_PROP, ENCRYPTION_FOOTER_KEY_PROP, ENCRYPTION_KMS_CONFIGURATION_PROP,
@@ -504,6 +464,15 @@ mod tests {
         ])
         .unwrap()
         .unwrap()
+    }
+
+    /// The columns of `key_id`, each as its dot-joined path segments.
+    fn columns_of(enc: &EncryptionConfig, key_id: &str) -> Vec<String> {
+        enc.column_keys
+            .iter()
+            .find(|key| key.key_id == key_id)
+            .map(|key| key.columns.iter().map(|c| c.path().join(".")).collect())
+            .unwrap_or_default()
     }
 
     fn schema() -> StructType {
@@ -582,8 +551,9 @@ mod tests {
         assert!(err.contains("uniform encryption"), "{err}");
     }
 
+    /// A value kernel cannot parse is an error, not a silently ignored property.
     #[test]
-    fn plaintext_footer_must_be_a_bool() {
+    fn invalid_values_are_refused() {
         let err = try_parse(&[
             (ENCRYPTION_KMS_ID_PROP, "kms"),
             (ENCRYPTION_FOOTER_KEY_PROP, "fk"),
@@ -591,6 +561,15 @@ mod tests {
         ])
         .unwrap_err();
         assert!(err.contains(ENCRYPTION_PLAINTEXT_FOOTER_PROP), "{err}");
+        for value in ["col1,col2", ":col1", "k1:", "k1: , "] {
+            let err = try_parse(&[
+                (ENCRYPTION_KMS_ID_PROP, "kms"),
+                (ENCRYPTION_FOOTER_KEY_PROP, "fk"),
+                (ENCRYPTION_COLUMN_KEYS_PROP, value),
+            ])
+            .unwrap_err();
+            assert!(err.contains(ENCRYPTION_COLUMN_KEYS_PROP), "{value}: {err}");
+        }
     }
 
     #[test]
@@ -648,48 +627,8 @@ mod tests {
             Some(r#"{"endpoint":"kms.example.com"}"#)
         );
         assert!(enc.plaintext_footer);
-        assert_eq!(enc.column_keys["keyA"], ["col1", "col2"]);
-        assert_eq!(enc.column_keys["keyB"], ["col3"]);
-    }
-
-    #[test]
-    fn parse_column_keys_trims_whitespace_and_empty_segments() {
-        let keys = EncryptionConfig::parse_column_keys(Some(" k1 : col1 , col2 ;; k2:c ")).unwrap();
-        assert_eq!(keys["k1"], ["col1", "col2"]);
-        assert_eq!(keys["k2"], ["c"]);
-        assert!(
-            EncryptionConfig::parse_column_keys(None)
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn parse_column_keys_rejects_malformed_segments() {
-        for value in ["col1,col2", ":col1", "k1:", "k1: , "] {
-            assert!(
-                EncryptionConfig::parse_column_keys(Some(value)).is_err(),
-                "{value}"
-            );
-        }
-    }
-
-    #[test]
-    fn parse_column_keys_rejects_overlapping_columns() {
-        // The same column twice, or a struct together with one of its fields, under the
-        // same key or different keys.
-        for value in ["k1:a,b;k2:b", "k1:a;k2:a.b", "k1:a.b;k2:a", "k1:a,a.b"] {
-            let err = EncryptionConfig::parse_column_keys(Some(value))
-                .unwrap_err()
-                .to_string();
-            assert!(err.contains("overlaps"), "{value}: {err}");
-        }
-    }
-
-    #[test]
-    fn parse_column_keys_accepts_sibling_and_prefix_named_columns() {
-        // `ab` and `a.bc` are not inside `a.b`.
-        EncryptionConfig::parse_column_keys(Some("k1:a.b;k2:a.bc,ab")).unwrap();
+        assert_eq!(columns_of(&enc, "keyA"), ["col1", "col2"]);
+        assert_eq!(columns_of(&enc, "keyB"), ["col3"]);
     }
 
     #[test]
@@ -818,24 +757,25 @@ mod tests {
         assert!(err.contains("encrypted with key"), "{err}");
     }
 
-    /// The fixture shows an encrypted table's metadata on disk. Kernel rejects its
-    /// `parquetEncryption` feature, so the log is read directly. The configuration is
-    /// parsed from the raw metadata map only, which pins the path that survives kernel
-    /// learning these keys.
-    #[test]
-    fn parses_fixture_table_from_raw_configuration() {
-        let log = std::fs::read_to_string(
-            "../test/tests/data/simple_encrypted_table/_delta_log/00000000000000000000.json",
+    /// The fixture shows an encrypted table's protocol and metadata on disk, as another
+    /// engine would write them. Kernel opens it, carrying the `parquetEncryption-dev`
+    /// feature, and parses the properties; delta-rs then refuses to read or write it until
+    /// the encryption paths land.
+    #[tokio::test]
+    async fn opens_fixture_table_through_kernel() {
+        let table = crate::open_table(
+            crate::ensure_table_uri("../test/tests/data/simple_encrypted_table").unwrap(),
         )
+        .await
         .unwrap();
-        let configuration: HashMap<String, String> = log
-            .lines()
-            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-            .find_map(|action| action.get("metaData").cloned())
-            .map(|metadata| serde_json::from_value(metadata["configuration"].clone()).unwrap())
-            .expect("fixture has a metaData action");
+        let snapshot = table.snapshot().unwrap();
+        let features = snapshot.protocol().reader_features().unwrap();
+        assert!(
+            features.contains(&TableFeature::ParquetEncryptionDev),
+            "{features:?}"
+        );
 
-        let enc = EncryptionConfig::try_from_configuration(&configuration)
+        let enc = EncryptionConfig::try_from_properties(snapshot.table_config())
             .unwrap()
             .expect("should parse");
         assert_eq!(enc.kms_id, "test-kms");
@@ -845,8 +785,8 @@ mod tests {
             Some(r#"{"endpoint":"https://kms.example.com"}"#)
         );
         assert!(!enc.plaintext_footer);
-        assert_eq!(enc.column_keys["pii-key"], ["ssn"]);
-        assert_eq!(enc.column_keys["finance-key"], ["salary"]);
+        assert_eq!(columns_of(&enc, "pii-key"), ["ssn"]);
+        assert_eq!(columns_of(&enc, "finance-key"), ["salary"]);
     }
 
     fn create_encrypted_table(column_keys: &str, extra: &[(&str, &str)]) -> CreateBuilder {
@@ -911,20 +851,31 @@ mod tests {
         assert!(err.contains("existing data files"), "{err}");
     }
 
-    /// Encryption properties written at table creation survive a commit and reload.
+    /// Encryption properties written at table creation survive a commit and reload, and
+    /// the protocol carries the `parquetEncryption-dev` feature (RFC).
     #[tokio::test]
     async fn encryption_properties_round_trip_through_delta_log() {
         let mut table = create_encrypted_table("pii-key:ssn", &[]).await.unwrap();
         table.load().await.unwrap();
+        let snapshot = table.snapshot().unwrap();
 
-        let enc = EncryptionConfig::try_from_configuration(
-            table.snapshot().unwrap().metadata().configuration(),
-        )
-        .unwrap()
-        .expect("should parse");
+        let protocol = snapshot.protocol();
+        assert_eq!(protocol.min_reader_version(), 3);
+        assert_eq!(protocol.min_writer_version(), 7);
+        for features in [protocol.reader_features(), protocol.writer_features()] {
+            let features = features.unwrap();
+            assert!(
+                features.contains(&TableFeature::ParquetEncryptionDev),
+                "{features:?}"
+            );
+        }
+
+        let enc = EncryptionConfig::try_from_properties(snapshot.table_config())
+            .unwrap()
+            .expect("should parse");
         assert_eq!(enc.kms_id, "test-kms");
         assert_eq!(enc.footer_key, "footer-key");
-        assert_eq!(enc.column_keys["pii-key"], ["ssn"]);
+        assert_eq!(columns_of(&enc, "pii-key"), ["ssn"]);
     }
 
     #[tokio::test]
@@ -933,7 +884,7 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(err.contains("not in the table"), "{err}");
+        assert!(err.contains("not in the schema"), "{err}");
 
         let err = create_encrypted_table("pii-key:region", &[])
             .with_partition_columns(["region"])
@@ -941,6 +892,12 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("partition column"), "{err}");
+
+        let err = create_encrypted_table("pii-key:ssn,address;geo-key:address.city", &[])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("more than once"), "{err}");
 
         let err = create_encrypted_table(
             "pii-key:ssn",
@@ -966,10 +923,10 @@ mod tests {
         .await
         .unwrap();
         let snapshot = table.snapshot().unwrap();
-        let enc = EncryptionConfig::try_from_configuration(snapshot.metadata().configuration())
+        let enc = EncryptionConfig::try_from_properties(snapshot.table_config())
             .unwrap()
             .unwrap();
-        let columns = &enc.column_keys["pii-key"];
+        let columns = columns_of(&enc, "pii-key");
 
         let physical_schema = snapshot.schema();
         let ssn = physical_schema.field("ssn").unwrap();
@@ -995,7 +952,7 @@ mod tests {
             .clone()
             .with_physical_column_names(&physical_schema, ColumnMappingMode::Name)
             .unwrap();
-        assert_eq!(resent.column_keys, enc.column_keys);
+        assert_eq!(resent.column_keys_property(), enc.column_keys_property());
         let err = config_with_column_keys("pii:missing")
             .with_physical_column_names(&physical_schema, ColumnMappingMode::Name)
             .unwrap_err()
@@ -1073,17 +1030,14 @@ mod tests {
     }
 
     /// Legacy writers and blind appends upload or register files without a commit check,
-    /// so they refuse an encrypted table up front.
+    /// so they refuse an encrypted table up front; the kernel transaction behind a blind
+    /// append refuses it as well.
     #[tokio::test]
     async fn legacy_writers_refuse_encrypted_tables_before_any_upload() {
         use crate::DeltaTableError;
-        use crate::kernel::transaction::WRITES_ENCRYPTED_TABLES;
         use crate::table::BlindDeltaTable;
         use crate::writer::{JsonWriter, RecordBatchWriter};
 
-        if WRITES_ENCRYPTED_TABLES {
-            return;
-        }
         let table = plaintext_table()
             .with_configuration(
                 encryption_properties(ENCRYPTION_FOOTER_KEY_PROP)
@@ -1092,8 +1046,11 @@ mod tests {
             )
             .await
             .unwrap();
+        if PROTOCOL.can_write_to(table.snapshot().unwrap()).is_ok() {
+            return;
+        }
         let refused = |err: DeltaTableError| {
-            assert!(err.to_string().contains("parquetEncryption"), "{err}");
+            assert!(err.to_string().contains("ParquetEncryptionDev"), "{err}");
         };
         refused(RecordBatchWriter::for_table(&table).unwrap_err());
         refused(JsonWriter::for_table(&table).unwrap_err());
@@ -1101,7 +1058,8 @@ mod tests {
             .await
             .unwrap();
         refused(RecordBatchWriter::for_blind_appends(&blind).unwrap_err());
-        refused(blind.commit(vec![]).await.unwrap_err());
+        let err = blind.commit(vec![]).await.unwrap_err().to_string();
+        assert!(err.contains("parquetEncryption-dev"), "{err}");
     }
 
     /// Removing encryption would leave a table mixing encrypted and plaintext files, so it is
@@ -1166,7 +1124,8 @@ mod tests {
             .unwrap();
 
         // Plaintext to plaintext passes the encryption check, but would remove the
-        // encryption just committed.
+        // encryption just committed. The replace also bumped the protocol for the
+        // `parquetEncryption-dev` feature, which the conflict checker reports first.
         let metadata = stale
             .metadata()
             .clone()
@@ -1187,15 +1146,19 @@ mod tests {
             matches!(
                 err,
                 DeltaTableError::Transaction {
-                    source: TransactionError::CommitConflict(CommitConflictError::MetadataChanged)
+                    source: TransactionError::CommitConflict(
+                        CommitConflictError::ProtocolChanged(_)
+                            | CommitConflictError::MetadataChanged
+                    )
                 }
             ),
             "{err:?}"
         );
     }
 
-    /// Until the encryption read and write paths land, delta-rs refuses encrypted tables
-    /// instead of reading ciphertext or writing plaintext into them.
+    /// Until the encryption read and write paths land, the `parquetEncryption-dev` feature
+    /// makes delta-rs refuse encrypted tables instead of reading ciphertext or writing
+    /// plaintext into them.
     #[tokio::test]
     async fn protocol_checker_refuses_encrypted_tables() {
         let table = create_encrypted_table("pii-key:ssn", &[]).await.unwrap();
@@ -1206,8 +1169,7 @@ mod tests {
         ] {
             match result {
                 Err(TransactionError::UnsupportedTableFeatures(features)) => {
-                    assert_eq!(features.len(), 1);
-                    assert!(format!("{features:?}").contains("parquetEncryption"));
+                    assert_eq!(features, [TableFeature::ParquetEncryptionDev]);
                 }
                 other => panic!("expected UnsupportedTableFeatures, got {other:?}"),
             }

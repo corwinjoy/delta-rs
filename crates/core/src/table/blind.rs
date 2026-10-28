@@ -186,11 +186,6 @@ impl BlindDeltaTable {
         use crate::DeltaTableError;
         use crate::kernel::spawn_blocking_with_span;
 
-        // Kernel transactions bypass `CommitBuilder`'s `can_commit`, so check here.
-        crate::kernel::transaction::PROTOCOL.check_encryption(
-            self.metadata().configuration(),
-            crate::kernel::transaction::WRITES_ENCRYPTED_TABLES,
-        )?;
         let add_files_batch = adds_to_record_batch(&adds)?;
 
         let kernel_snapshot = self.snapshot.inner.clone();

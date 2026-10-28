@@ -3,8 +3,10 @@
 
 use std::collections::HashMap;
 
+use delta_kernel::expressions::ColumnName;
 use delta_kernel::schema::{ColumnMetadataKey, MetadataValue};
 use delta_kernel::table_features::{ColumnMappingMode, assign_column_mapping_metadata};
+use delta_kernel::transaction::builder::create_table::validate_encryption_properties;
 use futures::TryStreamExt as _;
 use futures::future::BoxFuture;
 use serde_json::Value;
@@ -17,7 +19,7 @@ use crate::logstore::LogStoreRef;
 use crate::logstore::with_operation;
 use crate::protocol::{DeltaOperation, SaveMode};
 use crate::table::builder::ensure_table_uri;
-use crate::table::config::{ENCRYPTION_COLUMN_KEYS_PROP, EncryptionConfig, TableProperty};
+use crate::table::config::{EncryptionConfig, TableProperty};
 use crate::table::normalize_table_url;
 use crate::{DeltaTable, DeltaTableBuilder};
 
@@ -340,9 +342,19 @@ impl CreateBuilder {
         };
 
         let partition_columns = self.partition_columns.unwrap_or_default();
-        // Validate the encryption settings, storing column names as physical names (RFC).
+        // Kernel applies the RFC's CREATE TABLE rules to the encryption properties and
+        // rewrites `column_keys` to physical names; delta-rs adds its own rules on top.
         EncryptionConfig::check_known_properties(configuration.keys())?;
-        if let Some(encryption) = EncryptionConfig::try_from_configuration(&configuration)? {
+        let partition_column_names: Vec<ColumnName> = partition_columns
+            .iter()
+            .map(|name| ColumnName::new([name]))
+            .collect();
+        if validate_encryption_properties(
+            &schema,
+            column_mapping_mode,
+            &partition_column_names,
+            &mut configuration,
+        )? {
             // Files registered at creation (CONVERT TO DELTA) are plaintext, so they cannot
             // be committed under an encrypted configuration.
             if self.actions.iter().any(|a| matches!(a, Action::Add(_))) {
@@ -352,19 +364,13 @@ impl CreateBuilder {
                         .to_string(),
                 ));
             }
-            let encryption = encryption.with_physical_column_names(&schema, column_mapping_mode)?;
-            encryption.validate_columns(&schema, &partition_columns, column_mapping_mode)?;
-            encryption.validate_stats_columns(
-                &configuration,
-                &schema,
-                &partition_columns,
-                column_mapping_mode,
-            )?;
-            if !encryption.column_keys.is_empty() {
-                configuration.insert(
-                    ENCRYPTION_COLUMN_KEYS_PROP.to_string(),
-                    encryption.column_keys_property(),
-                );
+            if let Some(encryption) = EncryptionConfig::try_from_configuration(&configuration)? {
+                encryption.validate_stats_columns(
+                    &configuration,
+                    &schema,
+                    &partition_columns,
+                    column_mapping_mode,
+                )?;
             }
         }
 

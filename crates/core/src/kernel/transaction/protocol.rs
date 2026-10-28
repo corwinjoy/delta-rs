@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::LazyLock;
 
 use delta_kernel::table_features::{ColumnMappingMode, TableFeature};
@@ -15,16 +15,6 @@ use crate::protocol::DeltaOperation;
 use crate::table::config::{EncryptionConfig, TablePropertiesExt as _};
 
 use tracing::log::*;
-
-/// The table feature for Parquet modular encryption of data files. The `-dev` suffix marks
-/// the RFC as a draft, as the RFC process asks; once it is standardised, both names are
-/// accepted.
-const PARQUET_ENCRYPTION_FEATURE: &str = "parquetEncryption-dev";
-
-/// Whether this build can read and write tables with `delta.encryption.*` properties.
-/// Until the read and write paths land, both are refused.
-pub(crate) const READS_ENCRYPTED_TABLES: bool = false;
-pub(crate) const WRITES_ENCRYPTED_TABLES: bool = false;
 
 static READER_V2: LazyLock<HashSet<TableFeature>> =
     LazyLock::new(|| HashSet::from_iter([TableFeature::ColumnMapping]));
@@ -208,24 +198,7 @@ impl ProtocolChecker {
 
     /// Check if delta-rs can read form the given delta table.
     pub fn can_read_from(&self, snapshot: &dyn TableReference) -> Result<(), TransactionError> {
-        self.can_read_from_protocol(snapshot.protocol())?;
-        self.check_encryption(snapshot.metadata().configuration(), READS_ENCRYPTED_TABLES)
-    }
-
-    /// Refuse a table with `delta.encryption.*` properties unless `supported`
-    /// ([`READS_ENCRYPTED_TABLES`] or [`WRITES_ENCRYPTED_TABLES`]), with the error the
-    /// RFC's `parquetEncryption` feature would produce once kernel can carry it.
-    pub(crate) fn check_encryption(
-        &self,
-        configuration: &HashMap<String, String>,
-        supported: bool,
-    ) -> Result<(), TransactionError> {
-        if !supported && EncryptionConfig::is_configured(configuration) {
-            return Err(TransactionError::UnsupportedTableFeatures(vec![
-                TableFeature::Unknown(PARQUET_ENCRYPTION_FEATURE.to_string()),
-            ]));
-        }
-        Ok(())
+        self.can_read_from_protocol(snapshot.protocol())
     }
 
     pub fn can_read_from_protocol(&self, protocol: &Protocol) -> Result<(), TransactionError> {
@@ -259,12 +232,10 @@ impl ProtocolChecker {
     pub fn can_write_to(&self, snapshot: &dyn TableReference) -> Result<(), TransactionError> {
         // NOTE: writers must always support all required reader features
         self.can_read_from(snapshot)?;
-        self.check_encryption(snapshot.metadata().configuration(), WRITES_ENCRYPTED_TABLES)?;
         self.can_write_to_protocol(snapshot.protocol())
     }
 
-    /// The writer-feature half of [`can_write_to`](Self::can_write_to): no reader or
-    /// encryption checks.
+    /// The writer-feature half of [`can_write_to`](Self::can_write_to): no reader checks.
     pub fn can_write_to_protocol(&self, protocol: &Protocol) -> Result<(), TransactionError> {
         let min_writer_version = protocol.min_writer_version();
 
@@ -307,10 +278,24 @@ impl ProtocolChecker {
         }
         if matches!(operation, DeltaOperation::Create { .. }) {
             // Create-or-replace removes every existing data file and never reads one, so
-            // the old table's encryption properties do not matter here. Its protocol
+            // the old table's encryption does not matter here. Its other protocol
             // versions and features still must be ones delta-rs supports.
-            self.can_read_from_protocol(snapshot.protocol())?;
-            self.can_write_to_protocol(snapshot.protocol())?;
+            let ignoring_encryption = |result: Result<(), TransactionError>| match result {
+                Err(TransactionError::UnsupportedTableFeatures(features)) => {
+                    let features: Vec<_> = features
+                        .into_iter()
+                        .filter(|feature| *feature != TableFeature::ParquetEncryptionDev)
+                        .collect();
+                    if features.is_empty() {
+                        Ok(())
+                    } else {
+                        Err(TransactionError::UnsupportedTableFeatures(features))
+                    }
+                }
+                other => other,
+            };
+            ignoring_encryption(self.can_read_from_protocol(snapshot.protocol()))?;
+            ignoring_encryption(self.can_write_to_protocol(snapshot.protocol()))?;
         } else {
             self.can_write_to(snapshot)?;
         }

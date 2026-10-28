@@ -610,6 +610,23 @@ impl ProtocolInner {
             }
         }
 
+        // Any `delta.encryption.*` property makes the table encrypted (RFC), which the
+        // `parquetEncryption-dev` reader and writer feature guards.
+        if parsed_properties.keys().any(|key| {
+            matches!(
+                key,
+                TableProperty::EncryptionKmsId
+                    | TableProperty::EncryptionKmsConfiguration
+                    | TableProperty::EncryptionFooterKey
+                    | TableProperty::EncryptionPlaintextFooter
+                    | TableProperty::EncryptionColumnKeys
+            )
+        }) {
+            self = self
+                .append_reader_features([TableFeature::ParquetEncryptionDev])
+                .append_writer_features([TableFeature::ParquetEncryptionDev]);
+        }
+
         // If the minWriterVersion has been set to 7 then there are additional writer features
         // which must be applied
         if self.min_writer_version >= 7

@@ -9,5 +9,6 @@ properties of an encrypted table as proposed in the Delta protocol RFC
 - `kms_id` names the KMS client readers and writers must register;
   `kms_configuration` is an opaque string passed to it.
 
-delta-kernel does not support the `parquetEncryption-dev` feature yet, so
-`open_table` rejects this table; tests read its log directly.
+delta-kernel carries the `parquetEncryption-dev` feature, so `open_table` opens
+this table; builds of delta-rs without encryption support then refuse to read
+or write it.

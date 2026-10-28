@@ -37,9 +37,9 @@ lets a table keep `kms_id` and `kms_configuration` after its footer key was unse
 encryption was turned off; delta-rs refuses such a table rather than treat it as plaintext.
 
 Column names in `column_keys` may be dot-separated to name a struct field, which encrypts every
-field under it. Names are split on dots: the backtick quoting of the protocol's field-path
-scheme is not supported, so a column whose name contains a dot cannot be given its own key.
-Fields inside arrays and maps cannot be named. Partition columns cannot be
+field under it, and use the protocol's backtick quoting for a name that contains a dot. Names
+are matched case-insensitively, as partition and clustering columns are. Fields inside arrays
+and maps cannot be named. Partition columns cannot be
 encrypted, since their values appear in the log. With column mapping the stored names are
 physical names, so renaming a column keeps the configuration valid; delta-rs accepts display
 names at creation and stores the physical names.
@@ -92,14 +92,16 @@ it is not frozen, but is not applied either: change it with the table-property o
 The RFC guards encrypted tables with a `parquetEncryption` table feature so that engines
 without encryption support refuse them. While the RFC is a draft the name carries the `-dev`
 suffix the RFC process asks of experimental implementations, `parquetEncryption-dev`; once it
-is standardised, delta-rs will accept both names. delta-kernel does not accept the feature yet,
-so delta-rs does not add it and recognises encrypted tables by their properties instead. Until
-the feature can be added, other engines are not protected.
+is standardised, both names will be accepted. Any `delta.encryption.*` property at table
+creation adds the feature to the protocol as a reader and writer feature (reader version 3,
+writer version 7), and delta-kernel parses the properties and applies the RFC's CREATE TABLE
+rules to them. Builds of delta-rs without encryption support refuse the feature like any other
+unsupported one, and kernel refuses to write to such a table on its own.
 
-Any `delta.encryption.*` key marks a table as encrypted, valid or not, so a misconfigured
-table is refused rather than read as ciphertext or written as plaintext. A stray key without
-a footer key, which another engine may leave on a plaintext table, therefore locks it out of
-delta-rs; the configuration is then invalid, so no commit can remove the key, and the way out
-is create-or-replace. A commit may only introduce the `delta.encryption.*` keys listed above,
+A table with the feature is encrypted whether or not its properties are valid, so a
+misconfigured table is refused rather than read as ciphertext or written as plaintext. A stray
+key without a footer key, which another engine may leave on a plaintext table, therefore locks
+it out of delta-rs; the configuration is then invalid, so no commit can remove the key, and
+the way out is create-or-replace. A commit may only introduce the `delta.encryption.*` keys listed above,
 which catches typos; a key a later RFC revision adds is tolerated once it is in the table, so
 that the feature flag, not the property names, decides whether delta-rs can open a table.

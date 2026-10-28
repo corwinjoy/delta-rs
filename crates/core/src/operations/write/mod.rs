@@ -45,7 +45,6 @@ use parquet::file::properties::WriterProperties;
 use serde::{Deserialize, Serialize};
 use tracing::Instrument;
 
-use crate::kernel::transaction::WRITES_ENCRYPTED_TABLES;
 use crate::table::config::{ENCRYPTION_PROP_PREFIX, EncryptionConfig};
 use url::Url;
 
@@ -555,9 +554,9 @@ impl WriteBuilder {
                     unreachable!("CreateBuilder always yields a Create operation")
                 };
                 // A first write creates the table and commits without a snapshot, so
-                // `can_commit` never checks it: refuse encryption here while this build
-                // cannot encrypt, or the new table would hold plaintext files.
-                PROTOCOL.check_encryption(metadata.configuration(), WRITES_ENCRYPTED_TABLES)?;
+                // `can_commit` never checks the new protocol: refuse here what this build
+                // cannot write, e.g. encryption, or the new table would hold plaintext files.
+                PROTOCOL.can_write_to_protocol(&protocol)?;
                 Ok((
                     actions,
                     TableConfiguration::try_new(metadata, protocol, location, 0)?,
@@ -919,12 +918,22 @@ mod tests {
         );
     }
 
+    /// Whether this build writes encrypted tables: #40 adds the writer feature.
+    fn writes_encrypted_tables() -> bool {
+        use crate::kernel::ProtocolInner;
+        use delta_kernel::table_features::TableFeature;
+
+        let protocol = ProtocolInner::new(3, 7)
+            .append_reader_features([TableFeature::ParquetEncryptionDev])
+            .append_writer_features([TableFeature::ParquetEncryptionDev])
+            .as_kernel();
+        PROTOCOL.can_write_to_protocol(&protocol).is_ok()
+    }
+
     /// Unsetting one key on an encrypted table is reported as a change, not as an invalid
     /// configuration to complete.
     #[tokio::test]
     async fn test_write_reports_a_key_unset_on_an_encrypted_table_as_a_change() {
-        use crate::kernel::transaction::WRITES_ENCRYPTED_TABLES;
-
         let table = DeltaTable::new_in_memory()
             .create()
             .with_columns(get_delta_schema().fields().cloned())
@@ -938,10 +947,10 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        if WRITES_ENCRYPTED_TABLES {
+        if writes_encrypted_tables() {
             assert!(err.contains("differs from the table's"), "{err}");
         } else {
-            assert!(err.contains("parquetEncryption"), "{err}");
+            assert!(err.contains("ParquetEncryptionDev"), "{err}");
         }
     }
 
@@ -952,10 +961,10 @@ mod tests {
     async fn test_first_write_with_encryption_needs_write_support() {
         use futures::TryStreamExt as _;
 
-        use crate::kernel::transaction::{TransactionError, WRITES_ENCRYPTED_TABLES};
+        use crate::kernel::transaction::TransactionError;
 
         // Moot once this build encrypts: the write path's tests cover create-with-data.
-        if WRITES_ENCRYPTED_TABLES {
+        if writes_encrypted_tables() {
             return;
         }
         let table = DeltaTable::new_in_memory();

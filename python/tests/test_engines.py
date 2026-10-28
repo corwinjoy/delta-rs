@@ -128,8 +128,8 @@ def test_datafusion_reads_deletion_vector_table():
 
 
 def test_pyarrow_engine_refuses_encrypted_table(tmp_path: pathlib.Path):
-    # Encrypted tables are recognised by their delta.encryption.* properties; a
-    # pyarrow Dataset has no decryption keys, so it must not be handed the files.
+    # An encrypted table carries the parquetEncryption-dev reader feature; a pyarrow
+    # Dataset has no decryption keys, so it must not be handed the files.
     import pyarrow as pa
 
     dt = DeltaTable.create(
@@ -140,9 +140,9 @@ def test_pyarrow_engine_refuses_encrypted_table(tmp_path: pathlib.Path):
             "delta.encryption.footer_key": "fk",
         },
     )
-    with pytest.raises(DeltaProtocolError, match="encryption"):
+    with pytest.raises(DeltaProtocolError, match="parquetEncryption-dev"):
         dt.to_pyarrow_table(engine="pyarrow")
-    with pytest.raises(DeltaError, match="parquetEncryption"):
+    with pytest.raises(DeltaError, match="ParquetEncryptionDev"):
         dt.to_pyarrow_table(engine="datafusion")
 
 

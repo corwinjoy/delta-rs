@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use delta_kernel::table_features::ColumnMappingMode;
+use delta_kernel::table_features::{ColumnMappingMode, TableFeature};
 use futures::stream::{StreamExt as _, TryStreamExt as _};
 use object_store::ObjectStore;
 use object_store::path::Path;
@@ -25,7 +25,6 @@ use crate::logstore::parquet_reader::ParquetObjectReader;
 
 use crate::DeltaTable;
 use crate::errors::{DeltaResult, DeltaTableError};
-use crate::table::config::EncryptionConfig;
 
 use super::{BatchStream, DataFileReader, DeltaDataReader, ReadOptions, results_to_stream};
 
@@ -112,7 +111,11 @@ impl ParquetTableReader {
 
         // This reader has no decryption keys: it would fail inside the parquet decoder, or
         // read the plaintext columns of a plaintext-footer file without an error.
-        if EncryptionConfig::is_configured(snapshot.metadata().configuration()) {
+        if snapshot
+            .protocol()
+            .reader_features()
+            .is_some_and(|features| features.contains(&TableFeature::ParquetEncryptionDev))
+        {
             return Err(not_supported("encryption"));
         }
 

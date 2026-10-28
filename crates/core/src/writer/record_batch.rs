@@ -158,10 +158,8 @@ impl RecordBatchWriter {
     ) -> Result<Self, DeltaTableError> {
         let metadata = table.metadata();
         // `flush` uploads without a commit check, so refuse before a sink opens.
-        crate::kernel::transaction::PROTOCOL.check_encryption(
-            metadata.configuration(),
-            crate::kernel::transaction::WRITES_ENCRYPTED_TABLES,
-        )?;
+        crate::kernel::transaction::PROTOCOL.can_read_from_protocol(table.protocol())?;
+        crate::kernel::transaction::PROTOCOL.can_write_to_protocol(table.protocol())?;
         let arrow_schema: ArrowSchema = (&metadata.parse_schema()?).try_into_arrow()?;
         let arrow_schema_ref = Arc::new(arrow_schema);
         let partition_columns = metadata.partition_columns().to_vec();
