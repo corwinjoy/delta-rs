@@ -516,7 +516,7 @@ impl DeltaScan {
     /// the scan and provider (public) schemas, including the optional file-id column.
     pub fn new(snapshot: impl Into<SnapshotWrapper>, config: DeltaScanConfig) -> Result<Self> {
         let snapshot = snapshot.into();
-        Self::validate_supported_reader_features(&snapshot)
+        Self::validate_supported_reader_features(&snapshot, true)
             .map_err(crate::DeltaTableError::from)?;
         let scan_schema = config.table_schema(snapshot.table_configuration())?;
         let full_schema = if let Some(file_id_column) =
@@ -603,10 +603,19 @@ impl DeltaScan {
         self
     }
 
+    /// `for_write` skips the reader features a write-only provider (INSERT INTO) need not
+    /// read, e.g. encryption in a build that writes but does not read it.
     fn validate_supported_reader_features(
         snapshot: &SnapshotWrapper,
+        for_write: bool,
     ) -> std::result::Result<(), TransactionError> {
-        match PROTOCOL.can_read_from_protocol(snapshot.snapshot().protocol()) {
+        let result = PROTOCOL.can_read_from_protocol(snapshot.snapshot().protocol());
+        let result = if for_write {
+            PROTOCOL.ignoring_write_only_features(result)
+        } else {
+            result
+        };
+        match result {
             Ok(()) => Ok(()),
             Err(TransactionError::UnsupportedTableFeatures(features))
                 if features.as_slice() == [TableFeature::ColumnMapping]
@@ -623,7 +632,7 @@ impl DeltaScan {
     fn ensure_read_ready(&self, session: &dyn Session) -> Result<()> {
         // DataFusion codec deserialization bypasses DeltaScan::new.
         // Keep protocol checks on read entry points.
-        Self::validate_supported_reader_features(&self.snapshot)
+        Self::validate_supported_reader_features(&self.snapshot, false)
             .map_err(crate::DeltaTableError::from)?;
         if let Some(log_store) = &self.log_store {
             super::update_datafusion_session(session, log_store.as_ref())?;

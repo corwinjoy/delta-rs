@@ -4,7 +4,7 @@
 //! `plan_overwrite_rewrite` builds a typed overwrite rewrite plan that keeps matched existing
 //! files, rescue planning, and CDC composition explicit until commit assembly.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -18,6 +18,7 @@ use datafusion::logical_expr::{
 use datafusion::prelude::col;
 use delta_kernel::engine::arrow_conversion::TryIntoKernel as _;
 use delta_kernel::table_configuration::TableConfiguration;
+use delta_kernel::table_features::ColumnMappingMode;
 use futures::TryStreamExt as _;
 use itertools::Itertools as _;
 use uuid::Uuid;
@@ -357,6 +358,10 @@ pub(super) fn prepare_write(input: WritePreparationInput<'_>) -> DeltaResult<Pre
                 schema_drift,
             )?);
         }
+    }
+
+    if let Some(snapshot) = snapshot {
+        warn_about_plaintext_new_columns(snapshot, &source_schema);
     }
 
     if let Some(new_schema) = new_schema.as_ref() {
@@ -828,6 +833,87 @@ fn schema_delta_for_prepared_source(
         metadata: Some(metadata),
         protocol: (current_protocol != &new_protocol).then_some(new_protocol),
     })
+}
+
+/// Warn, naming them, about columns a write adds to a table with `column_keys`: they are
+/// plaintext, as the RFC specifies. Fields added under a keyed struct are covered and not
+/// named. Runs for every schema mode, since an overwrite can add columns too.
+fn warn_about_plaintext_new_columns(snapshot: &EagerSnapshot, source_schema: &Schema) {
+    let configuration = snapshot.metadata().configuration();
+    let Ok(Some(enc)) = EncryptionConfig::try_from_configuration(configuration) else {
+        return;
+    };
+    if enc.column_keys.is_empty() {
+        return;
+    }
+    let keyed_paths: Vec<String> = enc
+        .column_keys
+        .iter()
+        .flat_map(|key| key.columns.iter().map(|column| column.path().join(".")))
+        .collect();
+    let keyed: HashSet<&str> = keyed_paths.iter().map(String::as_str).collect();
+    let mut added = Vec::new();
+    new_plaintext_leaves(
+        source_schema.fields(),
+        &snapshot.schema(),
+        "",
+        "",
+        &keyed,
+        snapshot.table_configuration().column_mapping_mode(),
+        &mut added,
+    );
+    if !added.is_empty() {
+        tracing::warn!(
+            "the write adds columns {added:?} to a table encrypted with \
+             delta.encryption.column_keys; the new columns are written in plaintext, since \
+             only the listed columns are encrypted"
+        );
+    }
+}
+
+/// Fields of `fields` that `table` lacks, by display path, skipping anything under a column
+/// in `keyed` (physical paths, as `column_keys` stores them).
+fn new_plaintext_leaves(
+    fields: &arrow_schema::Fields,
+    table: &StructType,
+    logical_prefix: &str,
+    physical_prefix: &str,
+    keyed: &HashSet<&str>,
+    mode: ColumnMappingMode,
+    added: &mut Vec<String>,
+) {
+    let join = |prefix: &str, name: &str| {
+        [prefix, name]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .join(".")
+    };
+    for field in fields {
+        let logical = join(logical_prefix, field.name());
+        let Some(existing) = table.field(field.name()) else {
+            added.push(logical);
+            continue;
+        };
+        let physical = join(physical_prefix, existing.physical_name(mode));
+        if keyed.contains(physical.as_str()) {
+            continue;
+        }
+        if let (
+            arrow_schema::DataType::Struct(children),
+            crate::kernel::DataType::Struct(table_children),
+        ) = (field.data_type(), existing.data_type())
+        {
+            new_plaintext_leaves(
+                children,
+                table_children,
+                &logical,
+                &physical,
+                keyed,
+                mode,
+                added,
+            );
+        }
+    }
 }
 
 #[cfg(test)]

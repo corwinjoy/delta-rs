@@ -5,8 +5,6 @@ use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use delta_kernel::engine::arrow_conversion::TryIntoArrow as _;
-use delta_kernel::table_properties::DataSkippingNumIndexedCols;
-use itertools::Itertools;
 use serde_json::Value;
 use tracing::*;
 use url::Url;
@@ -15,11 +13,10 @@ use super::utils::record_batch_from_message;
 use super::window::{SinkFactory, WriteWindow};
 use super::{DeltaWriter, DeltaWriterError, WriteMode, ensure_legacy_writer_supports_table};
 use crate::DeltaTable;
-use crate::datafile::{DeltaWriterProperties, WriterStatsConfig};
+use crate::datafile::DeltaWriterProperties;
 use crate::errors::DeltaTableError;
-use crate::kernel::Add;
+use crate::kernel::{Action, Add, Version};
 use crate::table::builder::DeltaTableBuilder;
-use crate::table::config::TablePropertiesExt as _;
 
 /// Writes messages to a delta lake table.
 ///
@@ -55,13 +52,11 @@ impl JsonWriter {
             .with_storage_options(storage_options.unwrap_or_default())
             .load()
             .await?;
-        ensure_legacy_writer_supports_table(&table, "JsonWriter")?;
         Self::from_parts(&table, schema_ref, partition_columns.unwrap_or_default())
     }
 
     /// Creates a JsonWriter to write to the given table, using the table's schema.
     pub fn for_table(table: &DeltaTable) -> Result<JsonWriter, DeltaTableError> {
-        ensure_legacy_writer_supports_table(table, "JsonWriter")?;
         let (schema, partition_columns) = {
             let snapshot = table.snapshot()?;
             let partition_columns = snapshot.metadata().partition_columns().to_vec();
@@ -71,38 +66,26 @@ impl JsonWriter {
         Self::from_parts(table, schema, partition_columns)
     }
 
-    /// Build a writer over `table` with a fixed `schema` and partitioning. The
-    /// stats configuration is resolved once here (mirroring `RecordBatchWriter`).
+    /// A writer over `table` with a fixed `schema` and partitioning.
     fn from_parts(
         table: &DeltaTable,
         schema: ArrowSchemaRef,
         partition_columns: Vec<String>,
     ) -> Result<Self, DeltaTableError> {
-        let (num_indexed_cols, stats_columns) = Self::read_stats_config(table)?;
+        let snapshot = table.snapshot()?;
+        ensure_legacy_writer_supports_table(
+            snapshot.metadata().configuration(),
+            snapshot.protocol(),
+            "JsonWriter",
+        )?;
         let factory = SinkFactory {
             storage: table.object_store(),
             partition_columns,
-            props: DeltaWriterProperties::default()
-                .with_stats_config(WriterStatsConfig::new(num_indexed_cols, stats_columns)),
+            props: DeltaWriterProperties::default(),
         };
-        Ok(Self {
-            window: WriteWindow::new(factory, schema),
-        })
-    }
-
-    /// Resolve the data-skipping stats configuration from the table snapshot.
-    fn read_stats_config(
-        table: &DeltaTable,
-    ) -> Result<(DataSkippingNumIndexedCols, Option<Vec<String>>), DeltaTableError> {
-        let snapshot = table.snapshot()?;
-        let table_config = snapshot.table_config();
-        Ok((
-            table_config.num_indexed_cols(),
-            table_config
-                .data_skipping_stats_columns
-                .as_ref()
-                .map(|cols| cols.iter().map(|c| c.to_string()).collect_vec()),
-        ))
+        let mut window = WriteWindow::new(factory, schema);
+        window.apply_table_config(snapshot.metadata().configuration())?;
+        Ok(Self { window })
     }
 
     /// Approximate encoded (parquet) size written since the last flush,
@@ -254,6 +237,18 @@ impl DeltaWriter<Vec<Value>> for JsonWriter {
         let actions = self.window.drain().await?;
         debug!(actions_count = actions.len(), "flush completed");
         Ok(actions)
+    }
+
+    /// Flush buffered files and commit them to the Delta log, creating a new version.
+    async fn flush_and_commit(
+        &mut self,
+        table: &mut DeltaTable,
+    ) -> Result<Version, DeltaTableError> {
+        // The table may have been replaced since the writer read its configuration.
+        self.window
+            .check_target(table.snapshot()?.metadata().configuration())?;
+        let adds: Vec<_> = self.flush().await?.drain(..).map(Action::Add).collect();
+        super::flush_and_commit(adds, table, None).await
     }
 }
 

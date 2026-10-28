@@ -1008,6 +1008,8 @@ pub async fn create_merge_plan(
     // properties fall back to ZSTD(4) rather than the SNAPPY default.
     let writer_properties =
         writer_properties.apply_parquet_default(|| Ok(OPTIMIZE_PARQUET_PROPERTIES.clone()))?;
+    let writer_properties =
+        writer_properties.for_table(snapshot.table_configuration(), session.runtime_env())?;
     let partitions_keys = snapshot.metadata().partition_columns();
 
     let (operations, metrics, planner_stats) = match optimize_type {
@@ -1055,7 +1057,7 @@ pub async fn create_merge_plan(
         planner_stats,
         task_parameters: Arc::new(MergeTaskParameters {
             file_schema,
-            writer_properties: writer_properties.apply_table_stats(snapshot.table_configuration()),
+            writer_properties,
             input_parameters,
             upload_budget,
         }),

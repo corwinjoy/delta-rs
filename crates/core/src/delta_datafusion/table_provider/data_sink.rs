@@ -17,10 +17,10 @@ use itertools::Itertools as _;
 use crate::{
     cast_record_batch,
     datafile::{DeltaWriterProperties, writer::WriterConfig},
-    delta_datafusion::{ColumnMappingState, DataFusionMixins as _},
+    delta_datafusion::DataFusionMixins as _,
     kernel::{Action, EagerSnapshot, transaction::CommitBuilder},
     logstore::{LogStoreRef, with_operation},
-    operations::write::execution::write_streams,
+    operations::write::execution::{WriteSinkConfig, write_streams},
     protocol::{DeltaOperation, SaveMode},
 };
 
@@ -105,10 +105,10 @@ impl DataSink for DeltaDataSink {
     async fn write_all(
         &self,
         data: SendableRecordBatchStream,
-        _context: &Arc<TaskContext>,
+        context: &Arc<TaskContext>,
     ) -> datafusion::common::Result<u64> {
         with_operation(&self.log_store, |log_store| async move {
-            self.write_all_with(log_store, data).await
+            self.write_all_with(log_store, data, context).await
         })
         .await
         .map_err(|e| DataFusionError::External(Box::new(e)))
@@ -120,12 +120,24 @@ impl DeltaDataSink {
         &self,
         log_store: LogStoreRef,
         data: SendableRecordBatchStream,
+        context: &Arc<TaskContext>,
     ) -> crate::DeltaResult<u64> {
         let target_schema = self.snapshot.input_schema();
 
         let stream = self.create_converted_stream(data, target_schema.clone());
-        let logical_partition_columns = self.snapshot.metadata().partition_columns();
-        let object_store = log_store.object_store();
+        let table_config = self.snapshot.table_configuration();
+        let WriteSinkConfig {
+            partition_columns: logical_partition_columns,
+            object_store,
+            props,
+            column_mapping,
+            ..
+        } = WriteSinkConfig::new(
+            table_config,
+            &context.runtime_env(),
+            log_store.object_store(),
+            DeltaWriterProperties::default().apply_table_defaults(table_config),
+        )?;
         let total_rows_metric = MetricBuilder::new(&self.metrics).counter("total_rows", 0);
         let stream = {
             let metric = total_rows_metric.clone();
@@ -139,22 +151,18 @@ impl DeltaDataSink {
                 }),
             )) as SendableRecordBatchStream
         };
-        let column_mapping =
-            ColumnMappingState::from_table_config(self.snapshot.table_configuration());
-        let props = DeltaWriterProperties::default()
-            .apply_table_defaults(self.snapshot.table_configuration());
         let (stream, table_schema, physical_partition_columns, random_prefix_length) =
             match &column_mapping {
                 None => (
                     stream,
                     self.snapshot.read_schema(),
-                    logical_partition_columns.to_vec(),
+                    logical_partition_columns.clone(),
                     None,
                 ),
                 Some(state) => {
                     let physical_schema = state.physical_schema(&self.snapshot.read_schema());
                     let physical_partition_columns =
-                        state.physical_partition_columns(logical_partition_columns)?;
+                        state.physical_partition_columns(&logical_partition_columns)?;
                     let prefix_length = state.random_prefix_length();
                     let state = state.clone();
                     let stream: SendableRecordBatchStream =

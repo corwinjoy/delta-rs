@@ -18,7 +18,7 @@ use std::sync::{Arc, LazyLock};
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 use delta_kernel::table_configuration::TableConfiguration;
-use delta_kernel::table_properties::DataSkippingNumIndexedCols;
+use delta_kernel::table_properties::{DataSkippingNumIndexedCols, TableProperties};
 use object_store::path::Path;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
@@ -134,13 +134,8 @@ impl WriterStatsConfig {
         }
     }
 
-    /// The table's stats configuration, with column names made physical.
-    pub fn from_config(config: &TableConfiguration) -> Self {
-        let properties = stats_table_properties(
-            config.logical_schema().as_ref(),
-            config.table_properties(),
-            config.column_mapping_mode(),
-        );
+    /// The stats configuration in `properties`, column names as given there.
+    pub fn from_properties(properties: &TableProperties) -> Self {
         Self {
             num_indexed_cols: properties.num_indexed_cols(),
             stats_columns: properties
@@ -148,6 +143,15 @@ impl WriterStatsConfig {
                 .as_ref()
                 .map(|columns| columns.iter().map(|c| c.to_string()).collect()),
         }
+    }
+
+    /// The table's stats configuration, with column names made physical.
+    pub fn from_config(config: &TableConfiguration) -> Self {
+        Self::from_properties(&stats_table_properties(
+            config.logical_schema().as_ref(),
+            config.table_properties(),
+            config.column_mapping_mode(),
+        ))
     }
 }
 
@@ -273,27 +277,40 @@ impl DeltaWriterProperties {
         Ok(self.with_parquet_properties(parquet))
     }
 
-    /// Fill the stats configuration from the table configuration if it is not already set.
-    /// Unlike the `with_` setters, this never overrides a value already set.
-    // Only the DataFusion write paths call this.
+    /// Fill the stats configuration from the table's where unset.
     #[cfg_attr(not(feature = "datafusion"), allow(dead_code))]
-    pub(crate) fn apply_table_stats(mut self, table_config: &TableConfiguration) -> Self {
+    fn apply_table_stats(mut self, table_config: &TableConfiguration) -> Self {
         if self.stats.is_none() {
             self.stats = Some(WriterStatsConfig::from_config(table_config));
         }
         self
     }
 
-    /// Fill the target file size and stats configuration from the table configuration
-    /// where they are not already set. Unlike the `with_` setters, this never overrides
-    /// a value already set.
+    /// Fill the target file size from the table's where unset. Stats and encryption are
+    /// filled by [`for_table`](Self::for_table).
     // Only the DataFusion write paths call this.
     #[cfg_attr(not(feature = "datafusion"), allow(dead_code))]
     pub(crate) fn apply_table_defaults(mut self, table_config: &TableConfiguration) -> Self {
         if self.target_file_size.is_none() {
             self.target_file_size = Some(table_config.table_properties().target_file_size());
         }
-        self.apply_table_stats(table_config)
+        self
+    }
+
+    /// `self` as the DataFusion write paths write `table_config`'s files: the table's stats
+    /// configuration where unset, plus its encryption, which no caller can remove. The
+    /// target file size is not filled, since `None` means never roll.
+    #[cfg(feature = "datafusion")]
+    pub(crate) fn for_table(
+        self,
+        table_config: &TableConfiguration,
+        runtime_env: &datafusion::execution::runtime_env::RuntimeEnv,
+    ) -> DeltaResult<Self> {
+        crate::operations::write::encryption::apply_encryption(
+            self.apply_table_stats(table_config),
+            table_config.metadata().configuration(),
+            Some(runtime_env),
+        )
     }
 
     /// Run `layer` on every file's parquet properties, after the layers added before it.
@@ -497,7 +514,9 @@ mod tests {
             ]),
         );
 
-        let filled = DeltaWriterProperties::default().apply_table_defaults(&table_config);
+        let filled = DeltaWriterProperties::default()
+            .apply_table_defaults(&table_config)
+            .apply_table_stats(&table_config);
         assert_eq!(filled.target_file_size(), NonZeroU64::new(1024));
         assert_eq!(filled.stats().stats_columns, Some(vec!["a".to_string()]));
 
@@ -507,7 +526,8 @@ mod tests {
                 DataSkippingNumIndexedCols::AllColumns,
                 None,
             ))
-            .apply_table_defaults(&table_config);
+            .apply_table_defaults(&table_config)
+            .apply_table_stats(&table_config);
         assert_eq!(kept.target_file_size(), NonZeroU64::new(7));
         assert_eq!(
             kept.stats().num_indexed_cols,

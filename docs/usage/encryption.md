@@ -6,12 +6,11 @@ following the Delta protocol RFC for
 [Parquet encryption](https://github.com/delta-io/delta/issues/6195).
 Encryption is configured with table properties when the table is created.
 
-!!! warning "Experimental and not yet usable"
+!!! warning "Experimental"
     Parquet encryption follows a draft RFC that is not yet part of the Delta protocol. The
     properties, the feature name and the behaviour described here may change or be removed.
-    This release only defines and validates the properties: writing and reading encrypted
-    tables is not supported yet, and every build refuses encrypted tables until that support
-    lands.
+    This release writes encrypted tables but cannot read them yet: every build refuses to
+    read an encrypted table until that support lands.
 
 Support is an opt-in cargo feature (`encryption`) of the Rust crates. Builds without it refuse
 to read or write encrypted tables, so they never return ciphertext or add plaintext files.
@@ -29,6 +28,11 @@ to read or write encrypted tables, so they never return ciphertext or add plaint
 The properties are plaintext in the Delta log, so they hold only key IDs and KMS settings,
 never keys or credentials. Key material for each data file lives in the file's own Parquet
 key metadata.
+
+`kms_configuration` is also writable by anyone who can commit to the table, so a KMS client
+must treat it as untrusted input. A client that takes its endpoint from it should connect only
+to allowlisted endpoints; otherwise whoever edits the table can redirect key requests, and the
+credentials sent with them, to a server of their choosing.
 
 `footer_key` is always required: Parquet encrypts the footer with it, or signs the footer with
 it under `plaintext_footer`. There is no footer-less mode. An encrypted footer hides which
@@ -77,15 +81,26 @@ A replace removes every data file in one commit, but the removed files stay in s
 `vacuum` runs, and the old log entries with their statistics until log cleanup.
 
 Adding columns to a table with `column_keys` leaves the new columns unencrypted, as the RFC
-specifies. Under uniform encryption new columns are encrypted with the footer key. Dropping an
-encrypted column removes it from `column_keys`, as the RFC requires; dropping the last one is
-refused, since an empty `column_keys` would mean uniform encryption.
+specifies; the write logs a warning naming them. Under uniform encryption new columns are
+encrypted with the footer key. Dropping an encrypted column removes it from `column_keys`,
+as the RFC requires; dropping the last one is refused, since an empty `column_keys` would
+mean uniform encryption.
 
 Passing `delta.encryption.*` properties to a write on an existing table is an error when they
 differ from the table's, since a write does not change the configuration of an existing table.
 Matching values pass, so a pipeline can resend the same configuration on every run, with
 column names as stored or as displayed. A different `kms_configuration` also passes, since
 it is not frozen, but is not applied either: change it with the table-property operations.
+
+## What stays plaintext
+
+Encryption covers the Parquet data files only. The Delta log still shows the schema, partition
+values, each file's row count and size, and the encryption properties, including `kms_id` and
+the master key IDs; each file's key metadata repeats those IDs. Deletion vectors, which record
+the positions of deleted rows, are not encrypted. With `plaintext_footer` the footer shows which
+columns are encrypted, but the Parquet-level statistics of encrypted columns stay encrypted
+either way. Keys are held in process memory while a file is written or read, so the design does
+not protect against an attacker who can read the memory of the writing or reading process.
 
 ## Protocol
 

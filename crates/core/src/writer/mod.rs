@@ -1,5 +1,7 @@
 //! Abstractions and implementations for writing data to delta tables
 
+use std::collections::HashMap;
+
 use arrow::{datatypes::FieldRef, datatypes::SchemaRef, error::ArrowError};
 use async_trait::async_trait;
 use object_store::Error as ObjectStoreError;
@@ -9,7 +11,7 @@ use crate::DeltaTable;
 use crate::errors::{ColumnMappingOperation, DeltaTableError};
 use crate::kernel::schema::symmetric_differences;
 use crate::kernel::transaction::{CommitBuilder, CommitProperties};
-use crate::kernel::{Action, Add, Version};
+use crate::kernel::{Action, Add, Protocol, Version};
 use crate::protocol::{ColumnCountStat, DeltaOperation, SaveMode};
 
 pub use json::JsonWriter;
@@ -28,13 +30,15 @@ pub mod test_utils;
 /// Preview cap for validation errors that enumerate offending records/rows.
 pub(crate) const INVALID_PREVIEW_CAP: usize = 10;
 
+/// Refuse a table the legacy writers cannot write: column mapping, or a protocol feature
+/// this build cannot write, e.g. encryption. Runs before a sink opens, since `flush`
+/// uploads without a commit check.
 pub(crate) fn ensure_legacy_writer_supports_table(
-    table: &DeltaTable,
+    configuration: &HashMap<String, String>,
+    protocol: &Protocol,
     operation: &str,
 ) -> Result<(), DeltaTableError> {
-    if table
-        .snapshot()?
-        .table_config()
+    if delta_kernel::table_properties::TableProperties::from(configuration.iter())
         .column_mapping_mode
         .is_some_and(|mode| mode != delta_kernel::table_features::ColumnMappingMode::None)
     {
@@ -44,7 +48,7 @@ pub(crate) fn ensure_legacy_writer_supports_table(
         ));
     }
     // `flush` uploads without a commit check, so refuse before a sink opens.
-    crate::kernel::transaction::PROTOCOL.can_write_to(table.snapshot()?)?;
+    crate::kernel::transaction::PROTOCOL.can_write_protocol(protocol)?;
     Ok(())
 }
 

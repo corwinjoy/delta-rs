@@ -211,6 +211,16 @@ fn stats_from_metadata(
             continue;
         }
 
+        // The RFC forbids log statistics for encrypted columns; the chunk metadata says which
+        // those are, whatever the stats configuration asks for.
+        #[cfg(feature = "encryption")]
+        if row_group_metadata
+            .iter()
+            .any(|row_group| row_group.column(idx).crypto_metadata().is_some())
+        {
+            continue;
+        }
+
         let maybe_stats: Option<AggregatedStats> = row_group_metadata
             .iter()
             .flat_map(|g| {

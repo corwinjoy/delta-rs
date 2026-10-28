@@ -15,6 +15,7 @@
 //! [`RecordBatchWriter`]: super::record_batch::RecordBatchWriter
 //! [`JsonWriter`]: super::json::JsonWriter
 
+use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
@@ -25,10 +26,11 @@ use indexmap::IndexMap;
 use object_store::ObjectStore;
 use parquet::file::properties::WriterProperties;
 
-use crate::datafile::DeltaWriterProperties;
 use crate::datafile::writer::{ArrowWriterOptions, DeltaWriter as DatasetSink, WriterConfig};
+use crate::datafile::{DeltaWriterProperties, WriterStatsConfig};
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::kernel::Add;
+use crate::table::config::EncryptionConfig;
 
 /// Everything needed to open a streaming sink for a given schema — exactly the
 /// per-writer configuration, minus the schema (which varies as a window widens).
@@ -51,6 +53,8 @@ impl SinkFactory {
 /// upholds. The writers drive it and never touch the inner state directly.
 pub(crate) struct WriteWindow {
     factory: SinkFactory,
+    /// The encryption the sinks' files are written under, for [`Self::check_target`].
+    encryption: Option<EncryptionConfig>,
     /// Schema the open sink encodes under; widens on a `MergeSchema` write.
     schema: ArrowSchemaRef,
     /// The last committed schema; the window reverts to it on `abort`.
@@ -69,6 +73,7 @@ impl WriteWindow {
     pub(crate) fn new(factory: SinkFactory, schema: ArrowSchemaRef) -> Self {
         Self {
             factory,
+            encryption: None,
             baseline: schema.clone(),
             schema,
             sink: None,
@@ -125,6 +130,53 @@ impl WriteWindow {
     /// Set the arrow writer options used for sinks opened from now on.
     pub(crate) fn set_arrow_options(&mut self, arrow_options: ArrowWriterOptions) {
         self.factory.props.arrow = Some(arrow_options);
+    }
+
+    /// Write the files of sinks opened from now on as `configuration` (the table's) says:
+    /// its stats settings and encryption. The KMS factory comes from the global registry,
+    /// the legacy writers having no DataFusion session. On an error the properties are left
+    /// as they were.
+    pub(crate) fn apply_table_config(
+        &mut self,
+        configuration: &HashMap<String, String>,
+    ) -> DeltaResult<()> {
+        self.factory.props.stats = Some(WriterStatsConfig::from_properties(
+            &delta_kernel::table_properties::TableProperties::from(configuration.iter()),
+        ));
+        let encryption = EncryptionConfig::try_from_configuration(configuration)?;
+        #[cfg(feature = "datafusion")]
+        {
+            self.factory.props = crate::operations::write::encryption::apply_encryption(
+                self.factory.props.clone(),
+                configuration,
+                None,
+            )?;
+        }
+        #[cfg(not(feature = "datafusion"))]
+        if encryption.is_some() {
+            return Err(DeltaTableError::Generic(
+                "This table's delta.encryption.* properties require the 'datafusion' and \
+                 'encryption' features; the legacy writers cannot encrypt without them"
+                    .to_string(),
+            ));
+        }
+        self.encryption = encryption;
+        Ok(())
+    }
+
+    /// Refuse to hand this window's files to a table whose frozen encryption settings differ
+    /// from what they were written under.
+    pub(crate) fn check_target(&self, configuration: &HashMap<String, String>) -> DeltaResult<()> {
+        let target = EncryptionConfig::try_from_configuration(configuration)?;
+        match EncryptionConfig::frozen_change(self.encryption.as_ref(), target.as_ref()) {
+            None => Ok(()),
+            Some(key) => Err(DeltaTableError::Generic(format!(
+                "The table's '{key}' differs from the encryption configuration this writer's \
+                 files were written under, because the table was created or replaced after \
+                 the writer read its configuration; create the table first, then the writer \
+                 with for_table or try_new_checked"
+            ))),
+        }
     }
 
     /// Schema widening rotates the whole window's sink, which only makes sense when

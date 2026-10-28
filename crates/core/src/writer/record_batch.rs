@@ -11,7 +11,6 @@ use arrow_array::{ArrayRef, RecordBatch, new_null_array};
 use arrow_schema::{DataType, Schema as ArrowSchema, SchemaRef as ArrowSchemaRef};
 use delta_kernel::engine::arrow_conversion::{TryIntoArrow, TryIntoKernel};
 use delta_kernel::expressions::Scalar;
-use delta_kernel::table_properties::DataSkippingNumIndexedCols;
 use indexmap::IndexMap;
 use object_store::ObjectStore;
 use parquet::file::properties::WriterProperties;
@@ -20,17 +19,17 @@ use tracing::log::*;
 use super::window::{SinkFactory, WriteWindow};
 use super::{DeltaWriter, DeltaWriterError, WriteMode, ensure_legacy_writer_supports_table};
 use crate::DeltaTable;
+use crate::datafile::DeltaWriterProperties;
 use crate::datafile::writer::ArrowWriterOptions;
-use crate::datafile::{DeltaWriterProperties, WriterStatsConfig};
 use crate::errors::DeltaTableError;
 use crate::kernel::schema::cast::{cast_record_batch, normalize_for_delta};
 use crate::kernel::schema::merge_arrow_schema;
 use crate::kernel::transaction::CommitProperties;
-use crate::kernel::{Action, Add};
+use crate::kernel::{Action, Add, Protocol, Snapshot};
 use crate::kernel::{MetadataExt as _, Version};
+use crate::logstore::LogStoreRef;
 use crate::parquet_utils::default_writer_properties;
 use crate::table::builder::DeltaTableBuilder;
-use crate::table::config::DEFAULT_NUM_INDEX_COLS;
 use crate::writer::utils::{arrow_schema_without_partitions, record_batch_without_partitions};
 
 /// Writes messages to a delta lake table.
@@ -47,6 +46,19 @@ pub struct RecordBatchWriter {
     /// it enforces.
     window: WriteWindow,
     commit_properties: Option<CommitProperties>,
+    table_config: TableConfigState,
+}
+
+/// What the writer knows about its table. [`RecordBatchWriter::try_new`] does not load it,
+/// so it is read before the first upload and, if missing then, again before files are
+/// handed out.
+enum TableConfigState {
+    /// The configuration has been applied to the writer.
+    Applied,
+    /// The table has not been read yet; read it before the first upload.
+    Unloaded(LogStoreRef),
+    /// The table did not exist at the first write; check it again before handing out files.
+    Missing(LogStoreRef),
 }
 
 impl std::fmt::Debug for RecordBatchWriter {
@@ -56,7 +68,11 @@ impl std::fmt::Debug for RecordBatchWriter {
 }
 
 impl RecordBatchWriter {
-    /// Create a new [`RecordBatchWriter`] instance
+    /// Create a new [`RecordBatchWriter`] instance.
+    ///
+    /// The table is read on the first write, so an encrypted table gets encrypted files; a
+    /// table missing then is checked again when files are handed out. Callers holding a
+    /// loaded table should use [`for_table`](Self::for_table).
     pub fn try_new(
         table_uri: impl AsRef<str>,
         schema: ArrowSchemaRef,
@@ -71,19 +87,15 @@ impl RecordBatchWriter {
         // Initialize writer properties for the underlying arrow writer
         let writer_properties = default_writer_properties(parquet::basic::Compression::SNAPPY);
 
-        // if metadata fails to load, use an empty hashmap and default values for num_indexed_cols and stats_columns
-        let configuration = delta_table.snapshot().map_or_else(
-            |_| HashMap::new(),
-            |snapshot| snapshot.metadata().configuration().clone(),
-        );
-
-        Ok(Self::new_with_table(
-            delta_table,
-            schema,
-            partition_columns,
-            configuration,
+        let mut writer = Self::from_parts(
+            delta_table.object_store(),
+            normalize_for_delta(&schema),
+            partition_columns.unwrap_or_default(),
+            &HashMap::new(),
             writer_properties,
-        ))
+        )?;
+        writer.table_config = TableConfigState::Unloaded(delta_table.log_store());
+        Ok(writer)
     }
 
     /// Create a new [`RecordBatchWriter`] for an existing table after validating table metadata.
@@ -99,19 +111,24 @@ impl RecordBatchWriter {
             .with_storage_options(storage_options.unwrap_or_default())
             .load()
             .await?;
-        ensure_legacy_writer_supports_table(&delta_table, "RecordBatchWriter")?;
+        let snapshot = delta_table.snapshot()?;
+        let configuration = snapshot.metadata().configuration();
+        ensure_legacy_writer_supports_table(
+            configuration,
+            snapshot.protocol(),
+            "RecordBatchWriter",
+        )?;
 
         // Initialize writer properties for the underlying arrow writer
         let writer_properties = default_writer_properties(parquet::basic::Compression::SNAPPY);
-        let configuration = delta_table.snapshot()?.metadata().configuration().clone();
 
-        Ok(Self::new_with_table(
-            delta_table,
-            schema,
-            partition_columns,
+        Self::from_parts(
+            delta_table.object_store(),
+            normalize_for_delta(&schema),
+            partition_columns.unwrap_or_default(),
             configuration,
             writer_properties,
-        ))
+        )
     }
 
     /// Add the [CommitProperties] to the [RecordBatchWriter] to be used when the writer flushes
@@ -126,25 +143,24 @@ impl RecordBatchWriter {
 
     /// Creates a [`RecordBatchWriter`] to write data to provided Delta Table
     pub fn for_table(table: &DeltaTable) -> Result<Self, DeltaTableError> {
-        ensure_legacy_writer_supports_table(table, "RecordBatchWriter")?;
-
-        // Initialize an arrow schema ref from the delta table schema
-        let metadata = table.snapshot()?.metadata();
+        let snapshot = table.snapshot()?;
+        let metadata = snapshot.metadata();
+        ensure_legacy_writer_supports_table(
+            metadata.configuration(),
+            snapshot.protocol(),
+            "RecordBatchWriter",
+        )?;
         let arrow_schema: ArrowSchema = (&metadata.parse_schema()?).try_into_arrow()?;
-        let arrow_schema_ref = Arc::new(arrow_schema);
         let partition_columns = metadata.partition_columns().into();
-
-        // Initialize writer properties for the underlying arrow writer
         let writer_properties = default_writer_properties(parquet::basic::Compression::SNAPPY);
-        let configuration = table.snapshot()?.metadata().configuration().clone();
 
-        Ok(Self::from_parts(
+        Self::from_parts(
             table.object_store(),
-            arrow_schema_ref,
+            Arc::new(arrow_schema),
             partition_columns,
-            &configuration,
+            metadata.configuration(),
             writer_properties,
-        ))
+        )
     }
 
     /// Creates a [`RecordBatchWriter`] to write data to an [`BlindDeltaTable`].
@@ -157,9 +173,11 @@ impl RecordBatchWriter {
         table: &crate::table::BlindDeltaTable,
     ) -> Result<Self, DeltaTableError> {
         let metadata = table.metadata();
-        // `flush` uploads without a commit check, so refuse before a sink opens.
-        crate::kernel::transaction::PROTOCOL.can_read_from_protocol(table.protocol())?;
-        crate::kernel::transaction::PROTOCOL.can_write_to_protocol(table.protocol())?;
+        ensure_legacy_writer_supports_table(
+            metadata.configuration(),
+            table.protocol(),
+            "RecordBatchWriter",
+        )?;
         let arrow_schema: ArrowSchema = (&metadata.parse_schema()?).try_into_arrow()?;
         let arrow_schema_ref = Arc::new(arrow_schema);
         let partition_columns = metadata.partition_columns().to_vec();
@@ -167,29 +185,11 @@ impl RecordBatchWriter {
         let writer_properties = WriterProperties::builder()
             .set_compression(parquet::basic::Compression::SNAPPY)
             .build();
-        let configuration = metadata.configuration().clone();
-
-        Ok(Self::from_parts(
+        Self::from_parts(
             table.object_store(),
             arrow_schema_ref,
             partition_columns,
-            &configuration,
-            writer_properties,
-        ))
-    }
-
-    fn new_with_table(
-        delta_table: DeltaTable,
-        schema: ArrowSchemaRef,
-        partition_columns: Option<Vec<String>>,
-        configuration: HashMap<String, String>,
-        writer_properties: WriterProperties,
-    ) -> Self {
-        Self::from_parts(
-            delta_table.object_store(),
-            normalize_for_delta(&schema),
-            partition_columns.unwrap_or_default(),
-            &configuration,
+            metadata.configuration(),
             writer_properties,
         )
     }
@@ -203,31 +203,56 @@ impl RecordBatchWriter {
         partition_columns: Vec<String>,
         configuration: &HashMap<String, String>,
         writer_properties: WriterProperties,
-    ) -> Self {
-        let num_indexed_cols = configuration
-            .get("delta.dataSkippingNumIndexedCols")
-            .and_then(|v| {
-                v.parse::<u64>()
-                    .ok()
-                    .map(DataSkippingNumIndexedCols::NumColumns)
-            })
-            .unwrap_or(DataSkippingNumIndexedCols::NumColumns(
-                DEFAULT_NUM_INDEX_COLS,
-            ));
-        let stats_columns = configuration
-            .get("delta.dataSkippingStatsColumns")
-            .map(|v| v.split(',').map(|s| s.to_string()).collect());
-
+    ) -> Result<Self, DeltaTableError> {
         let factory = SinkFactory {
             storage,
             partition_columns,
-            props: DeltaWriterProperties::default()
-                .with_parquet_properties(writer_properties)
-                .with_stats_config(WriterStatsConfig::new(num_indexed_cols, stats_columns)),
+            props: DeltaWriterProperties::default().with_parquet_properties(writer_properties),
         };
-        Self {
+        let mut writer = Self {
             window: WriteWindow::new(factory, arrow_schema_ref),
             commit_properties: None,
+            table_config: TableConfigState::Applied,
+        };
+        writer.window.apply_table_config(configuration)?;
+        Ok(writer)
+    }
+
+    /// Adopt `configuration`, the table's, for the sinks opened from now on.
+    fn adopt_table_config(
+        &mut self,
+        configuration: &HashMap<String, String>,
+        protocol: &Protocol,
+    ) -> Result<(), DeltaTableError> {
+        ensure_legacy_writer_supports_table(configuration, protocol, "RecordBatchWriter")?;
+        self.window.apply_table_config(configuration)?;
+        self.table_config = TableConfigState::Applied;
+        Ok(())
+    }
+
+    /// Read the table before the first upload and, if it was missing, again `at_flush` when
+    /// there are files to hand out, which must match it.
+    async fn sync_table_config(&mut self, at_flush: bool) -> Result<(), DeltaTableError> {
+        let (log_store, must_match) = match &self.table_config {
+            TableConfigState::Unloaded(log_store) => (Arc::clone(log_store), false),
+            TableConfigState::Missing(log_store) if at_flush && self.window.count() > 0 => {
+                (Arc::clone(log_store), true)
+            }
+            _ => return Ok(()),
+        };
+        match Snapshot::try_new(log_store.as_ref(), None).await {
+            Ok(snapshot) => {
+                let configuration = snapshot.metadata().configuration();
+                if must_match {
+                    self.window.check_target(configuration)?;
+                }
+                self.adopt_table_config(configuration, snapshot.protocol())
+            }
+            Err(DeltaTableError::NotATable(_)) => {
+                self.table_config = TableConfigState::Missing(log_store);
+                Ok(())
+            }
+            Err(err) => Err(err),
         }
     }
 
@@ -303,6 +328,7 @@ impl RecordBatchWriter {
         partition_values: &IndexMap<String, Scalar>,
         mode: WriteMode,
     ) -> Result<ArrowSchemaRef, DeltaTableError> {
+        self.sync_table_config(false).await?;
         // Phase 1 — validate against the partition-stripped file schema (what the
         // sink encodes under), so bad caller data errors before any window state
         // changes. Merging against the stripped schema also keeps a batch that
@@ -346,6 +372,7 @@ impl DeltaWriter<RecordBatch> for RecordBatchWriter {
         values: RecordBatch,
         mode: WriteMode,
     ) -> Result<(), DeltaTableError> {
+        self.sync_table_config(false).await?;
         if mode == WriteMode::MergeSchema && !self.window.partition_columns().is_empty() {
             return Err(DeltaTableError::Generic(
                 "Merging Schemas with partition columns present is currently unsupported"
@@ -398,6 +425,7 @@ impl DeltaWriter<RecordBatch> for RecordBatchWriter {
     /// Finalize all files written since the last flush and return their [`Add`]
     /// actions, resetting internal state to handle another flush window.
     async fn flush(&mut self) -> Result<Vec<Add>, DeltaTableError> {
+        self.sync_table_config(true).await?;
         self.window.drain().await
     }
 
@@ -407,6 +435,17 @@ impl DeltaWriter<RecordBatch> for RecordBatchWriter {
         table: &mut DeltaTable,
     ) -> Result<Version, DeltaTableError> {
         use crate::kernel::StructType;
+        let snapshot = table.snapshot()?;
+        let configuration = snapshot.metadata().configuration();
+        if matches!(self.table_config, TableConfigState::Unloaded(_)) {
+            // Nothing was written yet, so the table's settings are simply adopted.
+            self.adopt_table_config(configuration, snapshot.protocol())?;
+        }
+        // The table may have been replaced since the writer read it, or not have existed.
+        self.window.check_target(configuration)?;
+        if matches!(self.table_config, TableConfigState::Missing(_)) {
+            self.adopt_table_config(configuration, snapshot.protocol())?;
+        }
         // Schema changes only via `MergeSchema` widening, so a difference from the
         // committed baseline is the signal to evolve the metadata. The window rejects
         // widening on partitioned tables at write time; this check (kept before

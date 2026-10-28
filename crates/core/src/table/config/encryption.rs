@@ -66,6 +66,9 @@ fn paths_overlap(a: &[String], b: &[String]) -> bool {
 /// [`TableProperties::encryption_kms_id`] and friends and carries the RFC's
 /// `parquetEncryption-dev` table feature; this type adds the rules delta-rs applies on top.
 /// Every build can parse them; encrypting or decrypting needs the `encryption` cargo feature.
+///
+/// Before using an encrypted table, register an `EncryptionFactory` under its
+/// `delta.encryption.kms_id` (`operations::write::encryption::register_encryption_factory`).
 #[derive(Debug, Clone)]
 pub struct EncryptionConfig {
     /// The KMS client to use (`delta.encryption.kms_id`).
@@ -369,6 +372,45 @@ impl EncryptionConfig {
         Ok(self)
     }
 
+    /// The parquet leaf columns each column key covers in a file with `schema`, by key ID:
+    /// a configured column covers every leaf under it (`address` covers `address.street`
+    /// and `address.city`); one with no leaf in the schema is an error. `coerce_types` is
+    /// the writer's parquet setting, which renames list and map leaves.
+    pub fn column_key_leaves(
+        &self,
+        schema: &arrow_schema::Schema,
+        coerce_types: bool,
+    ) -> DeltaResult<Vec<EncryptionColumnKey>> {
+        let leaves: Vec<ColumnName> = parquet::arrow::ArrowSchemaConverter::new()
+            .with_coerce_types(coerce_types)
+            .convert(schema)?
+            .columns()
+            .iter()
+            .map(|column| ColumnName::new(column.path().parts()))
+            .collect();
+        let mut keyed: Vec<EncryptionColumnKey> = Vec::new();
+        for (key_id, column) in self.keyed_columns() {
+            let covered: Vec<ColumnName> = leaves
+                .iter()
+                .filter(|leaf| leaf.path().starts_with(column.path()))
+                .cloned()
+                .collect();
+            if covered.is_empty() {
+                return Err(invalid_encryption_config(format!(
+                    "key '{key_id}' names column '{column}', which is not in the file schema"
+                )));
+            }
+            match keyed.iter_mut().find(|key| key.key_id == key_id) {
+                Some(key) => key.columns.extend(covered),
+                None => keyed.push(EncryptionColumnKey {
+                    key_id: key_id.to_string(),
+                    columns: covered,
+                }),
+            }
+        }
+        Ok(keyed)
+    }
+
     /// [`column_keys`](Self::column_keys) in the `delta.encryption.column_keys` format,
     /// one segment per master key, sorted so the result is deterministic.
     pub fn column_keys_property(&self) -> String {
@@ -394,24 +436,38 @@ impl EncryptionConfig {
     }
 
     /// [`TableParquetOptions`] telling a DataFusion Parquet scan to decrypt with the
-    /// factory registered as [`kms_id`](EncryptionConfig::kms_id).
+    /// factory registered as [`kms_id`](EncryptionConfig::kms_id), carrying the
+    /// [reader options](Self::reader_factory_options) only.
     #[cfg(all(feature = "datafusion", feature = "encryption"))]
     pub fn to_table_parquet_options(&self) -> TableParquetOptions {
         let mut opts = TableParquetOptions::default();
         opts.crypto.factory_id = Some(self.kms_id.clone());
-        opts.crypto.factory_options = self.factory_options();
+        opts.crypto.factory_options = self.reader_factory_options();
         opts
     }
 
-    /// The options passed to the registered encryption factory, keyed by the
-    /// `delta.encryption.*` property names.
+    /// The options a registered encryption factory gets when decrypting a file: `kms_id`
+    /// and `kms_configuration` only, so keys can only come from each file's key metadata,
+    /// as the RFC requires.
     #[cfg(all(feature = "datafusion", feature = "encryption"))]
-    pub fn factory_options(&self) -> EncryptionFactoryOptions {
+    pub fn reader_factory_options(&self) -> EncryptionFactoryOptions {
         let mut opts = EncryptionFactoryOptions::default();
+        opts.options
+            .insert(ENCRYPTION_KMS_ID_PROP.to_string(), self.kms_id.clone());
         if let Some(cfg) = &self.kms_configuration {
             opts.options
                 .insert(ENCRYPTION_KMS_CONFIGURATION_PROP.to_string(), cfg.clone());
         }
+        opts
+    }
+
+    /// The options a registered encryption factory gets when encrypting a file: the
+    /// [reader options](Self::reader_factory_options) plus `footer_key`,
+    /// `plaintext_footer` and, when set, `column_keys`, which the encryption layer has
+    /// resolved to the file's parquet leaf paths.
+    #[cfg(all(feature = "datafusion", feature = "encryption"))]
+    pub fn writer_factory_options(&self) -> EncryptionFactoryOptions {
+        let mut opts = self.reader_factory_options();
         opts.options.insert(
             ENCRYPTION_FOOTER_KEY_PROP.to_string(),
             self.footer_key.clone(),
@@ -635,6 +691,60 @@ mod tests {
     fn column_keys_property_round_trips_sorted() {
         let enc = config_with_column_keys("k2:c;k1:b,a");
         assert_eq!(enc.column_keys_property(), "k1:a,b;k2:c");
+    }
+
+    /// Leaf paths follow the writer's `coerce_types`: a list's leaf is `tags.list.element`
+    /// with it and `tags.list.item` without.
+    #[test]
+    fn column_key_leaves_follow_coerce_types() {
+        use arrow_schema::{DataType as ArrowType, Field, Schema};
+        let schema = Schema::new(vec![Field::new(
+            "tags",
+            ArrowType::List(std::sync::Arc::new(Field::new(
+                "item",
+                ArrowType::Int32,
+                true,
+            ))),
+            true,
+        )]);
+        let enc = EncryptionConfig::try_from_configuration(&HashMap::from([
+            (ENCRYPTION_KMS_ID_PROP.to_string(), "kms".to_string()),
+            (ENCRYPTION_FOOTER_KEY_PROP.to_string(), "fk".to_string()),
+            (
+                ENCRYPTION_COLUMN_KEYS_PROP.to_string(),
+                "k:tags".to_string(),
+            ),
+        ]))
+        .unwrap()
+        .unwrap();
+        for (coerce, leaf) in [(false, "tags.list.item"), (true, "tags.list.element")] {
+            let leaves = enc.column_key_leaves(&schema, coerce).unwrap();
+            assert_eq!(leaves.len(), 1);
+            assert_eq!(leaves[0].to_string(), format!("k:{leaf}"));
+        }
+    }
+
+    /// Every column sharing a key ID is covered, not only the last one listed.
+    #[test]
+    fn column_key_leaves_keep_every_column_of_a_key() {
+        use arrow_schema::{DataType as ArrowType, Field, Schema};
+        let schema = Schema::new(vec![
+            Field::new("int", ArrowType::Int32, true),
+            Field::new("string", ArrowType::Utf8, true),
+        ]);
+        let enc = EncryptionConfig::try_from_configuration(&HashMap::from([
+            (ENCRYPTION_KMS_ID_PROP.to_string(), "kms".to_string()),
+            (ENCRYPTION_FOOTER_KEY_PROP.to_string(), "fk".to_string()),
+            (
+                ENCRYPTION_COLUMN_KEYS_PROP.to_string(),
+                "k:int,string".to_string(),
+            ),
+        ]))
+        .unwrap()
+        .unwrap();
+        let leaves = enc.column_key_leaves(&schema, false).unwrap();
+        assert_eq!(leaves.len(), 1);
+        assert_eq!(leaves[0].to_string(), "k:int,string");
     }
 
     #[test]
@@ -1164,23 +1274,33 @@ mod tests {
         );
     }
 
-    /// Until the encryption read and write paths land, the `parquetEncryption-dev` feature
-    /// makes delta-rs refuse encrypted tables instead of reading ciphertext or writing
-    /// plaintext into them.
-    #[tokio::test]
-    async fn protocol_checker_refuses_encrypted_tables() {
-        let table = create_encrypted_table("pii-key:ssn", &[]).await.unwrap();
-        let snapshot = table.snapshot().unwrap().snapshot();
-        for result in [
-            PROTOCOL.can_read_from(snapshot),
-            PROTOCOL.can_write_to(snapshot),
-        ] {
-            match result {
-                Err(TransactionError::UnsupportedTableFeatures(features)) => {
-                    assert_eq!(features, [TableFeature::ParquetEncryptionDev]);
-                }
-                other => panic!("expected UnsupportedTableFeatures, got {other:?}"),
+    fn assert_refused(result: Result<(), TransactionError>) {
+        match result {
+            Err(TransactionError::UnsupportedTableFeatures(features)) => {
+                assert_eq!(features, [TableFeature::ParquetEncryptionDev]);
             }
+            other => panic!("expected UnsupportedTableFeatures, got {other:?}"),
+        }
+    }
+
+    /// Until the encryption read path lands, delta-rs refuses to read encrypted tables
+    /// rather than hand out ciphertext.
+    #[tokio::test]
+    async fn protocol_checker_refuses_reading_encrypted_tables() {
+        let table = create_encrypted_table("pii-key:ssn", &[]).await.unwrap();
+        assert_refused(PROTOCOL.can_read_from(table.snapshot().unwrap().snapshot()));
+    }
+
+    /// Writing an encrypted table needs the KMS-backed writer, so builds without it
+    /// refuse rather than write plaintext files.
+    #[tokio::test]
+    async fn protocol_checker_writes_encrypted_tables_only_with_encryption_support() {
+        let table = create_encrypted_table("pii-key:ssn", &[]).await.unwrap();
+        let result = PROTOCOL.can_write_to(table.snapshot().unwrap().snapshot());
+        if cfg!(all(feature = "datafusion", feature = "encryption")) {
+            result.unwrap();
+        } else {
+            assert_refused(result);
         }
     }
 }
