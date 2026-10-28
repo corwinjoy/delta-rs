@@ -1352,9 +1352,8 @@ class DeltaTable:
         # reader_features list, so the feature check alone misses them and the
         # scanner reads logical column names against physical parquet columns,
         # returning all nulls. Check the table configuration directly.
-        column_mapping_mode = self.metadata().configuration.get(
-            "delta.columnMapping.mode", "none"
-        )
+        configuration = self.metadata().configuration
+        column_mapping_mode = configuration.get("delta.columnMapping.mode", "none")
         if column_mapping_mode not in ("none",) or (
             table_protocol.reader_features
             and "columnMapping" in table_protocol.reader_features

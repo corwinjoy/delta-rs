@@ -9,6 +9,13 @@ use delta_kernel::table_properties::{DataSkippingNumIndexedCols, IsolationLevel,
 use super::Constraint;
 use crate::errors::DeltaTableError;
 
+mod encryption;
+pub use encryption::{
+    ENCRYPTION_COLUMN_KEYS_PROP, ENCRYPTION_FOOTER_KEY_PROP, ENCRYPTION_KMS_CONFIGURATION_PROP,
+    ENCRYPTION_KMS_ID_PROP, ENCRYPTION_PLAINTEXT_FOOTER_PROP, ENCRYPTION_PROP_PREFIX,
+    EncryptionConfig,
+};
+
 /// Typed property keys that can be defined on a delta table
 ///
 /// <https://docs.delta.io/latest/table-properties.html#delta-table-properties-reference>
@@ -120,6 +127,23 @@ pub enum TableProperty {
 
     /// 'classic' for classic Delta Lake checkpoints. 'v2' for v2 checkpoints.
     CheckpointPolicy,
+
+    /// The KMS client used to encrypt the table's Parquet files. See [`EncryptionConfig`].
+    EncryptionKmsId,
+
+    /// Opaque, KMS-specific configuration for the encryption KMS client. See [`EncryptionConfig`].
+    EncryptionKmsConfiguration,
+
+    /// The master key ID used for Parquet footer encryption; setting it enables encryption.
+    /// See [`EncryptionConfig`].
+    EncryptionFooterKey,
+
+    /// true to leave Parquet footers unencrypted. See [`EncryptionConfig`].
+    EncryptionPlaintextFooter,
+
+    /// Master key IDs mapped to the columns they encrypt, as `keyId:col1,col2;keyId2:col3`.
+    /// See [`EncryptionConfig`].
+    EncryptionColumnKeys,
 }
 
 #[allow(deprecated)]
@@ -150,6 +174,11 @@ impl AsRef<str> for TableProperty {
             Self::SetTransactionRetentionDuration => "delta.setTransactionRetentionDuration",
             Self::TargetFileSize => "delta.targetFileSize",
             Self::TuneFileSizesForRewrites => "delta.tuneFileSizesForRewrites",
+            Self::EncryptionKmsId => ENCRYPTION_KMS_ID_PROP,
+            Self::EncryptionKmsConfiguration => ENCRYPTION_KMS_CONFIGURATION_PROP,
+            Self::EncryptionFooterKey => ENCRYPTION_FOOTER_KEY_PROP,
+            Self::EncryptionPlaintextFooter => ENCRYPTION_PLAINTEXT_FOOTER_PROP,
+            Self::EncryptionColumnKeys => ENCRYPTION_COLUMN_KEYS_PROP,
         }
     }
 }
@@ -188,6 +217,11 @@ impl FromStr for TableProperty {
             "delta.setTransactionRetentionDuration" => Ok(Self::SetTransactionRetentionDuration),
             "delta.targetFileSize" => Ok(Self::TargetFileSize),
             "delta.tuneFileSizesForRewrites" => Ok(Self::TuneFileSizesForRewrites),
+            ENCRYPTION_KMS_ID_PROP => Ok(Self::EncryptionKmsId),
+            ENCRYPTION_KMS_CONFIGURATION_PROP => Ok(Self::EncryptionKmsConfiguration),
+            ENCRYPTION_FOOTER_KEY_PROP => Ok(Self::EncryptionFooterKey),
+            ENCRYPTION_PLAINTEXT_FOOTER_PROP => Ok(Self::EncryptionPlaintextFooter),
+            ENCRYPTION_COLUMN_KEYS_PROP => Ok(Self::EncryptionColumnKeys),
             _ => Err(DeltaTableError::Generic("unknown config key".into())),
         }
     }

@@ -3,8 +3,10 @@
 
 use std::collections::HashMap;
 
+use delta_kernel::expressions::ColumnName;
 use delta_kernel::schema::{ColumnMetadataKey, MetadataValue};
 use delta_kernel::table_features::{ColumnMappingMode, assign_column_mapping_metadata};
+use delta_kernel::transaction::builder::create_table::validate_encryption_properties;
 use futures::TryStreamExt as _;
 use futures::future::BoxFuture;
 use serde_json::Value;
@@ -17,7 +19,7 @@ use crate::logstore::LogStoreRef;
 use crate::logstore::with_operation;
 use crate::protocol::{DeltaOperation, SaveMode};
 use crate::table::builder::ensure_table_uri;
-use crate::table::config::TableProperty;
+use crate::table::config::{EncryptionConfig, TableProperty};
 use crate::table::normalize_table_url;
 use crate::{DeltaTable, DeltaTableBuilder};
 
@@ -339,11 +341,41 @@ impl CreateBuilder {
             schema
         };
 
-        let mut metadata = new_metadata(
+        let partition_columns = self.partition_columns.unwrap_or_default();
+        // Kernel applies the RFC's CREATE TABLE rules to the encryption properties and
+        // rewrites `column_keys` to physical names; delta-rs adds its own rules on top.
+        EncryptionConfig::check_known_properties(configuration.keys())?;
+        let partition_column_names: Vec<ColumnName> = partition_columns
+            .iter()
+            .map(|name| ColumnName::new([name]))
+            .collect();
+        if validate_encryption_properties(
             &schema,
-            self.partition_columns.unwrap_or_default(),
-            configuration,
-        )?;
+            column_mapping_mode,
+            &partition_column_names,
+            &[], // delta-rs does not create clustered tables
+            &mut configuration,
+        )? {
+            // Files registered at creation (CONVERT TO DELTA) are plaintext, so they cannot
+            // be committed under an encrypted configuration.
+            if self.actions.iter().any(|a| matches!(a, Action::Add(_))) {
+                return Err(DeltaTableError::Generic(
+                    "Invalid table encryption configuration: encryption cannot be configured \
+                     on a table created from existing data files, which are not encrypted"
+                        .to_string(),
+                ));
+            }
+            if let Some(encryption) = EncryptionConfig::try_from_configuration(&configuration)? {
+                encryption.validate_stats_columns(
+                    &configuration,
+                    &schema,
+                    &partition_columns,
+                    column_mapping_mode,
+                )?;
+            }
+        }
+
+        let mut metadata = new_metadata(&schema, partition_columns, configuration)?;
         if let Some(name) = self.name {
             metadata = metadata.with_name(name)?;
         }
@@ -398,6 +430,35 @@ impl std::future::IntoFuture for CreateBuilder {
                             .try_collect::<Vec<_>>()
                             .await?;
                         actions.extend(remove_actions);
+                        // Replace is the one way to change encryption, since every data
+                        // file is removed here; warn that the removed files and old log
+                        // statistics stay in storage until vacuum and log cleanup.
+                        let old_configuration = table.snapshot()?.metadata().configuration();
+                        let new_configuration = actions.iter().find_map(|action| match action {
+                            Action::Metadata(metadata) => Some(metadata.configuration()),
+                            _ => None,
+                        });
+                        if let Some(new_configuration) = new_configuration {
+                            // Already validated by `into_table_and_actions`.
+                            let new = EncryptionConfig::try_from_configuration(new_configuration)?;
+                            let changed =
+                                match EncryptionConfig::try_from_configuration(old_configuration) {
+                                    Ok(old) => {
+                                        EncryptionConfig::frozen_change(old.as_ref(), new.as_ref())
+                                            .is_some()
+                                    }
+                                    // Invalid before: replaced whatever the new one is.
+                                    Err(_) => true,
+                                };
+                            if changed {
+                                tracing::warn!(
+                                    "replacing a table with a different encryption \
+                                     configuration: the replaced data files stay in storage \
+                                     until vacuum, and the old log entries with their \
+                                     column statistics until log cleanup"
+                                );
+                            }
+                        }
                         Some(table.snapshot()?)
                     }
                 }

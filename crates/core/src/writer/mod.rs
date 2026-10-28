@@ -43,7 +43,8 @@ pub(crate) fn ensure_legacy_writer_supports_table(
             operation,
         ));
     }
-
+    // `flush` uploads without a commit check, so refuse before a sink opens.
+    crate::kernel::transaction::PROTOCOL.can_write_to(table.snapshot()?)?;
     Ok(())
 }
 
