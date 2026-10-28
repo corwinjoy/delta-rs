@@ -1058,8 +1058,16 @@ mod tests {
             .await
             .unwrap();
         refused(RecordBatchWriter::for_blind_appends(&blind).unwrap_err());
-        let err = blind.commit(vec![]).await.unwrap_err().to_string();
-        assert!(err.contains("parquetEncryption-dev"), "{err}");
+        // Kernel refuses the commit of a data file without `ack_parquet_encryption`, which
+        // delta-rs only gives once it encrypts.
+        let add = crate::kernel::Add {
+            path: "part-00000.parquet".to_string(),
+            size: 1,
+            data_change: true,
+            ..Default::default()
+        };
+        let err = blind.commit(vec![add]).await.unwrap_err().to_string();
+        assert!(err.contains("ack_parquet_encryption"), "{err}");
     }
 
     /// Removing encryption would leave a table mixing encrypted and plaintext files, so it is
