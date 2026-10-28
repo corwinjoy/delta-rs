@@ -353,6 +353,7 @@ impl CreateBuilder {
             &schema,
             column_mapping_mode,
             &partition_column_names,
+            &[], // delta-rs does not create clustered tables
             &mut configuration,
         )? {
             // Files registered at creation (CONVERT TO DELTA) are plaintext, so they cannot
